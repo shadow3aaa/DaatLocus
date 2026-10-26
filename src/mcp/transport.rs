@@ -1,4 +1,5 @@
 use super::*;
+use crate::operation_deadline::Deadline;
 use crate::{
     host_process::HostChild,
     sandbox::{SandboxProcessOptions, SandboxStdio},
@@ -16,6 +17,29 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+
+struct CancelRequest {
+    peer: rmcp::Peer<RoleClient>,
+    id: Option<rmcp::model::RequestId>,
+}
+impl Drop for CancelRequest {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        let peer = self.peer.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    peer.notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                        Some(id),
+                        Some("DL stopped waiting; execution effects may be uncertain".into()),
+                    )),
+                )
+                .await;
+            });
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Handler(pub Arc<AtomicBool>);
@@ -161,6 +185,7 @@ pub struct Session {
     pub service: Option<RunningService<RoleClient, Handler>>,
     child: Option<ProcessGuard>,
     pub dirty: Arc<AtomicBool>,
+    timeouts: Timeouts,
 }
 impl Session {
     pub fn ensure_authority(&self, context: &AppToolExecutionContext) -> Result<()> {
@@ -175,14 +200,18 @@ impl Session {
     }
     pub async fn connect(source: &Source, context: &AppToolExecutionContext) -> Result<Self> {
         source.validate()?;
+        let timeouts = source.timeouts().clone();
+        let startup = Deadline::after_ms(timeouts.startup_timeout_ms)?;
         let dirty = Arc::new(AtomicBool::new(false));
         let handler = Handler(dirty.clone());
         let mut child_guard = None;
         let service = match source {
-            Source::Http { url, bearer_token } => {
+            Source::Http {
+                url, bearer_token, ..
+            } => {
                 let client = crate::http_client::builder()
                     .redirect(reqwest::redirect::Policy::none())
-                    .connect_timeout(Duration::from_secs(5))
+                    .connect_timeout(Duration::from_millis(timeouts.connect_timeout_ms))
                     .build()
                     .map_err(|_| miette!("MCP HTTP transport unavailable"))?;
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone())
@@ -193,7 +222,8 @@ impl Session {
                     config = config.auth_header(token.clone());
                 }
                 let transport = StreamableHttpClientTransport::with_client(client, config);
-                tokio::time::timeout(Duration::from_secs(20), handler.serve(transport))
+                startup
+                    .wait(handler.serve(transport))
                     .await
                     .map_err(|_| miette!("MCP handshake timed out"))?
                     .map_err(|_| {
@@ -204,6 +234,7 @@ impl Session {
                 command,
                 arguments,
                 environment,
+                ..
             } => {
                 #[cfg(windows)]
                 let (command, arguments) =
@@ -224,9 +255,8 @@ impl Session {
                     }
                 }
                 let _cancel = CancelStartup(cancelled.clone());
-                let child = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
+                let child = startup
+                    .wait(tokio::task::spawn_blocking(move || {
                         ProcessGuard::spawn(
                             administrator,
                             &command,
@@ -241,16 +271,16 @@ impl Session {
                                 capture_denials: false,
                             },
                         )
-                    }),
-                )
-                .await
-                .map_err(|_| miette!("MCP process startup timed out"))?
-                .into_diagnostic()?
-                .map_err(|_| miette!("MCP process could not start"))?;
+                    }))
+                    .await
+                    .map_err(|_| miette!("MCP process startup timed out"))?
+                    .into_diagnostic()?
+                    .map_err(|_| miette!("MCP process could not start"))?;
                 let mut guard = Self {
                     service: None,
                     child: Some(child),
                     dirty: dirty.clone(),
+                    timeouts: timeouts.clone(),
                 };
                 let child = guard.child.as_mut().unwrap();
                 let input = child
@@ -259,11 +289,9 @@ impl Session {
                 let output = child
                     .take_stdout()
                     .ok_or_else(|| miette!("MCP stdout unavailable"))?;
-                let result = tokio::time::timeout(
-                    Duration::from_secs(20),
-                    handler.serve(AsyncRwTransport::new_client(output, input)),
-                )
-                .await;
+                let result = startup
+                    .wait(handler.serve(AsyncRwTransport::new_client(output, input)))
+                    .await;
                 let result = match result {
                     Ok(Ok(service)) => service,
                     outcome => {
@@ -292,28 +320,64 @@ impl Session {
             service: Some(service),
             child: child_guard,
             dirty,
+            timeouts,
         })
     }
-    pub async fn tools(&mut self) -> Result<Vec<Tool>> {
-        // Clear before discovery so a notification racing the query remains pending.
-        self.dirty.store(false, Ordering::Release);
+    async fn request(
+        &self,
+        request: rmcp::model::ClientRequest,
+    ) -> Result<rmcp::model::ServerResult> {
         let service = self
             .service
             .as_ref()
             .ok_or_else(|| miette!("MCP session closed"))?;
+        let deadline = Deadline::after_ms(self.timeouts.request_timeout_ms)?;
+        deadline.wait(async {
+            let mut handle = service.send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+                .await.map_err(|_| miette!("MCP request could not be sent; effects may be uncertain, do not replay"))?;
+            let mut cancellation = CancelRequest { peer: handle.peer.clone(), id: Some(handle.id.clone()) };
+            let response = (&mut handle.rx).await.map_err(|_| miette!("MCP disconnected; effects may be uncertain, do not replay"))?;
+            cancellation.id.take();
+            response.map_err(|_| miette!("MCP request failed; effects may be uncertain, do not replay"))
+        }).await.map_err(|_| miette!("MCP request deadline exceeded; cancellation requested, effects are uncertain, do not replay"))?
+    }
+    pub async fn call_tool(
+        &self,
+        params: rmcp::model::CallToolRequestParams,
+    ) -> Result<rmcp::model::CallToolResult> {
+        match self
+            .request(rmcp::model::ClientRequest::CallToolRequest(
+                rmcp::model::CallToolRequest::new(params),
+            ))
+            .await?
+        {
+            rmcp::model::ServerResult::CallToolResult(result) => Ok(result),
+            _ => Err(miette!(
+                "MCP returned an unsupported tool response; do not replay"
+            )),
+        }
+    }
+    pub async fn tools(&mut self) -> Result<Vec<Tool>> {
+        // Clear before discovery so a notification racing the query remains pending.
+        self.dirty.store(false, Ordering::Release);
         let mut tools = Vec::new();
         let mut cursor = None;
         let mut cursors = HashSet::new();
         loop {
-            let page = tokio::time::timeout(
-                Duration::from_secs(20),
-                service.list_tools(cursor.clone().map(|cursor| {
-                    rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor))
-                })),
-            )
-            .await
-            .map_err(|_| miette!("MCP tool discovery timed out"))?
-            .map_err(|_| miette!("MCP tool discovery failed"))?;
+            let response = self
+                .request(rmcp::model::ClientRequest::ListToolsRequest(
+                    rmcp::model::ListToolsRequest {
+                        method: Default::default(),
+                        extensions: Default::default(),
+                        params: cursor.clone().map(|cursor| {
+                            rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor))
+                        }),
+                    },
+                ))
+                .await?;
+            let rmcp::model::ServerResult::ListToolsResult(page) = response else {
+                return Err(miette!("MCP returned an invalid tool list"));
+            };
             for tool in page.tools {
                 let name = tool.name.into_owned();
                 tools.push(Tool {

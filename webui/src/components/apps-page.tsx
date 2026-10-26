@@ -16,6 +16,10 @@ import {
   installApp,
   listApps,
   setAppEnabled,
+  setAppTimeouts,
+  cancelAppInstallation,
+  defaultAppTimeouts,
+  type AppTimeouts,
   type AppDetail,
   type InstalledApp,
 } from "@/lib/apps-api";
@@ -69,6 +73,115 @@ function failure(error: unknown) {
   return error instanceof ActorApiError && error.status === 409
     ? t("apps.changed")
     : t("apps.failed");
+}
+
+function TimeoutFields({
+  value,
+  disabled,
+  onChange,
+  onBlur,
+}: {
+  value: string[];
+  disabled?: boolean;
+  onChange(value: string[]): void;
+  onBlur?(): void;
+}) {
+  return (
+    <FieldGroup>
+      {["connect_timeout", "startup_timeout", "request_timeout"].map(
+        (key, index) => (
+          <Field key={key}>
+            <FieldLabel htmlFor={`app-${key}`}>{t(`apps.${key}`)}</FieldLabel>
+            <Input
+              id={`app-${key}`}
+              type="number"
+              min="1"
+              step="1"
+              value={value[index]}
+              placeholder={index ? t("apps.no_deadline") : "30000"}
+              disabled={disabled}
+              onChange={(event) =>
+                onChange(
+                  value.map((old, i) =>
+                    i === index ? event.target.value : old,
+                  ),
+                )
+              }
+              onBlur={onBlur}
+            />
+          </Field>
+        ),
+      )}
+    </FieldGroup>
+  );
+}
+function timeoutValues(timeouts = defaultAppTimeouts) {
+  return [
+    String(timeouts.connect_timeout_ms),
+    timeouts.startup_timeout_ms?.toString() ?? "",
+    timeouts.request_timeout_ms?.toString() ?? "",
+  ];
+}
+function parseTimeouts(values: string[]): AppTimeouts {
+  const numbers = values.map((value) => (value.trim() ? Number(value) : null));
+  if (
+    numbers[0] === null ||
+    numbers.some(
+      (value) => value !== null && (!Number.isSafeInteger(value) || value < 1),
+    )
+  )
+    throw new Error(t("apps.invalid_timeout"));
+  return {
+    connect_timeout_ms: numbers[0],
+    startup_timeout_ms: numbers[1],
+    request_timeout_ms: numbers[2],
+  };
+}
+function TimeoutSettings({
+  app,
+  onChanged,
+  onAccessRevoked,
+}: {
+  app: InstalledApp;
+  onChanged(app: InstalledApp): void;
+  onAccessRevoked(): void;
+}) {
+  const [values, setValues] = useState(() =>
+    timeoutValues(app.source.timeouts),
+  );
+  const [error, setError] = useState("");
+  const current = useRef(app);
+  const saves = useRef(Promise.resolve());
+  useEffect(() => {
+    current.current = app;
+  }, [app]);
+  function save() {
+    let timeouts: AppTimeouts;
+    try {
+      timeouts = parseTimeouts(values);
+    } catch (err) {
+      setError((err as Error).message);
+      return;
+    }
+    saves.current = saves.current.then(async () => {
+      try {
+        const next = await setAppTimeouts(current.current, timeouts);
+        current.current = next;
+        onChanged(next);
+        setError("");
+      } catch (err) {
+        if (err instanceof ActorApiError && err.status === 401)
+          onAccessRevoked();
+        else setError(failure(err));
+      }
+    });
+  }
+  return (
+    <>
+      <TimeoutFields value={values} onChange={setValues} onBlur={save} />
+      {error && <FieldError role="alert">{error}</FieldError>}
+    </>
+  );
 }
 
 export function AppsPage({
@@ -364,6 +477,8 @@ function AddAppDialog({
     [pending, setPending] = useState(false),
     [error, setError] = useState("");
   const alive = useRef(true);
+  const installation = useRef<string | null>(null);
+  const [timeoutInputs, setTimeoutInputs] = useState(() => timeoutValues());
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -386,7 +501,11 @@ function AddAppDialog({
     }
     setPending(true);
     try {
+      const timeouts = parseTimeouts(timeoutInputs);
+      const requestId = crypto.randomUUID();
+      installation.current = requestId;
       const app = await installApp({
+        request_id: requestId,
         name: name.trim(),
         description: description.trim(),
         source:
@@ -395,10 +514,12 @@ function AddAppDialog({
                 transport: "http",
                 url: url.trim(),
                 bearer_token: auth === "token" ? token : null,
+                timeouts,
               }
             : {
                 transport: "stdio",
                 command: command.trim(),
+                timeouts,
                 arguments: argumentsText
                   .split(/\r?\n/)
                   .filter((line) => line.length > 0),
@@ -418,12 +539,14 @@ function AddAppDialog({
       setCommand("");
       setArguments("");
       setEnvironment([]);
+      setTimeoutInputs(timeoutValues());
       onInstalled(app);
     } catch (err) {
       if (!alive.current) return;
       if (err instanceof ActorApiError && err.status === 401) onAccessRevoked();
       else setError(failure(err));
     } finally {
+      installation.current = null;
       if (alive.current) setPending(false);
     }
   }
@@ -650,14 +773,26 @@ function AddAppDialog({
                 </Field>
               </>
             )}
+            <TimeoutFields
+              value={timeoutInputs}
+              onChange={setTimeoutInputs}
+              disabled={pending}
+            />
           </FieldGroup>
           {error && <FieldError role="alert">{error}</FieldError>}
           <div className="dl-add-app-footer">
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
-              disabled={pending}
+              onClick={async () => {
+                if (installation.current) {
+                  try {
+                    await cancelAppInstallation(installation.current);
+                  } catch (err) {
+                    setError(failure(err));
+                  }
+                } else onOpenChange(false);
+              }}
             >
               {t("common.cancel")}
             </Button>
@@ -785,6 +920,16 @@ function AppDetailDialog({
                 </dd>
               </div>
             </dl>
+            <TimeoutSettings
+              key={app.id}
+              app={app}
+              onAccessRevoked={onAccessRevoked}
+              onChanged={(next) => {
+                onChanged(next);
+                if (selected.current === next.id)
+                  setApp((old) => (old ? { ...old, ...next } : old));
+              }}
+            />
             <section className="dl-app-tools">
               <h3>{t("apps.tools")}</h3>
               {app.tools.map((tool) => (

@@ -2775,6 +2775,7 @@ mod tests {
                 crate::mcp::Source::Http {
                     url: server.url.clone(),
                     bearer_token: None,
+                    timeouts: crate::mcp::Timeouts::default(),
                 },
                 &system.owner_app_context().unwrap(),
             )

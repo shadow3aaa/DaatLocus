@@ -27,6 +27,7 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Ping,
     File {
         name: String,
         cwd: PathBuf,
@@ -114,9 +115,11 @@ impl Client {
                             if responses.send(response).await.is_err() || failed {break;}
                         }
                     });
-                    let mut pending=HashMap::<u64,(std::time::Instant,std::sync::mpsc::Sender<std::result::Result<Value,String>>)>::new();
+                    let mut pending=HashMap::<u64,std::sync::mpsc::Sender<std::result::Result<Value,String>>>::new();
                     let mut next=0u64;
-                    let mut deadline=tokio::time::interval(Duration::from_millis(100));
+                    let mut heartbeat=tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(5),Duration::from_secs(5));
+                    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut probe: Option<(u64,std::time::Instant)> = None;
                     loop {
                         tokio::select! {
                             ()=shutdown.notified()=>break,
@@ -125,23 +128,33 @@ impl Client {
                                 if ended.load(Ordering::Acquire) {break;}
                                 if pending.len()>=1024 {let _=command.reply.send(Err("Elevated host is busy".into()));continue;}
                                 let Some(id)=next.checked_add(1) else {break;}; next=id;
-                                pending.insert(id,(std::time::Instant::now(),command.reply));
+                                pending.insert(id,command.reply);
                                 let request=RequestEnvelope {id,request:command.request};
                                 if !matches!(tokio::time::timeout(Duration::from_secs(5),write_frame(&mut writer,&request)).await,Ok(Ok(()))) {break;}
                             },
                             response=replies.recv()=> {
                                 let Some(Ok(response))=response else {break;};
-                                let Some((_,reply))=pending.remove(&response.id) else {break;};
+                                if probe.as_ref().is_some_and(|(id,_)| *id == response.id) {
+                                    probe = None; continue;
+                                }
+                                let Some(reply)=pending.remove(&response.id) else {break;};
                                 let response=response.response;
                                 let _=reply.send(response.error.map_or_else(||Ok(response.value.unwrap_or(Value::Null)),Err));
                             },
-                            _=deadline.tick()=> {
-                                if pending.values().any(|(started,_)|started.elapsed()>Duration::from_secs(30)) {break;}
+                            _=heartbeat.tick()=> {
+                                if let Some((_,started)) = &probe {
+                                    if started.elapsed()>Duration::from_secs(15) {break;}
+                                } else {
+                                    let Some(id)=next.checked_add(1) else {break;}; next=id;
+                                    probe = Some((id,std::time::Instant::now()));
+                                    let request=RequestEnvelope {id,request:Request::Ping};
+                                    if !matches!(tokio::time::timeout(Duration::from_secs(5),write_frame(&mut writer,&request)).await,Ok(Ok(()))) {break;}
+                                }
                             }
                         }
                     }
                     ended.store(true,Ordering::Release);
-                    for (_,(_,reply)) in pending {let _=reply.send(Err("Elevated host disconnected; effects are uncertain, do not replay".into()));}
+                    for (_,reply) in pending {let _=reply.send(Err("Elevated host disconnected; effects are uncertain, do not replay".into()));}
                     reading.abort();let _=reading.await;
                 });
             } else {
@@ -163,7 +176,7 @@ impl Client {
         self.commands
             .try_send(Command { request, reply })
             .map_err(|_| miette!("Elevated host is busy or disconnected"))?;
-        match result.recv_timeout(Duration::from_secs(35)) {
+        match result.recv() {
             Ok(result) => result.map_err(|error| miette!("{error}")),
             Err(_) => {
                 self.close();
@@ -553,6 +566,7 @@ async fn handle(
     files: Arc<tokio::sync::Semaphore>,
 ) -> Result<Value> {
     match request {
+        Request::Ping => Ok(Value::Null),
         Request::File {
             name,
             cwd,

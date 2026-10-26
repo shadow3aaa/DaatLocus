@@ -102,10 +102,7 @@ pub(super) async fn launch_executable(executable: std::path::PathBuf) -> Result<
             let _ = launched.send(result);
         })
         .into_diagnostic()?;
-    let process = tokio::time::timeout(Duration::from_secs(120), response)
-        .await
-        .map_err(|_| miette!("OS administrator authorization timed out"))?
-        .into_diagnostic()??;
+    let process = response.await.into_diagnostic()??;
     tokio::time::timeout(Duration::from_secs(30), server.connect())
         .await
         .map_err(|_| miette!("Elevated native host did not connect"))?
@@ -230,7 +227,6 @@ pub(super) async fn launch_executable(executable: std::path::PathBuf) -> Result<
             #[cfg(not(target_os = "macos"))]
             { let _ = result; return Err(miette!("Administrator authorization was declined or the helper did not connect")); }
         },
-        ()=tokio::time::sleep(Duration::from_secs(120))=>return Err(miette!("OS administrator authorization timed out")),
     };
     if stream.peer_cred().into_diagnostic()?.uid() != 0 {
         return Err(miette!("Elevated host has no root authority"));

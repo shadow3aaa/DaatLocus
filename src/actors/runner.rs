@@ -203,11 +203,24 @@ fn check_interruption(
 async fn refresh_apps(
     system: &ActorSystem,
     actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
     apps: &mut AppManager,
     context: &AppToolExecutionContext,
     refresh: bool,
 ) -> Result<()> {
-    apps.prepare_managed(context, refresh).await?;
+    {
+        let preparation = apps.prepare_managed(context, refresh);
+        tokio::pin!(preparation);
+        loop {
+            tokio::select! {
+                result = &mut preparation => { result?; break; },
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    check_interruption(system, control, message)?;
+                }
+            }
+        }
+    }
     let registry = system.app_registry();
     let replacements = registry
         .entries()
@@ -237,7 +250,7 @@ async fn execute_message(
     let context = system.execution_context(actor, message)?;
     let provider = system.provider(actor)?;
     if actor.id != crate::stage::shared::ACTOR_ID {
-        refresh_apps(system, actor, apps, &context, false).await?;
+        refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
     let tools = apps.model_tool_specs_for_context(&context)?;
     let resuming = system
@@ -298,7 +311,7 @@ async fn execute_message(
         if actor.id != crate::stage::shared::ACTOR_ID
             && system.app_registry().take_refresh(&actor.id)
         {
-            refresh_apps(system, actor, apps, &context, true).await?;
+            refresh_apps(system, actor, message, control, apps, &context, true).await?;
             let tools = apps.model_tool_specs_for_context(&context)?;
             window = ModelContext::load(system, actor, &context, tools).await?;
         }
@@ -1026,7 +1039,7 @@ async fn receive_incoming(
             let previous = std::mem::replace(apps, replacements);
             previous.shutdown().await?;
             let context = system.execution_context(actor, current)?;
-            refresh_apps(system, actor, apps, &context, false).await?;
+            refresh_apps(system, actor, current, control, apps, &context, false).await?;
         }
         if actor.id == crate::stage::shared::ACTOR_ID {
             system.checkpoint_core().await?;
@@ -1305,3 +1318,7 @@ impl ProgressBuffer {
 #[cfg(test)]
 #[path = "runner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runner_timeout_tests.rs"]
+mod timeout_tests;

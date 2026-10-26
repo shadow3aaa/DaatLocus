@@ -4,7 +4,7 @@ use daat_locus_client_protocol::web::{
 };
 use miette::{Result, miette};
 use parking_lot::Mutex;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -85,9 +85,9 @@ impl Host {
         sender
             .try_send(Pending { request, reply })
             .map_err(|_| miette!("Native Web host is busy or disconnected"))?;
-        tokio::time::timeout(Duration::from_secs(35), response).await
-            .map_err(|_| miette!("Native Web request timed out; its navigation outcome is unknown, do not replay automatically"))?
-            .map_err(|_| miette!("Native Web host disconnected; do not replay navigation automatically"))?
+        response.await.map_err(|_| {
+            miette!("Native Web host disconnected; do not replay navigation automatically")
+        })?
     }
 }
 fn validate_browser_page_url(url: &str) -> Result<()> {

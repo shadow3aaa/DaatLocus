@@ -71,6 +71,11 @@ client are connected.
   Device filesystem grants do not constrain server-internal effects. Keep process
   cleanup and require reviewed Sudo for OS administrator execution; ordinary calls
   cannot borrow an administrator connection.
+  Tool execution has no implicit total time limit. Keep transport connection/write
+  and cleanup limits separate from optional operation deadlines. MCP installations
+  persist connection, startup and request timeouts; null startup/request deadlines
+  wait until cancellation. Configuration changes never extend or replay an in-flight
+  effect. Cancel MCP requests by their protocol request ID and retain uncertain outcomes.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
   Core constructs only the portable Actors App. Other Actors receive every

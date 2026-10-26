@@ -10,9 +10,7 @@ pub(super) struct Page {
     pub body: String,
 }
 pub(super) async fn fetch(value: &str) -> Result<Page> {
-    tokio::time::timeout(Duration::from_secs(30), fetch_inner(value))
-        .await
-        .map_err(|_| miette!("Web HTTP deadline exceeded"))?
+    fetch_inner(value).await
 }
 async fn fetch_inner(value: &str) -> Result<Page> {
     let mut current = validate_public_url(value)?;
@@ -26,7 +24,7 @@ async fn fetch_inner(value: &str) -> Result<Page> {
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(host, &addresses)
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(20))
+            .read_timeout(Duration::from_secs(30))
             .build()
             .map_err(|_| miette!("Web HTTP client unavailable"))?;
         let mut response = client

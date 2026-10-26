@@ -13,6 +13,47 @@ use std::{
     sync::Arc,
 };
 
+#[daat_locus_macros::model_schema]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Timeouts {
+    /// Timeout for establishing an individual network connection, in milliseconds.
+    pub connect_timeout_ms: u64,
+    /// Total process startup and MCP handshake deadline; null waits until cancelled.
+    pub startup_timeout_ms: Option<u64>,
+    /// Per-request deadline, including tool discovery; null waits until cancelled.
+    pub request_timeout_ms: Option<u64>,
+}
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: 30_000,
+            startup_timeout_ms: None,
+            request_timeout_ms: None,
+        }
+    }
+}
+impl Timeouts {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.connect_timeout_ms == 0
+            || self.startup_timeout_ms == Some(0)
+            || self.request_timeout_ms == Some(0)
+        {
+            return Err(miette!(
+                "MCP timeouts must be positive milliseconds or null"
+            ));
+        }
+        for value in [
+            Some(self.connect_timeout_ms),
+            self.startup_timeout_ms,
+            self.request_timeout_ms,
+        ] {
+            crate::operation_deadline::Deadline::after_ms(value)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Source {
@@ -20,6 +61,8 @@ pub enum Source {
         url: String,
         #[serde(default)]
         bearer_token: Option<String>,
+        #[serde(default)]
+        timeouts: Timeouts,
     },
     Stdio {
         command: String,
@@ -27,12 +70,22 @@ pub enum Source {
         arguments: Vec<String>,
         #[serde(default)]
         environment: BTreeMap<String, String>,
+        #[serde(default)]
+        timeouts: Timeouts,
     },
 }
 impl Source {
-    pub fn validate(&self) -> Result<()> {
+    pub fn timeouts(&self) -> &Timeouts {
         match self {
-            Self::Http { url, bearer_token } => {
+            Self::Http { timeouts, .. } | Self::Stdio { timeouts, .. } => timeouts,
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        self.timeouts().validate()?;
+        match self {
+            Self::Http {
+                url, bearer_token, ..
+            } => {
                 crate::web_app::validate_url(url)?;
                 let parsed = url::Url::parse(url).into_diagnostic()?;
                 if parsed.fragment().is_some()
@@ -52,6 +105,7 @@ impl Source {
                 command,
                 arguments,
                 environment,
+                ..
             } => {
                 if cfg!(target_os = "android") {
                     return Err(miette!("MCP stdio is unavailable on Android"));
@@ -78,13 +132,19 @@ impl Source {
     }
     pub fn public(&self) -> Value {
         match self {
-            Self::Http { url, bearer_token } => {
+            Self::Http {
+                url,
+                bearer_token,
+                timeouts,
+            } => {
                 let mut url = url::Url::parse(url).expect("validated source");
                 url.set_query(None);
                 url.set_fragment(None);
-                json!({"transport":"http","url":url.as_str(),"credential_configured":bearer_token.is_some()})
+                json!({"transport":"http","url":url.as_str(),"credential_configured":bearer_token.is_some(),"timeouts":timeouts})
             }
-            Self::Stdio { command, .. } => json!({"transport":"stdio","command":command}),
+            Self::Stdio {
+                command, timeouts, ..
+            } => json!({"transport":"stdio","command":command,"timeouts":timeouts}),
         }
     }
 }
@@ -121,6 +181,9 @@ struct State {
     installations: BTreeMap<String, Installation>,
 }
 pub struct Registry {
+    connecting: parking_lot::Mutex<
+        BTreeMap<String, (std::time::Instant, tokio::sync::watch::Sender<bool>)>,
+    >,
     loaded: parking_lot::Mutex<BTreeMap<String, BTreeMap<String, u64>>>,
     path: PathBuf,
     state: RwLock<State>,
@@ -142,6 +205,7 @@ impl Registry {
             validate_tools(&entry.tools)?;
         }
         Ok(Arc::new(Self {
+            connecting: Default::default(),
             loaded: Default::default(),
             path,
             state: RwLock::new(state),
@@ -264,6 +328,57 @@ impl Registry {
         self.persist(candidate)?;
         Ok(entry)
     }
+    pub async fn install_cancellable(
+        &self,
+        request_id: String,
+        name: String,
+        description: String,
+        source: Source,
+        context: &AppToolExecutionContext,
+    ) -> Result<Installation> {
+        uuid::Uuid::parse_str(&request_id)
+            .map_err(|_| miette!("Invalid installation request ID"))?;
+        let (cancel, mut stopped) = tokio::sync::watch::channel(false);
+        {
+            let mut connecting = self.connecting.lock();
+            connecting.retain(|_, (created, token)| {
+                !*token.borrow() || created.elapsed() < std::time::Duration::from_secs(60)
+            });
+            if let Some((_, previous)) = connecting.get(&request_id) {
+                if *previous.borrow() {
+                    connecting.remove(&request_id);
+                    return Err(miette!("MCP installation was cancelled before startup"));
+                }
+                return Err(miette!("Installation request is already active"));
+            }
+            connecting.insert(request_id.clone(), (std::time::Instant::now(), cancel));
+        }
+        struct Cleanup<'a>(&'a Registry, String);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.connecting.lock().remove(&self.1);
+            }
+        }
+        let _cleanup = Cleanup(self, request_id);
+        tokio::select! {
+            biased;
+            _ = stopped.changed() => Err(miette!("MCP installation cancelled; inspect installations before retrying")),
+            result = self.install(name, description, source, context) => result,
+        }
+    }
+    pub fn cancel_installation(&self, request_id: &str) {
+        let mut connecting = self.connecting.lock();
+        connecting.retain(|_, (created, token)| {
+            !*token.borrow() || created.elapsed() < std::time::Duration::from_secs(60)
+        });
+        if let Some((_, cancel)) = connecting.get(request_id) {
+            let _ = cancel.send(true);
+        } else {
+            // Fence cancellation arriving before the corresponding HTTP POST.
+            let (cancel, _) = tokio::sync::watch::channel(true);
+            connecting.insert(request_id.into(), (std::time::Instant::now(), cancel));
+        }
+    }
     pub async fn set_enabled(
         &self,
         id: &str,
@@ -284,6 +399,40 @@ impl Registry {
             return Ok(entry.clone());
         }
         entry.enabled = enabled;
+        entry.revision = next;
+        let result = entry.clone();
+        candidate.revision = next;
+        self.persist(candidate)?;
+        Ok(result)
+    }
+    pub async fn set_timeouts(
+        &self,
+        id: &str,
+        expected: u64,
+        timeouts: Timeouts,
+    ) -> Result<Installation> {
+        timeouts.validate()?;
+        let _guard = self.mutation.lock().await;
+        let mut candidate = self.state.read().clone();
+        let next = candidate.revision + 1;
+        let entry = candidate
+            .installations
+            .get_mut(id)
+            .ok_or_else(|| ActorError::NotFound("App not found".into()))?;
+        if entry.revision != expected {
+            return Err(ActorError::Conflict("App changed; inspect it again".into()).into());
+        }
+        if entry.source.timeouts() == &timeouts {
+            return Ok(entry.clone());
+        }
+        match &mut entry.source {
+            Source::Http {
+                timeouts: current, ..
+            }
+            | Source::Stdio {
+                timeouts: current, ..
+            } => *current = timeouts,
+        }
         entry.revision = next;
         let result = entry.clone();
         candidate.revision = next;

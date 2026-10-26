@@ -36,6 +36,8 @@ struct InstallArgs {
     /// KEY=value entries added to the inherited environment; names must not start with DAAT_LOCUS.
     #[serde(default)]
     environment: Vec<String>,
+    #[serde(default)]
+    timeouts: Option<Timeouts>,
 }
 impl InstallArgs {
     fn environment_map(&self) -> Result<BTreeMap<String, String>> {
@@ -71,6 +73,7 @@ impl InstallArgs {
                         .clone()
                         .ok_or_else(|| miette!("MCP URL is required"))?,
                     bearer_token: None,
+                    timeouts: self.timeouts.clone().unwrap_or_default(),
                 }
             }
             TransportKind::Stdio if self.url.is_none() => Source::Stdio {
@@ -80,6 +83,7 @@ impl InstallArgs {
                     .ok_or_else(|| miette!("MCP command is required"))?,
                 arguments: self.arguments.clone(),
                 environment,
+                timeouts: self.timeouts.clone().unwrap_or_default(),
             },
             _ => {
                 return Err(miette!(
@@ -97,6 +101,14 @@ impl InstallArgs {
 struct ChangeArgs {
     id: String,
     expected_revision: u64,
+}
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ConfigureTimeoutsArgs {
+    id: String,
+    expected_revision: u64,
+    timeouts: Timeouts,
 }
 #[model_schema]
 #[derive(Deserialize, JsonSchema)]
@@ -161,6 +173,10 @@ impl App for AppsManager {
                 "close",
                 "Disable an installed MCP App on this device. Blocks new calls; already started calls may finish. Does not delete history or data.",
             ),
+            spec::<ConfigureTimeoutsArgs>(
+                "configure_timeouts",
+                "Update an installed MCP App's connection, startup and request timeouts in milliseconds. Null startup/request deadlines allow waiting until cancelled. Changes apply at the next settled boundary, without extending or replaying an in-flight call.",
+            ),
         ]
     }
 
@@ -176,17 +192,28 @@ impl App for AppsManager {
         {
             return Err(miette!("Actor identity mismatch"));
         }
-        if matches!(call.name.as_str(), "install" | "enable" | "close")
-            && context
-                .actor_call
-                .as_ref()
-                .is_some_and(|caller| caller.remote_read_only)
+        if matches!(
+            call.name.as_str(),
+            "install" | "enable" | "close" | "configure_timeouts"
+        ) && context
+            .actor_call
+            .as_ref()
+            .is_some_and(|caller| caller.remote_read_only)
         {
             return Err(miette!(
                 "Remote read-only authority cannot change device Apps"
             ));
         }
         match call.name.as_str() {
+            "configure_timeouts" => {
+                let args: ConfigureTimeoutsArgs = args(call)?;
+                let entry = self
+                    .registry
+                    .set_timeouts(&args.id, args.expected_revision, args.timeouts)
+                    .await?;
+                self.registry.request_refresh(&self.actor);
+                return Ok(result("Updated MCP timeouts", entry.public(false)));
+            }
             "install" => {
                 args::<InstallArgs>(call)?.source()?;
             }
@@ -413,25 +440,9 @@ impl App for McpApp {
         }
         self.registry.check(&self.entry.id, self.entry.revision)?;
         self.session.as_ref().unwrap().ensure_authority(context)?;
-        let service = self.session.as_ref().unwrap().service.as_ref().unwrap();
         let params = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().unwrap().clone());
-        let outcome = match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            service.call_tool(params),
-        )
-        .await
-        {
-            Ok(Ok(outcome)) => outcome,
-            outcome => {
-                let reason = if outcome.is_err() {
-                    "MCP call timed out; effects are uncertain, do not replay"
-                } else {
-                    "MCP call failed; effects may be uncertain"
-                };
-                return Err(miette!("{reason}"));
-            }
-        };
+        let outcome = self.session.as_ref().unwrap().call_tool(params).await?;
         let mut payload = serde_json::to_value(outcome).into_diagnostic()?;
         let actor = context
             .actor_call

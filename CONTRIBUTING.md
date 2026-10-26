@@ -994,6 +994,11 @@ not establish Android or macOS runtime coverage.
 Use isolated local MCP servers for protocol, schema, credential, revision and
 uncertain-effect tests. Run `cargo test --lib mcp::tests` and
 `cargo test --test http_api apps::`, alongside Actor permission/runner checks.
+The MCP regressions exercise silent startup/discovery/tool calls beyond the former
+deadlines, explicit request cancellation without replay, installation cancellation,
+timeout persistence and revision checks. The Sudo tests separately verify that a
+healthy heartbeat keeps a long operation alive. Native Web recovery verifies that
+slow calls survive the former outer deadline and that disconnect still cleans up.
 
 Native sandbox, Terminal and Actor approval integration tests run in
 the normal test suite on Windows, Linux and macOS, without a dedicated runner

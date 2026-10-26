@@ -337,15 +337,26 @@ async fn serve_web_host<S: AsyncRead + AsyncWrite + Unpin>(
             continue;
         }
         let result = async {
-            write_frame(&mut writer, &serde_json::to_vec(&pending.request).into_diagnostic()?).await?;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                write_frame(
+                    &mut writer,
+                    &serde_json::to_vec(&pending.request).into_diagnostic()?,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                miette!("Native Web transport write stalled; effects may be uncertain")
+            })??;
             let bytes = tokio::select! {
                 _ = stop.changed() => return Err(miette!("Service is stopping")),
-                response = tokio::time::timeout(Duration::from_secs(32),read_frame(&mut reader,12*1024*1024)) => response.map_err(|_|miette!("Native Web host timed out; do not replay navigation"))??,
+                response = read_frame(&mut reader,12*1024*1024) => response?,
             };
-            let response=serde_json::from_slice(&bytes).into_diagnostic()?;
-            crate::web_host::validate_reply(&pending.request,&response)?;
+            let response = serde_json::from_slice(&bytes).into_diagnostic()?;
+            crate::web_host::validate_reply(&pending.request, &response)?;
             Ok(response)
-        }.await;
+        }
+        .await;
         let failed = result.is_err();
         let _ = pending
             .reply

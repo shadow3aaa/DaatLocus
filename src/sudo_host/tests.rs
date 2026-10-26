@@ -253,6 +253,64 @@ async fn broker_rejects_a_response_for_an_unrelated_request() {
     assert!(client.is_closed());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_broker_keeps_long_operations_alive_without_replaying() {
+    let (parent, helper) = tokio::io::duplex(65536);
+    let client = Client::from_stream(parent);
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let effects = seen.clone();
+    let task = tokio::spawn(async move {
+        let (mut reader, writer) = tokio::io::split(helper);
+        let writer = Arc::new(tokio::sync::Mutex::new(writer));
+        loop {
+            let Ok(request) = read_frame::<_, RequestEnvelope>(&mut reader).await else {
+                break;
+            };
+            let delay = !matches!(request.request, Request::Ping);
+            if delay {
+                effects.fetch_add(1, Ordering::SeqCst);
+            }
+            let writer = writer.clone();
+            tokio::spawn(async move {
+                if delay {
+                    tokio::time::sleep(Duration::from_secs(31)).await;
+                }
+                let _ = write_frame(
+                    &mut *writer.lock().await,
+                    &ResponseEnvelope {
+                        id: request.id,
+                        response: Response {
+                            value: Some(json!("completed")),
+                            error: None,
+                        },
+                    },
+                )
+                .await;
+            });
+        }
+    });
+    let requesting = client.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(40),
+        tokio::task::spawn_blocking(move || {
+            requesting.request(Request::File {
+                name: "fixture".into(),
+                cwd: PathBuf::new(),
+                arguments: json!({}),
+            })
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(result, json!("completed"));
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    assert!(!client.is_closed());
+    client.close();
+    task.abort();
+}
+
 #[cfg(not(target_os = "android"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires DAAT_LOCUS_TEST_COMPANION and interactive OS administrator authorization"]

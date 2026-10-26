@@ -98,9 +98,62 @@ async fn apps_require_owner_origin_and_revision_and_never_return_credentials() {
         detail["tool"]["input_schema"]["additionalProperties"],
         false
     );
+    let timeout_path = format!("/v1/apps/{id}/timeouts");
+    let configured_timeouts =
+        json!({"connect_timeout_ms":9000,"startup_timeout_ms":300000,"request_timeout_ms":null});
+    let update = json!({"expected_revision":app["revision"],"timeouts":configured_timeouts});
+    assert_eq!(
+        fixture
+            .client
+            .post(format!("{}{}", fixture.url, timeout_path))
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fixture
+            .client
+            .post(format!("{}{}", fixture.url, timeout_path))
+            .header("Cookie", cookie.clone())
+            .header("Origin", "https://untrusted.example")
+            .header("x-daat-request", "1")
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = fixture
+        .owner(Method::POST, &timeout_path)
+        .json(&update)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let configured: Value = response.json().await.unwrap();
+    assert_eq!(configured["source"]["timeouts"], configured_timeouts);
+    assert_eq!(configured["id"], app["id"]);
+    assert!(!configured.to_string().contains("app-test-secret"));
+    assert_eq!(
+        fixture
+            .owner(Method::POST, &timeout_path)
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fixture.owner(Method::POST,&timeout_path)
+        .json(&json!({"expected_revision":configured["revision"],"timeouts":{"connect_timeout_ms":0,"startup_timeout_ms":null,"request_timeout_ms":null}}))
+        .send().await.unwrap().status(),StatusCode::UNPROCESSABLE_ENTITY);
     let closed = fixture
         .owner(Method::POST, &format!("/v1/apps/{id}/state"))
-        .json(&json!({"enabled":false,"expected_revision":app["revision"]}))
+        .json(&json!({"enabled":false,"expected_revision":configured["revision"]}))
         .send()
         .await
         .unwrap();

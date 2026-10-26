@@ -757,6 +757,8 @@ x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x
 ## MCP 验证
 
 使用隔离的本地 MCP 服务器验证协议、schema、凭据、修订和不确定效果。
+回归覆盖超过旧时限的无输出启动、发现和工具调用、显式取消且不重放、安装取消竞态、
+超时配置持久化与修订校验；Sudo 单独验证长操作期间的独立心跳，原生 Web 验证慢调用与断线清理。
 运行 `cargo test --lib mcp::tests`、`cargo test --test http_api apps::`，并运行
 Actor 权限与执行循环的相关测试。原生 Terminal 契约验证工作区外读取和程序执行、
 工作区内可写及工作区外拒写，同时 Files 读取仍受作用域限制。MCP stdio 测试在全部

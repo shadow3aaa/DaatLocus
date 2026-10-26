@@ -32,6 +32,7 @@ pub mod model_discovery;
 pub mod model_protocol;
 pub mod open_url;
 pub mod openskills;
+mod operation_deadline;
 mod os_patch;
 pub mod persistence;
 pub mod process_spawn;

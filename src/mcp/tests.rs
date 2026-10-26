@@ -21,6 +21,7 @@ async fn installations_and_tools_survive_reopen_and_growth_beyond_former_quotas(
     let source = Source::Http {
         url: server.url.clone(),
         bearer_token: None,
+        timeouts: crate::mcp::Timeouts::default(),
     };
     let tools: Vec<_> = (0..257).map(|index| Tool {
         name: format!("remote-{index}"), local_name: format!("tool_{index}"), description: String::new(),
@@ -68,6 +69,7 @@ fn installed_connection_public_view_hides_query_fragment_and_credentials() {
     let source = Source::Http {
         url: "https://example.invalid/mcp?target=private-query#private-fragment".into(),
         bearer_token: Some("private-token".into()),
+        timeouts: crate::mcp::Timeouts::default(),
     };
     let public = source.public();
     assert_eq!(public["url"], "https://example.invalid/mcp");
@@ -83,6 +85,12 @@ fn installed_connection_public_view_hides_query_fragment_and_credentials() {
 struct Fake {
     calls: AtomicUsize,
     requests: parking_lot::Mutex<Vec<Value>>,
+    hold_initialize: std::sync::atomic::AtomicBool,
+    hold_list: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    cancelled: tokio::sync::Notify,
+    cancellations: parking_lot::Mutex<Vec<Value>>,
 }
 pub(crate) struct Server {
     pub(crate) url: String,
@@ -98,14 +106,26 @@ async fn rpc(State(state): State<Arc<Fake>>, Json(request): Json<Value>) -> Resp
     let id = &request["id"];
     let result = match request["method"].as_str().unwrap_or_default() {
         "initialize" => {
+            if state.hold_initialize.load(Ordering::SeqCst) {
+                state.entered.notify_one();
+                state.release.notified().await;
+            }
             json!({"protocolVersion":request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"local-test","version":"1"}})
         }
         "tools/list" => {
+            if state.hold_list.load(Ordering::SeqCst) {
+                state.entered.notify_one();
+                state.release.notified().await;
+            }
             json!({"tools":[{"name":"lookup.with space","description":"Look up a record","inputSchema":{"type":"object","properties":{"value":{"oneOf":[{"type":"integer"},{"type":"string"}]},"tag":{"type":["string","null"]}},"required":["value"],"additionalProperties":true}}]})
         }
         "tools/call" => {
             state.calls.fetch_add(1, Ordering::SeqCst);
             state.requests.lock().push(request["params"].clone());
+            if request["params"]["arguments"]["value"] == "hold" {
+                state.entered.notify_one();
+                state.release.notified().await;
+            }
             if request["params"]["arguments"]["value"] == "disconnect" {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
@@ -116,6 +136,11 @@ async fn rpc(State(state): State<Arc<Fake>>, Json(request): Json<Value>) -> Resp
                 return Json(json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"record was rejected"}],"isError":true}})).into_response();
             }
             json!({"content":[{"type":"text","text":"original MCP result"}],"structuredContent":{"received":request["params"]["arguments"]},"isError":false})
+        }
+        "notifications/cancelled" => {
+            state.cancellations.lock().push(request["params"].clone());
+            state.cancelled.notify_one();
+            return StatusCode::ACCEPTED.into_response();
         }
         _ if id.is_null() => return StatusCode::ACCEPTED.into_response(),
         _ => {
@@ -142,6 +167,222 @@ pub(crate) async fn server() -> Server {
         state,
         task,
     }
+}
+
+#[tokio::test]
+async fn default_mcp_deadlines_allow_silent_startup_discovery_and_long_execution() {
+    use std::time::Duration;
+    let server = server().await;
+    let root = tempfile::tempdir().unwrap();
+    let context = context(root.path());
+    let source = Source::Http {
+        url: server.url.clone(),
+        bearer_token: None,
+        timeouts: Timeouts::default(),
+    };
+    server.state.hold_initialize.store(true, Ordering::SeqCst);
+    let connecting =
+        tokio::spawn(async move { transport::Session::connect(&source, &context).await });
+    tokio::time::timeout(Duration::from_secs(3), server.state.entered.notified())
+        .await
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(40)).await;
+    assert!(
+        !connecting.is_finished(),
+        "silent initialization must outlive the old 20s deadline"
+    );
+    tokio::time::resume();
+    server.state.release.notify_one();
+    let mut session = connecting.await.unwrap().unwrap();
+    server.state.hold_list.store(true, Ordering::SeqCst);
+    let discovering = tokio::spawn(async move {
+        let result = session.tools().await;
+        (session, result)
+    });
+    tokio::time::timeout(Duration::from_secs(3), server.state.entered.notified())
+        .await
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(40)).await;
+    assert!(!discovering.is_finished());
+    tokio::time::resume();
+    server.state.release.notify_one();
+    let (session, tools) = discovering.await.unwrap();
+    assert_eq!(tools.unwrap()[0].name, "lookup.with space");
+    let session = Arc::new(session);
+    let active = session.clone();
+    let calling = tokio::spawn(async move {
+        active
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("lookup.with space")
+                    .with_arguments(json!({"value":"hold"}).as_object().unwrap().clone()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), server.state.entered.notified())
+        .await
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(180)).await;
+    assert!(
+        !calling.is_finished(),
+        "silent execution must outlive the old 120s deadline"
+    );
+    tokio::time::resume();
+    server.state.release.notify_one();
+    let result = calling.await.unwrap().unwrap();
+    assert!(!result.is_error.unwrap_or_default());
+    assert_eq!(server.state.calls.load(Ordering::SeqCst), 1);
+    assert!(server.state.cancellations.lock().is_empty());
+    Arc::try_unwrap(session).ok().unwrap().close().await;
+}
+
+#[tokio::test]
+async fn request_deadlines_and_caller_cancellation_send_cancel_without_replaying_effects() {
+    use std::time::Duration;
+    for deadline in [Some(100), None] {
+        let server = server().await;
+        let root = tempfile::tempdir().unwrap();
+        let source = Source::Http {
+            url: server.url.clone(),
+            bearer_token: None,
+            timeouts: Timeouts {
+                request_timeout_ms: deadline,
+                ..Timeouts::default()
+            },
+        };
+        let session = Arc::new(
+            transport::Session::connect(&source, &context(root.path()))
+                .await
+                .unwrap(),
+        );
+        let active = session.clone();
+        let calling = tokio::spawn(async move {
+            active
+                .call_tool(
+                    rmcp::model::CallToolRequestParams::new("lookup.with space")
+                        .with_arguments(json!({"value":"hold"}).as_object().unwrap().clone()),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), server.state.entered.notified())
+            .await
+            .unwrap();
+        if deadline.is_some() {
+            let error = calling.await.unwrap().unwrap_err().to_string();
+            assert!(error.contains("effects are uncertain"));
+        } else {
+            calling.abort();
+            assert!(calling.await.unwrap_err().is_cancelled());
+        }
+        tokio::time::timeout(Duration::from_secs(3), server.state.cancelled.notified())
+            .await
+            .unwrap();
+        assert!(server.state.cancellations.lock()[0]["requestId"].is_number());
+        assert_eq!(server.state.calls.load(Ordering::SeqCst), 1);
+        server.state.release.notify_one();
+        Arc::try_unwrap(session).ok().unwrap().close().await;
+    }
+}
+
+#[tokio::test]
+async fn startup_deadlines_and_installation_cancellation_do_not_install_or_replay() {
+    use std::time::Duration;
+    for early in [false, true] {
+        let server = server().await;
+        server.state.hold_initialize.store(true, Ordering::SeqCst);
+        let root = tempfile::tempdir().unwrap();
+        let registry = Registry::open(root.path().join("apps.json")).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        if early {
+            registry.cancel_installation(&id);
+        }
+        let active = registry.clone();
+        let source = Source::Http {
+            url: server.url.clone(),
+            bearer_token: None,
+            timeouts: Timeouts::default(),
+        };
+        let context = context(root.path());
+        let request_id = id.clone();
+        let install = tokio::spawn(async move {
+            active
+                .install_cancellable(request_id, "Slow".into(), String::new(), source, &context)
+                .await
+        });
+        if !early {
+            tokio::time::timeout(Duration::from_secs(3), server.state.entered.notified())
+                .await
+                .unwrap();
+            registry.cancel_installation(&id);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), install)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(registry.entries().is_empty());
+        server.state.release.notify_one();
+    }
+    let server = server().await;
+    server.state.hold_initialize.store(true, Ordering::SeqCst);
+    let root = tempfile::tempdir().unwrap();
+    let source = Source::Http {
+        url: server.url.clone(),
+        bearer_token: None,
+        timeouts: Timeouts {
+            startup_timeout_ms: Some(100),
+            ..Timeouts::default()
+        },
+    };
+    assert!(
+        transport::Session::connect(&source, &context(root.path()))
+            .await
+            .is_err()
+    );
+    server.state.release.notify_one();
+}
+
+#[tokio::test]
+async fn timeout_configuration_preserves_installation_credentials_and_checks_revision() {
+    let server = server().await;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("apps.json");
+    let registry = Registry::open(path.clone()).unwrap();
+    let old: Source = serde_json::from_value(
+        json!({"transport":"http","url":server.url,"bearer_token":"private"}),
+    )
+    .unwrap();
+    let entry = registry
+        .install("Existing".into(), String::new(), old, &context(root.path()))
+        .await
+        .unwrap();
+    let timeouts = Timeouts {
+        connect_timeout_ms: 9_000,
+        startup_timeout_ms: Some(300_000),
+        request_timeout_ms: None,
+    };
+    let updated = registry
+        .set_timeouts(&entry.id, entry.revision, timeouts.clone())
+        .await
+        .unwrap();
+    assert_eq!(updated.id, entry.id);
+    assert!(
+        registry
+            .set_timeouts(&entry.id, entry.revision, Timeouts::default())
+            .await
+            .is_err()
+    );
+    let persisted = Registry::open(path).unwrap().get(&entry.id).unwrap();
+    assert_eq!(persisted.source.timeouts(), &timeouts);
+    assert_eq!(persisted.tools[0].input_schema, entry.tools[0].input_schema);
+    assert!(
+        matches!(persisted.source, Source::Http { bearer_token: Some(ref token), .. } if token == "private")
+    );
+    assert!(!updated.public(true).to_string().contains("private"));
 }
 fn context(directory: &std::path::Path) -> AppToolExecutionContext {
     AppToolExecutionContext {
@@ -190,6 +431,7 @@ async fn standard_http_install_call_and_close_preserve_mcp_schema_and_credential
             Source::Http {
                 url: server.url.clone(),
                 bearer_token: Some("private-test-credential".into()),
+                timeouts: crate::mcp::Timeouts::default(),
             },
             &context,
         )
@@ -256,6 +498,7 @@ async fn a_failed_remote_effect_is_not_replayed_by_the_transport() {
             Source::Http {
                 url: server.url.clone(),
                 bearer_token: None,
+                timeouts: crate::mcp::Timeouts::default(),
             },
             &context,
         )
@@ -332,6 +575,7 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
             Source::Http {
                 url: server.url.clone(),
                 bearer_token: None,
+                timeouts: crate::mcp::Timeouts::default(),
             },
             &context,
         )
@@ -426,6 +670,7 @@ async fn stdio_uses_host_access_and_preserves_administrator_authority_and_proces
             workspace.join("server.pid").to_string_lossy().into_owned(),
         ],
         environment: BTreeMap::from([("DL_MCP_FIXTURE_TOKEN".into(), "explicit".into())]),
+        timeouts: crate::mcp::Timeouts::default(),
     };
     let entry = registry
         .install("Local".into(), String::new(), source, &context)
@@ -643,6 +888,7 @@ async fn remote_errors_keep_original_content_and_embedded_resources_use_actor_le
             Source::Http {
                 url: server.url.clone(),
                 bearer_token: None,
+                timeouts: crate::mcp::Timeouts::default(),
             },
             &context,
         )

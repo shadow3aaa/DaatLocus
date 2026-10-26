@@ -61,7 +61,7 @@ async fn helper_exits_with_stdin_open_and_fresh_connections_do_not_replay_calls(
     let host = system.web_host();
     let origin = "http://127.0.0.1:41000".to_owned();
     let state = ServiceState::new(system.clone(), origin.clone()).unwrap();
-    for (pending_call, timed_out) in [(false, false), (true, true), (true, false), (false, false)] {
+    for (pending_call, slow_call) in [(false, false), (true, true), (true, false), (false, false)] {
         let server = Server::bind(
             root.clone(),
             root.clone(),
@@ -103,7 +103,7 @@ async fn helper_exits_with_stdin_open_and_fresh_connections_do_not_replay_calls(
                 .is_none()
         );
 
-        let mut interrupted = if pending_call {
+        let interrupted = if pending_call {
             let call = tokio::spawn(close(host.clone()));
             tokio::time::timeout(Duration::from_secs(5), receive(&mut child))
                 .await
@@ -115,20 +115,15 @@ async fn helper_exits_with_stdin_open_and_fresh_connections_do_not_replay_calls(
         // Child::wait closes its own stdin automatically. Keep the pipe outside
         // Child so the test reproduces the native client's open connection.
         let stdin = child.stdin.take().unwrap();
-        if timed_out {
-            // A sleep/wake can exhaust the service's reply deadline while the
-            // native page is still loading. Keep the service itself running.
+        if slow_call {
+            // A slow native operation must survive the former outer deadline.
             tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(33)).await;
-            let result =
-                tokio::time::timeout(Duration::from_secs(1), interrupted.take().unwrap()).await;
+            tokio::time::advance(Duration::from_secs(120)).await;
+            assert!(!interrupted.as_ref().unwrap().is_finished());
             tokio::time::resume();
-            assert!(result.unwrap().unwrap().is_err());
-            assert!(!host.available());
+            assert!(host.available());
         }
-        if !timed_out {
-            drop(server);
-        }
+        drop(server);
         // Do not close child.stdin: the real client is waiting on stdout EOF.
         let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
