@@ -1898,8 +1898,7 @@ impl ActorSystem {
         _context: &AppToolExecutionContext,
     ) -> Result<AgentContent> {
         let mut text = format!(
-            "Message id: {}\nSource: {}\nKind: {:?}\nRelated message: {}\n\n{}",
-            message.id,
+            "Source: {}\nKind: {:?}\nRelated message: {}\n\n{}",
             match &message.source {
                 MessageSource::User => "user".into(),
                 MessageSource::Actor { actor_id } => format!("Actor {actor_id}"),

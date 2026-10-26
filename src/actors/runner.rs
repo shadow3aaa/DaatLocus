@@ -249,7 +249,7 @@ async fn execute_message(
             .store()
             .append_history(&actor.id, &message.id, &[input])?;
     }
-    let mut window = ModelContext::load(system, actor, message, &context, tools).await?;
+    let mut window = ModelContext::load(system, actor, &context, tools).await?;
     let config = system.config();
     let model_name = config.actor_model_name(actor.config.model.as_deref());
     let request_timeout = Duration::from_secs(
@@ -299,7 +299,7 @@ async fn execute_message(
         {
             refresh_apps(system, actor, apps, &context, true).await?;
             let tools = apps.model_tool_specs_for_context(&context)?;
-            window = ModelContext::load(system, actor, message, &context, tools).await?;
+            window = ModelContext::load(system, actor, &context, tools).await?;
         }
         if system.store().turn_yielded(&actor.id, &message.id)? {
             // The successful tool observation is durable and all calls in its

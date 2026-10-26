@@ -29,14 +29,6 @@ impl SystemPrompt {
             .join("\n\n")
     }
 
-    pub fn render_for_input(&self, input: &str) -> String {
-        format!(
-            "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
-            self.render(),
-            input
-        )
-    }
-
     /// Role-wide source files, independent of the current Actor/input.
     pub fn for_role(system: &ActorSystem, core: bool) -> Result<Self> {
         let mut prompt = Self::default();
@@ -67,9 +59,9 @@ impl SystemPrompt {
             "Actor name: {}\n\
             Actor ID: {}\n\
             Workspace: {}\n\
-            Current request read-only: {}\n\
-            A final reply ends the current input and is sent to its original requester, unless Core has already delivered a reply for that input.\n{}",
-            actor.config.name, actor.id, actor.config.workspace.display(), actor.remote_read_only, actor.config.instructions
+            A final reply ends the current input and is sent to its original requester, unless Core has already delivered a reply for that input.\n\
+            Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.\n{}",
+            actor.config.name, actor.id, actor.config.workspace.display(), actor.config.instructions
         ));
         prompt
             .files
