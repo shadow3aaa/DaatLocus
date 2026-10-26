@@ -1484,8 +1484,9 @@ anchors/calibration/usage, not another copy of the working window.
 Runtime input IDs and read-only flags stay outside system instructions; input
 authority is enforced by the execution context. Dynamic inputs and tools are not
 part of the settings visualization.
-Source files are embedded at compile time with `include_str!`; runtime template
-values are filled by `SystemPrompt::for_role`, shared by execution and inspection.
+The `prompt!` declarative macro derives source names, compile-time `include_str!`
+embedding and runtime template substitution from each single file reference.
+`SystemPrompt::for_role` shares the resulting assembly between execution and inspection.
 The inspection API derives its file list, contents, revision and usage metadata
 from that instance, without a separate catalog or configuration. The standalone
 preview uses independent fixed examples rather than production prompt sources.

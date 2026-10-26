@@ -13,6 +13,24 @@ pub(crate) struct SystemPrompt {
     pub files: Vec<PromptFile>,
 }
 
+// One reference supplies both the compiled source and its inspection metadata.
+macro_rules! prompt {
+    ($($path:literal $({ $($key:ident: $value:expr),* $(,)? })?),* $(,)?) => {
+        SystemPrompt {
+            files: vec![$(PromptFile {
+                name: $path.into(),
+                content: {
+                    let content = include_str!(concat!("../prompts/", $path)).to_owned();
+                    $($(let content = content.replace(
+                        concat!("{{", stringify!($key), "}}"), $value,
+                    );)*)?
+                    content
+                },
+            }),*],
+        }
+    };
+}
+
 impl SystemPrompt {
     fn push(&mut self, name: impl Into<String>, content: impl Into<String>) {
         self.files.push(PromptFile {
@@ -37,16 +55,27 @@ impl SystemPrompt {
                 crate::accounts::AccountStore::open(&system.account_credentials_dir())?
                     .current()?
                     .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
-            prompt.push(
-                "core.md",
-                include_str!("../prompts/core.md").replace("{{account_name}}", &account_name),
-            );
+            prompt = prompt!("core.md" { account_name: &account_name });
         }
-        prompt.push("actors.md", include_str!("../prompts/actors.md"));
-        if !core && let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
-            prompt.push(format!("os/{}-patch.md", std::env::consts::OS), patch);
+        prompt.files.extend(prompt!("actors.md").files);
+        if !core {
+            prompt
+                .files
+                .extend(Self::platform(std::env::consts::OS).files);
         }
         Ok(prompt)
+    }
+
+    fn platform(os: &str) -> Self {
+        let mut prompt = match os {
+            "windows" => prompt!("os/windows-patch.md"),
+            "linux" => prompt!("os/linux-patch.md"),
+            "macos" => prompt!("os/macos-patch.md"),
+            "android" => prompt!("os/android-patch.md"),
+            _ => Self::default(),
+        };
+        prompt.files.retain(|file| !file.content.trim().is_empty());
+        prompt
     }
 
     pub async fn load(
@@ -97,5 +126,45 @@ impl SystemPrompt {
             );
         }
         Ok(prompt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PromptFile, SystemPrompt};
+
+    #[test]
+    fn file_references_assemble_ordered_sources_and_runtime_templates() {
+        let account_name = String::from("Alice");
+        let prompt = prompt!("core.md" { account_name: &account_name }, "actors.md");
+        assert_eq!(
+            prompt
+                .files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["core.md", "actors.md"],
+        );
+        assert!(
+            prompt
+                .render()
+                .starts_with("You are DaatLocus, Alice's assistant.")
+        );
+        assert!(!prompt.render().contains("{{account_name}}"));
+        assert_eq!(
+            prompt.files[1].content,
+            include_str!("../prompts/actors.md")
+        );
+        assert!(prompt.render().ends_with(&prompt.files[1].content));
+    }
+
+    #[test]
+    fn platform_assembly_omits_empty_and_unknown_sources() {
+        let windows = SystemPrompt::platform("windows");
+        assert_eq!(windows.files[0].name, "os/windows-patch.md");
+        assert!(windows.render().contains("MSIX"));
+        for os in ["linux", "macos", "android", "unknown"] {
+            assert!(SystemPrompt::platform(os).files.is_empty());
+        }
     }
 }

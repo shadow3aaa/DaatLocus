@@ -6059,7 +6059,7 @@ async fn runner_prompt_keeps_identity_stable_across_request_authority() {
     for read_only in [false, true] {
         actor.remote_read_only = read_only;
         let assembled = SystemPrompt::load(&system, &actor, &context).await.unwrap();
-        if crate::os_patch::for_os(std::env::consts::OS).is_some() {
+        if cfg!(target_os = "windows") {
             let name = format!("os/{}-patch.md", std::env::consts::OS);
             assert!(
                 assembled.files.iter().any(|file| file.name == name),
