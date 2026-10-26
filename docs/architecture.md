@@ -1460,7 +1460,7 @@ Android 继续保持现有 App 可用性边界。外部工具仍按平台安装�
 `actors::prompt::SystemPrompt` owns the ordered instruction files and assembles the
 exact system text for execution. Generated Actor metadata, role/platform sources,
 the scoped Skills catalog and authorized workspace AGENTS.md use this one path;
-Core excludes project instructions and Skills. `ModelContext` owns the transient
+Core excludes platform patches, project instructions and Skills. `ModelContext` owns the transient
 system message, replay-balanced working history and current App definitions. It
 loads bounded history pages, applies model-bound budget calibration, admits model
 requests and prepares handoff generation within budget. The runner orchestrates

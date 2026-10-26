@@ -15,4 +15,6 @@ description: Install, configure or troubleshoot a standard MCP server as a devic
 
 Check the actual executable, working directory and environment. Diagnose dependency, command resolution, connection, authentication and handshake failures from their recorded diagnostics.
 
+Fix the dependency, executable path, environment or credentials identified by the diagnostics. Obtain approved OS privileges when the server requires them.
+
 Check actual effects after a timeout before retrying.

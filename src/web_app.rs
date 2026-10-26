@@ -332,7 +332,7 @@ impl App for WebApp {
             Some(payload.to_string()),
         );
         result.overflow_continuation = Some(
-            "Document references and text/link continuation offsets are included in the result."
+            "Recover omitted text or links by continuing from the returned document references and pagination positions."
                 .into(),
         );
         Ok(result)

@@ -201,7 +201,8 @@ Sandbox expansion uses the unified review/application path.
   turn completion; yielding waits for the current tool protocol group to settle.
   Completing an input does not complete its delegated work. Progress and results
   return as correlated inputs; Core chooses meaningful user updates without polling
-  or a second fast-response model. Do not load device project instructions into Core.
+  or a second fast-response model. Core excludes platform patches, device project
+  instructions and Skills.
 - The Agent loop has no fixed message, ReAct-step or tool-batch count limit. On
   input-budget pressure have the current Actor write a handoff note before clearing
   the working window and injecting archive recovery instructions; preserve durable
@@ -510,8 +511,9 @@ schemas; do not silently repair them through provider-specific normalization.
 - Keep prompts short and imperative. Define desired actions with positive
   instructions; keep each rule focused and state it once.
   Ground instructions in context the reading model can observe and actions it
-  can perform through its outputs or tools. Keep explanations, examples and
-  implementation details only when necessary to make an instruction actionable.
+  can perform through its outputs or tools. Preserve abstract solution and recovery
+  methods; keep concrete call names and parameter recipes in schemas. Keep
+  explanations, examples and implementation details only when needed for action.
   Integrate user-facing language requirements into the reply style: concise
   natural language, task names, and avoidance of raw tool names and internal
   details. Provide technical detail when requested or needed for a user decision.

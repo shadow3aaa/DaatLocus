@@ -219,7 +219,7 @@ fn spill_marker(path: &Path, total_chars: usize, line_count: usize) -> String {
         "[tool output truncated: showing part of {total_chars} chars]\n\
          Full output ({line_count} lines) is at:\n\
          {path}\n\
-         Temporary file; retention: {} minutes.",
+         Read the needed portions before the temporary file expires in {} minutes.",
         SPILL_TTL.as_secs() / 60
     )
 }

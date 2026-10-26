@@ -5598,10 +5598,15 @@ async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hos
             system.install_shared_core(&controller);
         }
         assert_eq!(system.local_core(), local);
-        let prompt = SystemPrompt::load(&system, &actor, &context)
-            .await
-            .unwrap()
-            .render();
+        let assembled = SystemPrompt::load(&system, &actor, &context).await.unwrap();
+        assert!(
+            assembled
+                .files
+                .iter()
+                .all(|file| !file.name.starts_with("os/")),
+            "Core must not receive execution-device platform patches"
+        );
+        let prompt = assembled.render();
         assert_shared_actor_instructions(&prompt);
         assert!(!prompt.contains("Device project instructions must stay out of Core."));
         assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
@@ -6053,10 +6058,15 @@ async fn runner_prompt_keeps_identity_stable_across_request_authority() {
     let mut previous_prompt = None;
     for read_only in [false, true] {
         actor.remote_read_only = read_only;
-        let prompt = SystemPrompt::load(&system, &actor, &context)
-            .await
-            .unwrap()
-            .render();
+        let assembled = SystemPrompt::load(&system, &actor, &context).await.unwrap();
+        if crate::os_patch::for_os(std::env::consts::OS).is_some() {
+            let name = format!("os/{}-patch.md", std::env::consts::OS);
+            assert!(
+                assembled.files.iter().any(|file| file.name == name),
+                "execution Actors must retain their platform patch"
+            );
+        }
+        let prompt = assembled.render();
         let expected = format!(
             "Actor name: {}\nActor ID: {}\nWorkspace: {}\n",
             actor.config.name,

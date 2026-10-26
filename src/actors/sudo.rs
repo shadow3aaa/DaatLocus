@@ -127,7 +127,7 @@ pub(crate) async fn review(
                 "Sudo application could not be submitted",
                 payload.clone(),
                 Some(format!(
-                    "{payload}\nNo operation was executed. Resolve the submission failure before continuing."
+                    "{payload}\nNo operation was executed. Resolve the submission failure, then retry the existing application."
                 )),
             );
             result.failure = Some(error);

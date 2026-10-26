@@ -121,7 +121,7 @@ impl App for FilesApp {
                             .saturating_sub(1024)
                 }) {
                     output.overflow_continuation = Some(format!(
-                        "Source file: {}. Start line: {}. Returned lines: {}.",
+                        "Source file: {}. Start line: {}. Returned lines: {}. Recover omitted content by reading smaller ranges.",
                         serde_json::to_string(&args.path)
                             .map_err(|_| miette!("invalid file path"))?,
                         result.start_line,

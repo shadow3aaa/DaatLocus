@@ -62,6 +62,31 @@ async fn role_prompt_files_match_sources_and_reject_stale_or_invalid_reads() {
                 .status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+        let catalog: Value = fixture
+            .owner(
+                Method::GET,
+                &format!("/v1/system-prompt?role={role}&limit=100"),
+            )
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let has_platform_patch = catalog["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["name"].as_str().unwrap().starts_with("os/"));
+        assert_eq!(
+            has_platform_patch,
+            role != "core"
+                && !include_str!("../../src/prompts/os/windows-patch.md")
+                    .trim()
+                    .is_empty()
+                && cfg!(target_os = "windows"),
+            "the inspected assembly must enforce the same Core/platform boundary as execution"
+        );
         if role == "core" {
             let next: Value = fixture
                 .owner(

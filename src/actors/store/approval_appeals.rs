@@ -220,7 +220,7 @@ impl ActorStore {
                 remote_authority:None,
                 content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,
                     "decision":decision, "reason":reason,
-                    "instruction":"No operation was executed. Recheck the current state and continue within the recorded decision."
+                    "instruction":"No operation was executed. If approved and still needed, recheck the target and retry the original operation."
                     }).to_string(),
                 attachments:vec![], status:MessageStatus::Queued, cancel_requested:false,
                 started_at_ms:None, finished_at_ms:None, final_generation:None, reply:None,error:None,

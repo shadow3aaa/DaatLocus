@@ -317,7 +317,7 @@ pub fn bound_output(
             text.as_bytes(),
         )?;
         Some(format!(
-            "Full output resource: {}. Resource ID: {}.",
+            "Read omitted output from resource {} (ID: {}) as needed.",
             resource.uri(actor),
             resource.id
         ))

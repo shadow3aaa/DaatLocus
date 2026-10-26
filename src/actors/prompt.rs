@@ -43,7 +43,7 @@ impl SystemPrompt {
             );
         }
         prompt.push("actors.md", include_str!("../prompts/actors.md"));
-        if let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
+        if !core && let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
             prompt.push(format!("os/{}-patch.md", std::env::consts::OS), patch);
         }
         Ok(prompt)

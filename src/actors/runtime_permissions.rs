@@ -118,6 +118,7 @@ impl PermissionReference {
             "\n{}\n",
             serde_json::json!({"permission_reference":self})
         ));
+        content.push_str("If missing access blocks the task, request only the required access using this reference.");
     }
 }
 
