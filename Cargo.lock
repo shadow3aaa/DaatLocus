@@ -1312,6 +1312,7 @@ dependencies = [
  "chrono",
  "clap",
  "daat-locus-auth",
+ "daat-locus-bash",
  "daat-locus-client-protocol",
  "daat-locus-macros",
  "daat-locus-sandbox",
@@ -1429,6 +1430,20 @@ dependencies = [
  "sha2 0.10.9",
  "wasm-bindgen",
  "zeroize",
+]
+
+[[package]]
+name = "daat-locus-bash"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "daat-locus-sandbox",
+ "miette",
+ "parking_lot",
+ "rubash",
+ "serde",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4412,6 +4427,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5312,6 +5337,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubash"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de94bd354b43c6aae046a5ea96affc0356229733831d2aae8de40455e3becb07"
+dependencies = [
+ "libc",
+ "os_pipe",
+ "regex",
+ "sha2 0.10.9",
+ "signal-hook",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5939,6 +5978,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"

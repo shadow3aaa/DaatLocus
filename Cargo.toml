@@ -40,6 +40,7 @@ members = [
     "crates/daat-locus-macros",
     "crates/daat-locus-auth",
     "crates/daat-locus-sandbox",
+    "crates/daat-locus-bash",
     "crates/daat-locus-client-protocol",
     "crates/daat-locus-virtual-workspace",
     "crates/daat-locus-virtual-workspace/hook",
@@ -112,6 +113,7 @@ openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
 daat-locus-macros = { version = "0.2.1", path = "crates/daat-locus-macros" }
 daat-locus-auth = { path = "crates/daat-locus-auth" }
 daat-locus-sandbox = { path = "crates/daat-locus-sandbox" }
+daat-locus-bash = { path = "crates/daat-locus-bash" }
 daat-locus-client-protocol = { path = "crates/daat-locus-client-protocol" }
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 getrandom = "0.4.2"

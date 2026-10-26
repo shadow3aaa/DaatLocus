@@ -12,18 +12,18 @@ use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
-use crate::sandbox::{
-    RuntimeSandboxPolicy, SandboxAsyncChild, SandboxChildStdin, SandboxProcessOptions, SandboxStdio,
-};
+use crate::{Child, Input, ProcessPolicy};
+use daat_locus_sandbox::{SandboxProcessOptions, SandboxStdio};
 
 pub const DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 
-pub struct TerminalProcess {
-    child: SandboxAsyncChild,
-    stdin: Option<SandboxChildStdin>,
+pub struct TerminalProcess<P: ProcessPolicy> {
+    child: P::Child,
+    stdin: Option<Input>,
     output: Arc<Mutex<HeadTailOutputBuffer>>,
     active_readers: Arc<AtomicUsize>,
     output_drained: Arc<Notify>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,14 +60,14 @@ struct OutputSegment {
     bytes: Vec<u8>,
 }
 
-impl TerminalProcess {
-    pub(super) fn ensure_policy(&self, current: &RuntimeSandboxPolicy) -> miette::Result<()> {
+impl<P: ProcessPolicy> TerminalProcess<P> {
+    pub(crate) fn ensure_policy(&self, current: &P) -> miette::Result<()> {
         self.child.ensure_policy(current)
     }
     pub fn spawn(
         command: &str,
         workdir: Option<&str>,
-        sandbox_policy: &RuntimeSandboxPolicy,
+        sandbox_policy: &P,
     ) -> std::io::Result<Self> {
         Self::spawn_with_output_capacity(
             command,
@@ -80,7 +80,7 @@ impl TerminalProcess {
     pub fn spawn_with_output_capacity(
         command: &str,
         workdir: Option<&str>,
-        sandbox_policy: &RuntimeSandboxPolicy,
+        sandbox_policy: &P,
         output_buffer_capacity: usize,
     ) -> std::io::Result<Self> {
         Self::spawn_cancellable(
@@ -92,21 +92,24 @@ impl TerminalProcess {
         )
     }
 
-    pub(super) fn spawn_cancellable(
+    pub(crate) fn spawn_cancellable(
         command: &str,
         workdir: Option<&str>,
-        sandbox_policy: &RuntimeSandboxPolicy,
+        sandbox_policy: &P,
         output_buffer_capacity: usize,
         spawn_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> std::io::Result<Self> {
-        let (shell_program, shell_args) = shell_invocation(command);
+        let (shell_program, shell_args) =
+            crate::shell_invocation(&sandbox_policy.shell_executable()?, command)?;
         let process_policy = sandbox_policy.clone();
-        let mut child = SandboxAsyncChild::spawn_shell(
-            &process_policy,
+        let mut child = process_policy.spawn(
             &shell_program,
             shell_args,
             SandboxProcessOptions {
-                environment: Vec::new(),
+                environment: crate::ENVIRONMENT
+                    .iter()
+                    .map(|(key, value)| ((*key).into(), (*value).into()))
+                    .collect(),
                 current_dir: workdir.map(PathBuf::from),
                 stdin: SandboxStdio::Piped,
                 stdout: SandboxStdio::Piped,
@@ -127,21 +130,22 @@ impl TerminalProcess {
         let active_readers = Arc::new(AtomicUsize::new(reader_count));
         let output_drained = Arc::new(Notify::new());
 
+        let mut readers = Vec::new();
         if let Some(stdout) = stdout {
-            spawn_reader(
+            readers.push(spawn_reader(
                 stdout,
                 output.clone(),
                 active_readers.clone(),
                 output_drained.clone(),
-            );
+            ));
         }
         if let Some(stderr) = stderr {
-            spawn_reader(
+            readers.push(spawn_reader(
                 stderr,
                 output.clone(),
                 active_readers.clone(),
                 output_drained.clone(),
-            );
+            ));
         }
 
         Ok(Self {
@@ -150,6 +154,7 @@ impl TerminalProcess {
             output,
             active_readers,
             output_drained,
+            readers,
         })
     }
 
@@ -194,7 +199,7 @@ impl TerminalProcess {
     }
 
     /// Native denial records captured for this process, when available.
-    pub(super) fn take_denial_report(&mut self) -> crate::sandbox::DenialReport {
+    pub(crate) fn take_denial_report(&mut self) -> daat_locus_sandbox::DenialReport {
         self.child.take_denial_report()
     }
 
@@ -400,7 +405,8 @@ fn spawn_reader<R>(
     output: Arc<Mutex<HeadTailOutputBuffer>>,
     active_readers: Arc<AtomicUsize>,
     output_drained: Arc<Notify>,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -423,7 +429,7 @@ fn spawn_reader<R>(
         if active_readers.fetch_sub(1, Ordering::AcqRel) == 1 {
             output_drained.notify_waiters();
         }
-    });
+    })
 }
 
 fn take_valid_utf8_prefix(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -444,250 +450,18 @@ fn take_valid_utf8_prefix(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     }
 }
 
-fn shell_invocation(command: &str) -> (String, Vec<String>) {
-    let shell_command = shell_command(command);
-    if cfg!(windows) {
-        (
-            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-                .join("System32/WindowsPowerShell/v1.0/powershell.exe")
-                .to_string_lossy()
-                .into_owned(),
-            vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                shell_command,
-            ],
-        )
-    } else {
-        // macOS PATH often selects Homebrew bash, whose executable and dylibs
-        // require ordinary extra scopes. The default shell is the OS runtime;
-        // selecting it must not silently depend on third-party installations.
-        let program = if cfg!(target_os = "macos") {
-            "/bin/bash"
-        } else {
-            "bash"
-        };
-        (program.into(), vec!["-lc".to_string(), shell_command])
+impl<P: ProcessPolicy> Drop for TerminalProcess<P> {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        for reader in &self.readers {
+            reader.abort();
+        }
     }
-}
-
-fn shell_command(command: &str) -> String {
-    if cfg!(windows) {
-        let prefix = terminal_env_defaults()
-            .iter()
-            .map(|(name, value)| format!("$env:{name}={}", powershell_single_quoted(value)))
-            .collect::<Vec<_>>()
-            .join("; ");
-        format!(
-            "{}; {prefix}; {command}",
-            crate::process_spawn::POWERSHELL_UTF8_BOOTSTRAP
-        )
-    } else {
-        let prefix = terminal_env_defaults()
-            .iter()
-            .map(|(name, value)| format!("{name}={}", sh_single_quoted(value)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("export {prefix}; {command}")
-    }
-}
-
-const fn terminal_env_defaults() -> [(&'static str, &'static str); 11] {
-    [
-        ("NO_COLOR", "1"),
-        ("TERM", "dumb"),
-        ("LANG", "C.UTF-8"),
-        ("LC_CTYPE", "C.UTF-8"),
-        ("LC_ALL", "C.UTF-8"),
-        ("COLORTERM", ""),
-        ("PAGER", "cat"),
-        ("GIT_PAGER", "cat"),
-        ("GH_PAGER", "cat"),
-        ("DAAT_LOCUS_CI", "1"),
-        ("PYTHONIOENCODING", "utf-8"),
-    ]
-}
-
-fn sh_single_quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn powershell_single_quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::HeadTailOutputBuffer;
-    #[cfg(windows)]
-    use super::shell_command;
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn terminal_shell_runs_inside_required_native_isolation() {
-        if !crate::sandbox::test_support::native_sandbox_available() {
-            return;
-        }
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
-
-        let workspace = tempfile::Builder::new()
-            .prefix("native sandbox workspace ")
-            .tempdir()
-            .unwrap();
-        // Hosted Windows runners can expose Temp through an 8.3 user-profile
-        // alias. Exercise the OS spelling when the volume supplies one.
-        let path = workspace
-            .path()
-            .as_os_str()
-            .encode_wide()
-            .chain([0])
-            .collect::<Vec<_>>();
-        let mut short = vec![0u16; 32768];
-        let length =
-            unsafe { GetShortPathNameW(path.as_ptr(), short.as_mut_ptr(), short.len() as u32) };
-        assert!(length > 0 && length < short.len() as u32);
-        let workdir =
-            std::path::PathBuf::from(std::ffi::OsString::from_wide(&short[..length as usize]));
-        let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-        policy.filesystem.full_disk_read = false;
-        policy.filesystem.full_disk_write = false;
-        policy.filesystem.readable_roots = vec![workspace.path().to_path_buf()];
-        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
-            root: workspace.path().to_path_buf(),
-            read_only_subpaths: vec![],
-        }];
-        let mut process = super::TerminalProcess::spawn(
-            "Write-Output 'native-terminal-ok'",
-            workdir.to_str(),
-            &policy,
-        )
-        .expect("absolute system shell must start with required MXC/PSEC isolation");
-        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            loop {
-                if let Some(status) = process.try_wait().unwrap() {
-                    break status;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("terminal exited");
-        assert!(
-            process
-                .wait_for_output_drained(std::time::Duration::from_secs(2))
-                .await
-        );
-        let output = process.output_since(0).text;
-        assert!(status.success(), "status={status}, output={output:?}");
-        assert!(output.contains("native-terminal-ok"));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn terminal_shell_renames_and_deletes_closed_logs_across_invocations() {
-        if !crate::sandbox::test_support::native_sandbox_available() {
-            return;
-        }
-        let workspace = tempfile::Builder::new()
-            .prefix("terminal mutation workspace ")
-            .tempdir()
-            .unwrap();
-        let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-        // PowerShell's provider normalizes paths through readable ancestors.
-        // This case isolates closed log handles; native contract tests cover
-        // denial of that normalization under a narrower read scope.
-        policy.filesystem.full_disk_read = true;
-        policy.filesystem.full_disk_write = false;
-        policy.filesystem.readable_roots = vec![workspace.path().to_path_buf()];
-        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
-            root: workspace.path().to_path_buf(),
-            read_only_subpaths: vec![],
-        }];
-        let commands = [
-            (
-                "create redirected logs",
-                "$ErrorActionPreference='Stop'; Write-Output 'check' *> check.log; Write-Output 'baseline' *> baseline.log; if ([IO.File]::ReadAllText('check.log').Trim() -ne 'check' -or [IO.File]::ReadAllText('baseline.log').Trim() -ne 'baseline') { throw 'redirected log content mismatch' }",
-            ),
-            (
-                "rename and delete logs from the previous invocation",
-                "$ErrorActionPreference='Stop'; Rename-Item -LiteralPath 'check.log' -NewName 'renamed-check.log'; Remove-Item -LiteralPath 'renamed-check.log' -Force; Remove-Item -LiteralPath 'baseline.log' -Force",
-            ),
-        ];
-        for (index, (stage, command)) in commands.into_iter().enumerate() {
-            let mut process =
-                super::TerminalProcess::spawn(command, workspace.path().to_str(), &policy)
-                    .unwrap_or_else(|error| panic!("{stage}: {error}"));
-            let status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                loop {
-                    if let Some(status) = process.try_wait().unwrap() {
-                        break status;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("{stage}: terminal did not exit"));
-            assert!(
-                process
-                    .wait_for_output_drained(std::time::Duration::from_secs(2))
-                    .await,
-                "{stage}: output did not drain"
-            );
-            let output = process.output_since(0).text;
-            assert!(
-                status.success(),
-                "{stage}: status={status}, output={output:?}"
-            );
-            // End the entire previous native process before opening the next one.
-            drop(process);
-            if index == 0 {
-                for name in ["check.log", "baseline.log"] {
-                    assert!(
-                        workspace.path().join(name).is_file(),
-                        "{name} was not created"
-                    );
-                }
-            }
-        }
-        for name in ["check.log", "renamed-check.log", "baseline.log"] {
-            assert!(
-                !workspace.path().join(name).exists(),
-                "{name} was not removed"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn shell_command_keeps_output_utf8_without_a_utf8_console() {
-        use std::process::Stdio;
-
-        let command = shell_command("Write-Output '中文输出'");
-        let mut child = std::process::Command::new("powershell.exe");
-        child
-            .args(["-NoLogo", "-NoProfile", "-Command", &command])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // Sessions started without a console fall back to the active code page, which is
-        // what happens for terminal sessions running without an attached console.
-        crate::process_spawn::apply_no_window(&mut child);
-
-        let child = {
-            let _creation = crate::process_spawn::creation_lock().unwrap();
-            child.spawn().expect("powershell should run")
-        };
-        let output = child.wait_with_output().expect("powershell should run");
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            text.contains("中文输出"),
-            "shell output must stay utf-8 when the active code page is not utf-8: {text:?}"
-        );
-    }
 
     #[test]
     fn output_buffer_preserves_head_and_tail_and_reports_missed_offsets() {

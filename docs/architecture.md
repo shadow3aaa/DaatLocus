@@ -1426,3 +1426,22 @@ the ordinary creation tool, message collaborators, cancel delegated work or edit
 They remain cancellable. No foreign effects are replayed or provider transcripts
 injected into inference history. The shared WebUI renders a compact import card
 from the attachment's semantic media type, including conversation/search/history previews.
+
+### 统一 Bash 终端后端
+
+Terminal App 保持 terminal_exec、terminal_write_stdin、terminal_terminate 的工具参数和
+结果协议。独立的 daat-locus-bash crate 管理会话、输入输出、首尾缓冲、等待、取消及回收；
+App 只适配调用权限、执行目录、现有 sandbox/Sudo 进程接口与结果呈现。库通过宿主提供的
+ProcessPolicy/Child 接口启动进程，不创建另一套权限或宿主执行通道。
+
+各桌面平台重新启动当前 daat-locus 可执行文件，通过内部 --internal-bash 入口调用
+daat-locus-bash 库中固定版本的 Rubash；无需额外分发 shell 可执行文件。
+shell 不启动 Agent、账号或服务运行时，不加载用户登录配置。内部入口在维护 CLI、
+账号存储和异步运行时初始化之前运行，不回退到 PATH 或系统 shell。Rubash 的后台任务、
+coproc 和内部管道操作重新启动相同
+子进程入口，并继承原生进程隔离。Windows 使用 native 平台身份。
+
+继续使用 stdin/stdout/stderr 管道，每次 exec 创建新的 shell；复用 session ID 不保留
+上一条 exec 的 shell 变量或函数。stdin 仅发送给仍在运行的进程。会话终止、App 关闭或
+丢弃都会终止进程树并释放输出读取任务；输出保留与原接口相同的容量、游标和丢弃计数。
+Android 继续保持现有 App 可用性边界。外部工具仍按平台安装情况解析。

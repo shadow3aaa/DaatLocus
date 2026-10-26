@@ -1,0 +1,16 @@
+[package]
+name = "daat-locus-bash"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Rubash shell hosting and sandbox-backed terminal session lifecycle."
+
+[dependencies]
+chrono = "0.4.45"
+daat-locus-sandbox = { path = "../daat-locus-sandbox" }
+miette = "7.6.0"
+parking_lot = "0.12.5"
+rubash = "=1.4.3"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["io-util", "rt", "sync", "time"] }
+uuid = { version = "1.23.4", features = ["v4"] }

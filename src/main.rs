@@ -16,6 +16,7 @@ mod terminal_logo;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    daat_locus_bash::shell::try_run();
     let (command, arguments) = cli::parse_args();
     let native_host_bridge = matches!(
         command,

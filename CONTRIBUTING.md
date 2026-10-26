@@ -59,6 +59,7 @@ Multi-device tests use an isolated loopback relay; devices reconnect through the
 
 - `src/actors`: execution, persistence, permissions and approval.
 - `src/*_app`: domain tools and schemas.
+- `crates/daat-locus-bash`: embedded Rubash subprocess entry, terminal sessions, output and process lifecycle.
 - `src/prompts` and `src/builtin_skills`: role instructions and on-demand bundled guidance.
 - `src/accounts`, `src/stage`, `src/resources`: account authentication, device coordination and resources.
 - `src/service`: bounded HTTP operations and resumable streams.
@@ -74,6 +75,7 @@ Relevant checks:
 ```sh
 cargo fmt --all -- --check
 # With DAAT_LOCUS_BUILD_WEBUI=0:
+cargo build --locked --no-default-features --bin daat-locus
 cargo test --locked --workspace -- --test-threads=4
 cargo clippy --locked --workspace --all-targets -- -D warnings
 # In webui:
