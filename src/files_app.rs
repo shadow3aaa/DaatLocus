@@ -121,10 +121,11 @@ impl App for FilesApp {
                             .saturating_sub(1024)
                 }) {
                     output.overflow_continuation = Some(format!(
-                        "Re-read this file range using files__read_file: path={}, start_line={}, line_count=1. Advance one line at a time to retain every source line.",
+                        "Source file: {}. Start line: {}. Returned lines: {}.",
                         serde_json::to_string(&args.path)
                             .map_err(|_| miette!("invalid file path"))?,
-                        result.start_line
+                        result.start_line,
+                        result.line_count
                     ));
                 }
                 Ok(output)

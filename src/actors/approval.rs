@@ -131,9 +131,8 @@ impl ApprovalRejection {
     }
 
     pub(crate) fn model_content(&self) -> String {
-        let guidance = "Do not submit this effect for automatic review again. If needed, use actors__appeal_approval with this approval_id and stage_id, null tool_result_id/readable_roots/writable_roots and an explanation to ask the Owner through Core without blocking.";
         format!(
-            "{}\nThe operation was not executed. Do not retry the denied effect before authorization. {guidance}",
+            "{}\nThe operation was not executed. Request Core's decision if this permission is still needed.",
             self.payload()
         )
     }

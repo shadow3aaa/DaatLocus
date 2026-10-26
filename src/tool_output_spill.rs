@@ -219,8 +219,7 @@ fn spill_marker(path: &Path, total_chars: usize, line_count: usize) -> String {
         "[tool output truncated: showing part of {total_chars} chars]\n\
          Full output ({line_count} lines) is at:\n\
          {path}\n\
-         Re-read only the part you need with read_file({{ \"path\": <path above>, \"start_line\": 1, \"line_count\": 80 }}).\n\
-         It is temporary and is removed after {}; re-read it during this turn, not later.",
+         Temporary file; retention: {} minutes.",
         SPILL_TTL.as_secs() / 60
     )
 }
@@ -440,16 +439,14 @@ mod tests {
             &body,
             200,
             Some(OverflowTarget::Continue {
-                instruction:
-                    "Continue with read_file({ \"path\": \"src/lib.rs\", \"start_line\": 2001, \"line_count\": 80 })."
-                        .to_string(),
+                instruction: "Source file: src/lib.rs. Start line: 2001.".to_string(),
             }),
             Some(&pool),
         );
 
         assert!(
-            bounded.contains("Continue with read_file"),
-            "marker must tell the model how to keep reading"
+            bounded.contains("src/lib.rs") && bounded.contains("2001"),
+            "marker must retain the source locator"
         );
         assert!(
             !bounded.contains("tool-output"),
@@ -502,10 +499,6 @@ mod tests {
         assert!(
             bounded.contains(&spilled.display().to_string()),
             "marker must name the spill path so the model can re-read it"
-        );
-        assert!(
-            bounded.contains("It is temporary"),
-            "marker states the lifetime"
         );
         assert_eq!(
             std::fs::read_to_string(&spilled).expect("read spill"),

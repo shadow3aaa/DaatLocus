@@ -220,11 +220,8 @@ impl ActorStore {
                 remote_authority:None,
                 content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,
                     "decision":decision, "reason":reason,
-                    "instruction":if approval.sudo.is_some() {
-                        "No effect was executed. If approved and still needed, explicitly retry the unchanged Sudo invocation with this approval_id. Consent is single-use and remembers no device scope."
-                    } else {
-                        "Permission memory has been updated if approved. No effect was executed. Recheck current targets and retry only if still needed; do not replay uncertain effects."
-                    }}).to_string(),
+                    "instruction":"No operation was executed. Recheck the current state and continue within the recorded decision."
+                    }).to_string(),
                 attachments:vec![], status:MessageStatus::Queued, cancel_requested:false,
                 started_at_ms:None, finished_at_ms:None, final_generation:None, reply:None,error:None,
                 created_at_ms:now, updated_at_ms:now,

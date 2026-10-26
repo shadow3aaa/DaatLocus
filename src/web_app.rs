@@ -331,7 +331,10 @@ impl App for WebApp {
             payload.clone(),
             Some(payload.to_string()),
         );
-        result.overflow_continuation=Some("Continue with web__run open using the returned ref_id and next_offset (or link_offset=next_link_offset for links), or find to locate text in the whole document.".into());
+        result.overflow_continuation = Some(
+            "Document references and text/link continuation offsets are included in the result."
+                .into(),
+        );
         Ok(result)
     }
     async fn shutdown(&mut self) -> Result<()> {

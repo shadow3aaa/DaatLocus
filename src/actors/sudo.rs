@@ -127,7 +127,7 @@ pub(crate) async fn review(
                 "Sudo application could not be submitted",
                 payload.clone(),
                 Some(format!(
-                    "{payload}\nNo effect was executed. Retain this approval_id when retrying the unchanged operation."
+                    "{payload}\nNo operation was executed. Resolve the submission failure before continuing."
                 )),
             );
             result.failure = Some(error);
@@ -151,7 +151,7 @@ pub(crate) async fn review(
             "Sudo application submitted to Core",
             payload.clone(),
             Some(format!(
-                "{payload}\nNo effect was executed. After approval, explicitly call the same Sudo operation with this approval_id and unchanged target arguments. Do not start another automatic review for this incident."
+                "{payload}\nNo operation was executed. Await the permission decision before continuing this operation."
             )),
         )))
     }

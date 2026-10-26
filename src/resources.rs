@@ -317,7 +317,7 @@ pub fn bound_output(
             text.as_bytes(),
         )?;
         Some(format!(
-            "Full output resource: {}. Read it with actors__read_resource using resource_id={}, offset=null, limit=4096; follow next_offset.",
+            "Full output resource: {}. Resource ID: {}.",
             resource.uri(actor),
             resource.id
         ))

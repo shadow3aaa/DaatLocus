@@ -1930,7 +1930,7 @@ impl ActorSystem {
             let resource = crate::resources::export(self, &actor.id, &attachment.id)?;
             crate::resources::bytes(self, &actor.id, &resource)?;
             text.push_str(&format!(
-                "\nAttached resource {}: {}. Read its contents with actors__read_resource.",
+                "\nAttached resource {}: {}.",
                 resource.name, resource.id
             ));
             if matches!(

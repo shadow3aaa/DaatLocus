@@ -136,10 +136,7 @@ impl OpenSkillsCatalog {
             return None;
         }
 
-        let mut lines = vec![
-            "## Skills".to_string(),
-            "A skill is a set of local instructions stored in a `SKILL.md` file. Below is the list of OpenSkills available in this context. Each entry includes a name, description, and path so the model can read the source instructions when a skill applies.".to_string(),
-        ];
+        let mut lines = vec!["## Skills".to_string()];
 
         if !alias_plan.root_lines.is_empty() {
             lines.push("### Skill roots".to_string());
@@ -153,11 +150,7 @@ impl OpenSkillsCatalog {
         }
 
         lines.push("### How to use skills".to_string());
-        if alias_plan.root_lines.is_empty() {
-            lines.push(SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS.to_string());
-        } else {
-            lines.push(SKILLS_HOW_TO_USE_WITH_ALIASES.to_string());
-        }
+        lines.push(SKILLS_HOW_TO_USE.to_string());
 
         Some(lines.join("\n"))
     }
@@ -877,23 +870,9 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + file path). Skill bodies live on disk at the listed paths.
-- Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- How to use a skill:
-  1. Before task actions that rely on a skill, use `files__read_file` to read that skill's `SKILL.md` completely.
-  2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that `SKILL.md`.
-  3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
-  4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
-- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback.";
+const SKILLS_HOW_TO_USE: &str = r"The list above contains the OpenSkills available in this context, including names, descriptions and file paths. Skill bodies live at the listed paths. Expand short paths using the aliases in `Skill roots`.
 
-const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r"- Discovery: The list above is the OpenSkills available in this context (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
-- Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
-- How to use a skill:
-  1. Expand the listed short `file` path with `### Skill roots`, then use `files__read_file` to read that skill's `SKILL.md` completely before task actions that rely on it.
-  2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that expanded `SKILL.md`.
-  3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
-  4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
-- If a named skill is missing, unreadable, or invalid, say so briefly and continue with the best fallback.";
+If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description, use it for the current turn. Use all mentioned skills. Do not carry skills across turns unless mentioned again.";
 
 #[cfg(test)]
 mod tests {
@@ -1199,13 +1178,13 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect();
         let expected: &[&str] = if cfg!(target_os = "windows") {
-            &["browser-use", "windows-gui-use"]
+            &["browser-use", "mcp-server-install", "windows-gui-use"]
         } else if cfg!(target_os = "macos") {
-            &["browser-use", "macos-gui-use"]
+            &["browser-use", "macos-gui-use", "mcp-server-install"]
         } else if cfg!(target_os = "android") {
-            &["android-gui-use", "browser-use"]
+            &["android-gui-use", "browser-use", "mcp-server-install"]
         } else {
-            &[]
+            &["mcp-server-install"]
         };
         assert_eq!(names, expected);
         for skill in catalog.skills() {

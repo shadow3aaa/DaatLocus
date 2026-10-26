@@ -118,11 +118,6 @@ impl PermissionReference {
             "\n{}\n",
             serde_json::json!({"permission_reference":self})
         ));
-        if self.approval_id.is_some() {
-            content.push_str("If this scope is needed, use actors__appeal_approval with this approval_id and stage_id, null tool_result_id and roots, an explanation. Approval remembers permission only and never repeats the tool call.");
-        } else {
-            content.push_str("If the result shows a required filesystem scope is missing, use actors__appeal_approval with this tool_result_id and stage_id, null approval_id, the exact readable_roots/writable_roots you propose (null or [] for an unused list), an explanation. This result reference is not an approval or a detected denial. Approval remembers permission only and never repeats the tool call.");
-        }
     }
 }
 

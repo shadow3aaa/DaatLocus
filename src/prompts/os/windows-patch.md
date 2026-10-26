@@ -1,6 +1,1 @@
-MXC/PSEC has known limitations on Windows. Use sudo to bypass the sandbox in the
-following cases. For unlisted issues clearly caused by sandbox limitations, you
-may also try sudo.
-
-- Launching MSIX-packaged applications or their WindowsApps execution aliases,
-  including the packaged winget client.
+Account for Windows sandbox restrictions when diagnosing launch failures of MSIX-packaged applications or WindowsApps execution aliases.
