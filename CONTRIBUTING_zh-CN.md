@@ -477,7 +477,7 @@ Get-WinEvent -Path "$PWD/target/idd-diagnostics.etl" -Oldest |
 
 ## Actor 编排评测
 
-通用模型指令维护在 `src/app_instructions/actors.md`。runner 为 Core 和普通
+通用模型指令维护在 `src/prompts/actors.md`。runner 为 Core 和普通
 Actor 独立注入它，不依赖 App 安装集合；修改后重新构建后台。场景指导应保持
 通用，区分编排失误与工具、环境、权限、运行时故障，在对应层修复问题，不能为
 每个失败都追加提示词规则。
@@ -572,7 +572,7 @@ Working Set；两种内存指标的峰值/P95 均来自采样，可能漏掉短�
 | --- | --- |
 | `src/actors` | 执行、持久化、权限与审批 |
 | `src/*_app` | 领域工具与 schema |
-| `src/app_instructions`、`src/builtin_skills` | 角色指令与按需内置指导 |
+| `src/prompts`、`src/builtin_skills` | 角色指令与按需内置指导 |
 | `src/accounts`、`src/stage`、`src/resources` | 账号、设备协调与统一资源 |
 | `src/service` | 有界 HTTP 操作及可续传事件流 |
 | `webui/src/components` | 可组合界面、设置与两种固定对话呈现 |

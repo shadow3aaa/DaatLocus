@@ -45,7 +45,7 @@ Windows、macOS、Android 各编译发布对应的 GUI use Skill，正文按需�
 Study 已移除。加载持久 Actor 配置时移除旧能力列表，普通 Actor 直接使用设备全量
 App，Core 只构造 Actors App；保留身份、历史、输入和工作目录，不恢复旧应用。
 
-`src/app_instructions/actors.md` 维护 Actor 编排、命名与会话引用指令，
+`src/prompts/actors.md` 维护 Actor 编排、命名与会话引用指令，
 由 runner 为 Core 和普通 Actor 独立注入一次，不依赖 App 安装集合。
 `core.md` 仅用于 Core，并注入当前账号名；`approval_review.md` 仅用于审批评审。
 这些角色指令不引入固定工作流、调度引擎或额外授权，权限与持久路由仍由代码执行。
@@ -945,7 +945,7 @@ Unix 双方核对进程身份，普通端核对 root。复用的 helper 连接�
 连接协议有界、关联请求、并行处理；stdin 堵塞不得阻止终止。断线报告效果不确定，不重放。
 宿主子进程仍属于可清理的 Job/进程组；App 停止、连接断开及服务关闭清理进程树。
 既有 Terminal/MCP 连接不得借用其他调用的特权；改变策略需显式选择重启，原效果不重放。
-按当前 OS 注入非空 `src/app_instructions/os/*-patch.md`，空占位不进入 prompt；
+按当前 OS 注入非空 `src/prompts/os/*-patch.md`，空占位不进入 prompt；
 Windows 补丁只提示已知 MXC/PSEC 的 MSIX/WindowsApps 启动限制及可尝试 Sudo。
 
 原生进程、子进程、孙进程与后台进程共用设备解析的有效策略，不能回退到 Actor 工作区，

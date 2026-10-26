@@ -5288,7 +5288,7 @@ async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hos
         assert_shared_actor_instructions(&prompt);
         assert!(!prompt.contains("Device project instructions must stay out of Core."));
         assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
-        let role = include_str!("../app_instructions/core.md").replace("{{account_name}}", "alice");
+        let role = include_str!("../prompts/core.md").replace("{{account_name}}", "alice");
         assert_eq!(prompt.matches(&role).count(), 1);
         assert_eq!(
             prompt
@@ -5332,9 +5332,9 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
 }
 
 fn assert_shared_actor_instructions(prompt: &str) {
-    let instructions = include_str!("../app_instructions/actors.md");
+    let instructions = include_str!("../prompts/actors.md");
     assert_eq!(prompt.matches(instructions).count(), 1);
-    assert!(!prompt.contains(include_str!("../app_instructions/approval_review.md")));
+    assert!(!prompt.contains(include_str!("../prompts/approval_review.md")));
     assert!(!prompt.contains("Use report for a material discovery"));
     assert!(!prompt.contains("Read this Actor's own durable history"));
 }

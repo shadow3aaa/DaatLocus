@@ -953,11 +953,11 @@ async fn system_prompt(
             .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
         prompt.push_str("\n\n");
         prompt.push_str(
-            &include_str!("../app_instructions/core.md").replace("{{account_name}}", &account_name),
+            &include_str!("../prompts/core.md").replace("{{account_name}}", &account_name),
         );
     }
     prompt.push_str("\n\n");
-    prompt.push_str(include_str!("../app_instructions/actors.md"));
+    prompt.push_str(include_str!("../prompts/actors.md"));
     if let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
         prompt.push_str("\n\n");
         prompt.push_str(patch);

@@ -59,7 +59,7 @@ Multi-device tests use an isolated loopback relay; devices reconnect through the
 
 - `src/actors`: execution, persistence, permissions and approval.
 - `src/*_app`: domain tools and schemas.
-- `src/app_instructions` and `src/builtin_skills`: role instructions and on-demand bundled guidance.
+- `src/prompts` and `src/builtin_skills`: role instructions and on-demand bundled guidance.
 - `src/accounts`, `src/stage`, `src/resources`: account authentication, device coordination and resources.
 - `src/service`: bounded HTTP operations and resumable streams.
 - `webui/src/components`: reusable UI, settings, IM and work presentations.
@@ -497,7 +497,7 @@ driver failure; inspect the decoded event's status and severity.
 
 ## Actor orchestration evaluations
 
-The shared model-facing policy is `src/app_instructions/actors.md`.
+The shared model-facing policy is `src/prompts/actors.md`.
 The runner injects it for Core and ordinary Actors independently of installed Apps;
 rebuild the backend after edits. Keep scenario guidance general and distinguish
 orchestration mistakes from tool, environment, permission or runtime failures.

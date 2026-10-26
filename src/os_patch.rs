@@ -1,10 +1,10 @@
 //! Compile platform guidance independently from Actor role/project instructions.
 pub(crate) fn for_os(os: &str) -> Option<&'static str> {
     let patch = match os {
-        "windows" => include_str!("app_instructions/os/windows-patch.md"),
-        "linux" => include_str!("app_instructions/os/linux-patch.md"),
-        "macos" => include_str!("app_instructions/os/macos-patch.md"),
-        "android" => include_str!("app_instructions/os/android-patch.md"),
+        "windows" => include_str!("prompts/os/windows-patch.md"),
+        "linux" => include_str!("prompts/os/linux-patch.md"),
+        "macos" => include_str!("prompts/os/macos-patch.md"),
+        "android" => include_str!("prompts/os/android-patch.md"),
         _ => "",
     };
     (!patch.trim().is_empty()).then_some(patch)

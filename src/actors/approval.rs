@@ -155,7 +155,7 @@ pub struct ReviewVerdict {
     reason: String,
 }
 
-const REVIEW_INSTRUCTIONS: &str = include_str!("../app_instructions/approval_review.md");
+const REVIEW_INSTRUCTIONS: &str = include_str!("../prompts/approval_review.md");
 
 /// Bound model explanations before binding them to an immutable application.
 pub(crate) fn validate_application(application: &super::ReviewApplication) -> Result<()> {

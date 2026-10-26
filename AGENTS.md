@@ -508,7 +508,7 @@ schemas; do not silently repair them through provider-specific normalization.
   Integrate user-facing language requirements into the reply style: concise
   natural language, task names, and avoidance of raw tool names and internal
   details. Provide technical detail when requested or needed for a user decision.
-- Actor and approval-role instructions live in `src/app_instructions`; runner
+- Actor and approval-role instructions live in `src/prompts`; runner
   injects Actor instructions independently of App installation. Put on-demand
   cross-tool guidance in `src/builtin_skills`; keep tool descriptions and schemas
   with each App. Apps have no ambient documentation interface. Keep no partial
