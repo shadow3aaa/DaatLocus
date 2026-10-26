@@ -8,7 +8,7 @@ pub type SandboxChildStderr = Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync
 
 enum Child {
     Native(daat_locus_sandbox::SandboxAsyncChild),
-    Host(super::host_process::HostChild),
+    Host(crate::host_process::HostChild),
     Administrator(crate::sudo_host::BrokerChild),
 }
 pub struct SandboxAsyncChild {
@@ -37,7 +37,7 @@ impl SandboxAsyncChild {
                 options,
             )?)
         } else if host {
-            Child::Host(super::host_process::HostChild::spawn(
+            Child::Host(crate::host_process::HostChild::spawn(
                 program, args, options,
             )?)
         } else {

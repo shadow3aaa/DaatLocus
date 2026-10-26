@@ -1,4 +1,4 @@
-//! Explicit host execution still owns and cleans up its descendant processes.
+//! Ordinary OS-user processes with owned descendant cleanup, without sandbox policy.
 use daat_locus_sandbox::{SandboxProcessOptions, SandboxStdio};
 use std::{io, path::Path, process::ExitStatus};
 

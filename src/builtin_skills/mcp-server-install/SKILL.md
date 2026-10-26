@@ -15,4 +15,4 @@ description: Install, configure or troubleshoot a standard MCP server as a devic
 
 Check the actual executable, working directory and environment. Diagnose dependency, command resolution, connection, authentication and handshake failures from their recorded diagnostics.
 
-Request additional access for confirmed sandbox restrictions. Check actual effects after a timeout before retrying.
+Check actual effects after a timeout before retrying.

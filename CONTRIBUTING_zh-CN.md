@@ -759,8 +759,9 @@ x86 模拟器使用 `x86_64`，先运行 `cargo xtask package android --target x
 使用隔离的本地 MCP 服务器验证协议、schema、凭据、修订和不确定效果。
 运行 `cargo test --lib mcp::tests`、`cargo test --test http_api apps::`，并运行
 Actor 权限与执行循环的相关测试。原生 Terminal 契约验证工作区外读取和程序执行、
-工作区内可写及工作区外拒写，同时 Files 读取仍受作用域限制。Windows 原生 stdio
-测试验证工作区外 MCP 程序启动、宿主读取、范围外拒写、显式环境变量和子进程回收，
+工作区内可写及工作区外拒写，同时 Files 读取仍受作用域限制。MCP stdio 测试在全部
+桌面平台直接运行，不依赖原生沙箱；验证设备拒绝路径下的宿主访问、继承及显式环境、
+沙箱范围变化不重连、远程只读拒绝、显式管理员重连与后代进程回收，
 无需真实账号或公网 MCP 服务器。
 WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连接表单使用
 `https://unavailable.example/mcp` 模拟连接失败，mock 不会访问这个地址。
@@ -768,7 +769,7 @@ WebUI mock 场景包含应用列表、空列表、加载中和加载失败；连
 
 ## 原生进程沙箱验证
 
-原生沙箱、Terminal、MCP stdio 与 Actor 审批集成测试在 Windows、Linux 和 macOS
+原生沙箱、Terminal 与 Actor 审批集成测试在 Windows、Linux 和 macOS
 的正常测试套件中运行，无需专用 runner 或 `--ignored`。各用例先调用共享的原生能力
 探针；只有明确确认平台前提不受支持时，才直接向 stderr 输出原因并从测试返回。
 这表示缺少原生覆盖，不能算作隔离验证通过。探针输出格式异常、探针错误、权限错误

@@ -1,5 +1,4 @@
 pub mod access;
-pub(crate) mod host_process;
 mod process;
 pub use process::{SandboxAsyncChild, SandboxChildStderr, SandboxChildStdin, SandboxChildStdout};
 pub(crate) mod scopes;

@@ -1,6 +1,9 @@
 //! OS elevation only brokers native filesystem/process operations. The account
 //! service, model execution and App infrastructure stay under the ordinary user.
-use crate::sandbox::{SandboxProcessOptions, SandboxStdio, host_process::HostChild};
+use crate::{
+    host_process::HostChild,
+    sandbox::{SandboxProcessOptions, SandboxStdio},
+};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

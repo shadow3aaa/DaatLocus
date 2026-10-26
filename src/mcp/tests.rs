@@ -364,10 +364,8 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
     apps.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_processes() {
-    if !crate::sandbox::test_support::native_sandbox_available() {
-        return;
-    }
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+async fn stdio_uses_host_access_and_preserves_administrator_authority_and_process_cleanup() {
     struct FixtureEnvironment(Option<std::ffi::OsString>);
     impl Drop for FixtureEnvironment {
         fn drop(&mut self) {
@@ -383,7 +381,7 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
     unsafe {
         std::env::set_var("DL_MCP_AMBIENT_SECRET", "ambient-fixture");
     }
-    let directory = crate::sandbox::test_support::scoped_directory();
+    let directory = tempfile::tempdir().unwrap();
     let system = actor_system(directory.path()).await;
     let mut context = system.owner_app_context().unwrap();
     context.actor_call.as_mut().unwrap().actor_id = "test-actor".into();
@@ -405,7 +403,7 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
             .arg("-o")
             .arg(&executable)
             .output()
-            .expect("native sandbox tests require the Rust toolchain");
+            .expect("MCP process tests require the Rust toolchain");
     assert!(
         compiled.status.success(),
         "{}",
@@ -415,6 +413,10 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
     std::fs::write(&public, "public").unwrap();
     let secret = system.infrastructure_dir().join("private-test.txt");
     std::fs::write(&secret, "private").unwrap();
+    // MCP must start and access OS-user files even when the Actor's device
+    // sandbox denies its executable and the target. No native backend is needed.
+    context.sandbox_policy.filesystem.deny_read_paths = vec![tools.clone(), secret.clone()];
+    context.sandbox_policy.filesystem.deny_write_paths = vec![secret.clone()];
     let registry = Registry::open(directory.path().join("apps.json")).unwrap();
     let source = Source::Stdio {
         command: executable.to_string_lossy().into_owned(),
@@ -430,6 +432,10 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
         .await
         .unwrap();
     let preflight_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let preflight_descendant: u32 = std::fs::read_to_string(workspace.join("server.child.pid"))
         .unwrap()
         .parse()
         .unwrap();
@@ -449,44 +455,61 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
         .unwrap();
     assert_eq!(
         outside.model_content.as_deref(),
-        Some("explicit|ambient-fixture|private|write-denied")
+        Some("explicit|ambient-fixture|private|write-allowed")
     );
-    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
+    assert!(
+        outside.sandbox.is_none(),
+        "MCP must not fabricate sandbox reports"
+    );
     let running_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
         .unwrap()
         .parse()
         .unwrap();
+    #[cfg(windows)]
+    assert_host_integrity(running_pid);
     let mut host = context.clone();
     host.sandbox_policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-    assert!(
-        app.execute_tool(&call(&name, json!({"value":false})), &host)
-            .await
-            .is_err(),
-        "selecting host authority cannot silently replace an existing sandboxed process"
-    );
-    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
-    host.restart_native = true;
     let result = app
-        .execute_tool(&call(&name, json!({"value":false})), &host)
+        .execute_tool(&call(&name, json!({"value":true})), &host)
         .await
         .unwrap();
     assert_eq!(
         result.model_content.as_deref(),
-        Some("explicit|ambient-fixture|private|write-allowed")
+        Some("explicit|ambient-fixture|public")
     );
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
     let host_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
         .unwrap()
         .parse()
         .unwrap();
-    assert_ne!(host_pid, running_pid);
     assert_eq!(
-        result.sandbox.unwrap().status,
-        crate::sandbox::CaptureStatus::NotRequested
+        host_pid, running_pid,
+        "sandbox changes must reuse the connection"
     );
+    let running_descendant: u32 = std::fs::read_to_string(workspace.join("server.child.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut readonly = context.clone();
+    readonly.actor_call.as_mut().unwrap().remote_read_only = true;
+    std::fs::write(&secret, "private").unwrap();
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":false})), &readonly)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
     let broker = crate::sudo_host::tests::local_client();
     let mut administrator = host.clone();
     administrator.sandbox_policy.administrator = Some(broker.clone());
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":true})), &administrator)
+            .await
+            .is_err(),
+        "changing administrator authority requires explicit restart"
+    );
+    administrator.restart_native = true;
     let result = app
         .execute_tool(&call(&name, json!({"value":true})), &administrator)
         .await
@@ -500,6 +523,10 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
         .parse()
         .unwrap();
     assert_ne!(administrator_pid, host_pid);
+    let administrator_descendant: u32 = std::fs::read_to_string(workspace.join("server.child.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
     app.prepare_turn(&context, true).await.unwrap();
     assert!(
         app.execute_tool(&call(&name, json!({"value":false})), &context)
@@ -507,7 +534,7 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
             .is_err(),
         "ordinary requests cannot borrow a reviewed administrator connection"
     );
-    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
     app.shutdown().await.unwrap();
     broker.close();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -517,12 +544,18 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
                 sysinfo::ProcessesToUpdate::Some(&[
                     sysinfo::Pid::from_u32(preflight_pid),
                     sysinfo::Pid::from_u32(running_pid),
-                    sysinfo::Pid::from_u32(host_pid),
                     sysinfo::Pid::from_u32(administrator_pid),
+                    sysinfo::Pid::from_u32(preflight_descendant),
+                    sysinfo::Pid::from_u32(running_descendant),
+                    sysinfo::Pid::from_u32(administrator_descendant),
                 ]),
                 true,
             );
-            if processes.processes().is_empty() {
+            if processes
+                .processes()
+                .values()
+                .all(|process| process.status() == sysinfo::ProcessStatus::Zombie)
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -531,6 +564,68 @@ async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_
     .await
     .expect("MCP processes must exit on preflight close and App shutdown");
     system.shutdown().await;
+}
+
+#[cfg(windows)]
+fn assert_host_integrity(pid: u32) {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Security::{
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel, TokenIsAppContainer,
+        },
+        System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+    unsafe fn identity(process: windows_sys::Win32::Foundation::HANDLE) -> (u32, u32) {
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            assert_ne!(OpenProcessToken(process, TOKEN_QUERY, &mut token), 0);
+            let token = OwnedHandle::from_raw_handle(token);
+            let mut app_container = 0u32;
+            let mut needed = 0;
+            assert_ne!(
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenIsAppContainer,
+                    (&mut app_container as *mut u32).cast(),
+                    4,
+                    &mut needed
+                ),
+                0
+            );
+            let mut label = [0usize; 16];
+            assert_ne!(
+                GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenIntegrityLevel,
+                    label.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&label) as u32,
+                    &mut needed
+                ),
+                0
+            );
+            let sid = (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+            let count = *GetSidSubAuthorityCount(sid);
+            (
+                app_container,
+                *GetSidSubAuthority(sid, u32::from(count - 1)),
+            )
+        }
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        assert!(!process.is_null(), "MCP must still be running");
+        let process = OwnedHandle::from_raw_handle(process);
+        let (app_container, integrity) = identity(process.as_raw_handle());
+        assert_eq!(app_container, 0, "MCP must not use an AppContainer token");
+        assert_eq!(
+            integrity,
+            identity(GetCurrentProcess()).1,
+            "MCP must inherit ordinary host integrity without a Low downgrade"
+        );
+    }
 }
 
 #[tokio::test]

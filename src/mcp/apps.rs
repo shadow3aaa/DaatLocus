@@ -151,7 +151,7 @@ impl App for AppsManager {
             ),
             spec::<InstallArgs>(
                 "install",
-                "Install an MCP App on this device. Connections and native commands use the device sandbox. List environment as KEY=value entries; names must not start with DAAT_LOCUS. Never put credentials in the name or command arguments.",
+                "Install an MCP App on this device. Local servers run as the OS user outside the device sandbox. List environment as KEY=value entries; names must not start with DAAT_LOCUS. Never put credentials in the name or command arguments.",
             ),
             spec::<ChangeArgs>(
                 "enable",
@@ -333,7 +333,7 @@ impl App for McpApp {
         if self
             .session
             .as_ref()
-            .is_some_and(|session| session.ensure_policy(&context.sandbox_policy).is_err())
+            .is_some_and(|session| session.ensure_authority(context).is_err())
         {
             // A prior reviewed invocation may own an elevated connection.
             // Background catalog refresh cannot borrow that authority.
@@ -380,16 +380,14 @@ impl App for McpApp {
         self.registry.check(&self.entry.id, self.entry.revision)?;
         let name = self.tool(&call.name)?.name.clone();
         let arguments = self.arguments(call)?;
-        // Selecting Sudo explicitly requests a new OS execution environment.
-        // Reconnect that native session; never assert that an existing process
-        // acquired another token/policy, or replay any prior MCP tool effects.
+        // Changing OS administrator authority requires an explicit reconnect.
+        // Device sandbox grants never change an MCP process or its connection.
         if context.restart_native
             && context.actor_call.is_some()
-            && context.sandbox_policy.is_unrestricted()
             && self
                 .session
                 .as_ref()
-                .is_some_and(|session| session.ensure_policy(&context.sandbox_policy).is_err())
+                .is_some_and(|session| session.ensure_authority(context).is_err())
             && let Some(mut session) = self.session.take()
         {
             session.close().await;
@@ -414,10 +412,7 @@ impl App for McpApp {
             self.session = Some(session);
         }
         self.registry.check(&self.entry.id, self.entry.revision)?;
-        self.session
-            .as_ref()
-            .unwrap()
-            .ensure_policy(&context.sandbox_policy)?;
+        self.session.as_ref().unwrap().ensure_authority(context)?;
         let service = self.session.as_ref().unwrap().service.as_ref().unwrap();
         let params = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().unwrap().clone());
@@ -434,11 +429,7 @@ impl App for McpApp {
                 } else {
                     "MCP call failed; effects may be uncertain"
                 };
-                return Err(self
-                    .session
-                    .as_mut()
-                    .unwrap()
-                    .with_diagnostics(miette!("{reason}")));
+                return Err(miette!("{reason}"));
             }
         };
         let mut payload = serde_json::to_value(outcome).into_diagnostic()?;
@@ -533,10 +524,6 @@ impl App for McpApp {
             }),
         );
         result.model_images = images;
-        result.sandbox = self
-            .session
-            .as_mut()
-            .and_then(|session| session.take_denial_report());
         if failed {
             result.failure = Some("MCP tool returned an error".into());
         }

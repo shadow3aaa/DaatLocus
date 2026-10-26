@@ -45,7 +45,8 @@ client are connected.
   closed when the platform cannot enforce it.
   The explicitly approved ComputerUse desktop capability is an exception to the
   device filesystem sandbox: target GUI apps retain this Windows user's file
-  access. Keep this exception inside ComputerUse; other Apps retain their sandbox.
+  access. Keep this exception inside ComputerUse; MCP has the separate trusted
+  server boundary below, and sandboxed Apps retain their sandbox.
   Reject read-only remote authority and exclude Daat Locus's own processes/windows.
 - Do not restore deleted modules merely to make the old product run or compile.
 - Do not recreate the old Session, RuntimeTool, Dashboard, Sleep, or Workflow
@@ -64,7 +65,12 @@ client are connected.
 - App is a domain state machine exposing tools. It is the only tool abstraction.
 - Standard MCP servers install as device-local App instances through AppsManager or
   the Owner Apps page. Adapt nonportable schemas inside DL; never require a custom
-  MCP protocol. All operations obey the common device sandbox and authenticated hard authority;
+  MCP protocol. MCP servers run outside the device sandbox, including stdio
+  children managed by DL. Ordinary local servers inherit the OS user's access;
+  installation and calls retain authenticated hard authority and resource ownership.
+  Device filesystem grants do not constrain server-internal effects. Keep process
+  cleanup and require reviewed Sudo for OS administrator execution; ordinary calls
+  cannot borrow an administrator connection.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
   Core constructs only the portable Actors App. Other Actors receive every
@@ -113,7 +119,7 @@ client are connected.
   Unarchive restores message admission without replay; Core cannot be archived.
 - Project, investigation and general Actors use the same core and device Apps.
   Every Actor on a device uses the account's shared sandbox scopes. Workspace is
-  an execution directory, never a permission boundary. Files, Terminal and MCP
+  an execution directory, never a permission boundary. Files and Terminal
   default to full-disk reads under OS permissions; writes require the shared device
   writable scopes. Explicit denials, remote authority and resource ownership still
   apply. Do not replace this default with runtime/PATH read allowlists.
@@ -222,7 +228,8 @@ Sandbox expansion uses the unified review/application path.
   claimed as its next input); it must not run a Core App tool or require Core
   execution-context replication for approval.
 - Apps declare no permission requests, action review criteria, approval bypasses
-  or operation fingerprints. All access is enforced by common sandbox infrastructure.
+  or operation fingerprints. Sandboxed access is enforced by common sandbox infrastructure;
+  MCP server execution follows its explicit OS-user trust boundary.
   Permissions belong to the account on the executing device, never an Actor.
   Only actual sandbox boundaries trigger review. If the backend can safely suspend
   the original operation, independently auto-review and resume only after the

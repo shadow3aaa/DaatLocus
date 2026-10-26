@@ -1,5 +1,9 @@
 use super::*;
-use crate::sandbox::{SandboxAsyncChild, SandboxProcessOptions, SandboxStdio};
+use crate::{
+    host_process::HostChild,
+    sandbox::{SandboxProcessOptions, SandboxStdio},
+    sudo_host::{BrokerChild, Client},
+};
 use rmcp::{
     RoleClient, ServiceExt,
     service::RunningService,
@@ -20,10 +24,63 @@ impl rmcp::ClientHandler for Handler {
         self.0.store(true, Ordering::Release);
     }
 }
-struct ProcessGuard(SandboxAsyncChild);
+enum Process {
+    User(HostChild),
+    Administrator(BrokerChild),
+}
+struct ProcessGuard {
+    process: Process,
+    administrator: Option<Arc<Client>>,
+}
+impl ProcessGuard {
+    fn spawn(
+        administrator: Option<Arc<Client>>,
+        command: &str,
+        arguments: Vec<String>,
+        options: SandboxProcessOptions,
+    ) -> std::io::Result<Self> {
+        let process = match &administrator {
+            Some(client) => Process::Administrator(BrokerChild::spawn(
+                client.clone(),
+                command,
+                arguments,
+                options,
+            )?),
+            None => Process::User(HostChild::spawn(command, arguments, options)?),
+        };
+        Ok(Self {
+            process,
+            administrator,
+        })
+    }
+    fn take_stdin(&mut self) -> Option<crate::sandbox::SandboxChildStdin> {
+        match &mut self.process {
+            Process::User(child) => child.child.stdin.take().map(|pipe| Box::new(pipe) as _),
+            Process::Administrator(child) => child.take_stdin().map(|pipe| Box::new(pipe) as _),
+        }
+    }
+    fn take_stdout(&mut self) -> Option<crate::sandbox::SandboxChildStdout> {
+        match &mut self.process {
+            Process::User(child) => child.child.stdout.take().map(|pipe| Box::new(pipe) as _),
+            Process::Administrator(child) => child.take_stdout().map(|pipe| Box::new(pipe) as _),
+        }
+    }
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        match &mut self.process {
+            Process::User(child) => child.start_kill(),
+            Process::Administrator(child) => child.start_kill(),
+        }
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match &mut self.process {
+            Process::User(child) => child.try_wait(),
+            Process::Administrator(child) => child.try_wait(),
+        }
+    }
+}
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        let _ = self.0.start_kill();
+        let _ = self.start_kill();
     }
 }
 #[cfg(windows)]
@@ -106,9 +163,13 @@ pub struct Session {
     pub dirty: Arc<AtomicBool>,
 }
 impl Session {
-    pub fn ensure_policy(&self, current: &crate::sandbox::RuntimeSandboxPolicy) -> Result<()> {
-        if let Some(child) = &self.child {
-            child.0.ensure_policy(current)?;
+    pub fn ensure_authority(&self, context: &AppToolExecutionContext) -> Result<()> {
+        if let Some(child) = &self.child
+            && child.administrator != context.sandbox_policy.administrator
+        {
+            return Err(miette!(
+                "The MCP connection uses different administrator authority. Explicitly restart it to change authority; no tool call was replayed."
+            ));
         }
         Ok(())
     }
@@ -147,7 +208,7 @@ impl Session {
                 #[cfg(windows)]
                 let (command, arguments) =
                     windows_command(command, arguments, &context.execution_cwd, environment)?;
-                let policy = context.sandbox_policy.clone();
+                let administrator = context.sandbox_policy.administrator.clone();
                 let cwd = dunce::simplified(&context.execution_cwd).to_path_buf();
                 let command = command.clone();
                 let arguments = arguments.clone();
@@ -166,8 +227,8 @@ impl Session {
                 let child = tokio::time::timeout(
                     Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
-                        SandboxAsyncChild::spawn_shell(
-                            &policy,
+                        ProcessGuard::spawn(
+                            administrator,
                             &command,
                             arguments,
                             SandboxProcessOptions {
@@ -177,24 +238,21 @@ impl Session {
                                 stdout: SandboxStdio::Piped,
                                 stderr: SandboxStdio::Null,
                                 spawn_cancelled: Some(cancelled),
-                                // MCP children record native denials where
-                                // the host supports deny-and-record.
-                                capture_denials: true,
+                                capture_denials: false,
                             },
                         )
-                        .map(ProcessGuard)
                     }),
                 )
                 .await
-                .map_err(|_| miette!("MCP sandbox preparation timed out"))?
+                .map_err(|_| miette!("MCP process startup timed out"))?
                 .into_diagnostic()?
-                .map_err(|_| miette!("MCP process could not start inside the required sandbox"))?;
+                .map_err(|_| miette!("MCP process could not start"))?;
                 let mut guard = Self {
                     service: None,
                     child: Some(child),
                     dirty: dirty.clone(),
                 };
-                let child = &mut guard.child.as_mut().unwrap().0;
+                let child = guard.child.as_mut().unwrap();
                 let input = child
                     .take_stdin()
                     .ok_or_else(|| miette!("MCP stdin unavailable"))?;
@@ -215,15 +273,15 @@ impl Session {
                             "MCP process handshake failed"
                         };
                         if let Some(child) = &mut guard.child {
-                            let _ = child.0.start_kill();
+                            let _ = child.start_kill();
                             let _ = tokio::time::timeout(Duration::from_secs(3), async {
-                                while child.0.try_wait().ok().flatten().is_none() {
+                                while child.try_wait().ok().flatten().is_none() {
                                     tokio::time::sleep(Duration::from_millis(20)).await;
                                 }
                             })
                             .await;
                         }
-                        return Err(guard.with_diagnostics(miette!("{message}")));
+                        return Err(miette!("{message}"));
                     }
                 };
                 child_guard = guard.child.take();
@@ -281,24 +339,5 @@ impl Session {
             let _ = tokio::time::timeout(Duration::from_secs(3), service.cancel()).await;
         }
         self.child.take();
-    }
-
-    /// Native denial records the MCP child captured, when available.
-    /// Sessions are long-lived, so records finalize when the child exits.
-    pub fn take_denial_report(&mut self) -> Option<crate::sandbox::DenialReport> {
-        self.child
-            .as_mut()
-            .map(|guard| guard.0.take_denial_report())
-    }
-    pub(crate) fn with_diagnostics(&mut self, error: miette::Report) -> miette::Report {
-        if let Some(report) = self.take_denial_report() {
-            crate::sandbox::ProcessFailure {
-                message: error.to_string(),
-                report,
-            }
-            .into()
-        } else {
-            error
-        }
     }
 }

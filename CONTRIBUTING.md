@@ -995,7 +995,7 @@ Use isolated local MCP servers for protocol, schema, credential, revision and
 uncertain-effect tests. Run `cargo test --lib mcp::tests` and
 `cargo test --test http_api apps::`, alongside Actor permission/runner checks.
 
-Native sandbox, Terminal, MCP stdio and Actor approval integration tests run in
+Native sandbox, Terminal and Actor approval integration tests run in
 the normal test suite on Windows, Linux and macOS, without a dedicated runner
 or `--ignored`. Each uses the shared native-capability probe before exercising
 isolation. An explicitly unsupported prerequisite prints its reason directly to
@@ -1013,8 +1013,9 @@ environment handling or approval behavior. To run focused native checks:
 $env:DAAT_LOCUS_BUILD_WEBUI = '0'
 cargo test --locked -p daat-locus-sandbox -- --test-threads=4
 cargo test --locked -p daat-locus --no-default-features --lib sandbox:: -- --test-threads=4
+cargo test --locked --no-default-features --lib host_process::tests
 cargo test --locked --no-default-features --lib terminal_app::process::tests
-cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_native_sandbox_explicit_environment_and_reaps_processes -- --exact
+cargo test --locked --no-default-features --lib mcp::tests::stdio_uses_host_access_and_preserves_administrator_authority_and_process_cleanup -- --exact
 cargo test --locked --no-default-features --lib actors::approval::tests::approved_terminal_scope_runs_natively_only_after_explicit_retry -- --exact
 ```
 
@@ -1037,9 +1038,11 @@ tests remain explicitly opt-in with their existing prerequisites.
 
 The native Terminal contract verifies host reads and tool execution outside the
 workspace, allowed workspace writes and denied outside writes while Files reads
-remain scoped. The Windows stdio integration also verifies an MCP executable
-outside the workspace, host reads, denied outside writes, explicit environment
-and child cleanup. No real account or
+remain scoped. MCP stdio integration runs on all desktop platforms without a native
+sandbox prerequisite. It verifies host access despite denied device sandbox paths,
+inherited and explicit environment, connection reuse across sandbox changes,
+remote read-only rejection, explicit administrator reconnect and descendant cleanup.
+No real account or
 public MCP server is required. The WebUI mock gallery includes Apps list, empty,
 loading and failure scenes; its installation form can simulate connection failure
 with `https://unavailable.example/mcp`. Mock installation never contacts that URL.

@@ -242,7 +242,7 @@ impl Registry {
             return Err(miette!("Invalid App name"));
         }
         source.validate()?;
-        // Connecting can execute server code. Callers authorize this exact source first.
+        // Connecting can execute server code with OS-user access outside the sandbox.
         let mut session = transport::Session::connect(&source, context).await?;
         let tools = session.tools().await?;
         session.close().await;
