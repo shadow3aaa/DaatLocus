@@ -77,7 +77,7 @@ async fn broker_process_preserves_stdio_exit_status_and_execution_identity() {
     let (program,args)=(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/powershell.exe").to_string_lossy().into_owned(),
         vec!["-NoProfile".into(),"-Command".into(),"[Console]::Out.Write('out:'); [Console]::Error.Write('err:'); $line=[Console]::ReadLine(); [Console]::Out.Write($line); exit 7".into()]);
     #[cfg(unix)]
-    let (program, args) = (
+    let (program, args): (String, Vec<String>) = (
         "/bin/sh".into(),
         vec![
             "-c".into(),
