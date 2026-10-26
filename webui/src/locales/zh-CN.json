@@ -336,6 +336,7 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "sudo_submitted": "权限申请已交给 Core",
     "image_preview_unavailable": "图片预览暂时不可用。",
     "application_required": "需要申请授权",
     "application_required_reason": "此操作需要新的授权，尚未执行。",
@@ -472,6 +473,8 @@
     "clear_data_description": "清除浏览器的 Cookie、缓存和网站数据。网站登录状态会退出，已下载的文件和历史记录会保留。"
   },
   "tool_presentation": {
+    "sudo_execute": "无沙箱执行",
+    "sudo_execute_as_admin": "以管理员执行",
     "message_actor": "发送消息",
     "action_not_approved": "{{action}} · 未获批准",
     "archive_actor": "归档 Actor",

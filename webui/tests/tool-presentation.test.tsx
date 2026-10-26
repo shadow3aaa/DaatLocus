@@ -10,6 +10,18 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("Sudo preserves target command output and keeps submitted applications separate from effects", () => {
+    const html = renderToStaticMarkup(<ToolDetail result={result({ name:"sudo__execute", arguments:{tool:"terminal__terminal_exec",arguments_json:JSON.stringify({command:"winget --version"})},payload:{output:"v1.12.350",session:{exit_code:0},sudo:{tool:"terminal__terminal_exec",administrator:false,approval_id:"PRIVATE_APPROVAL"}}})}/>);
+    expect(html).toContain("winget --version");
+    expect(html).toContain("v1.12.350");
+    for(const hidden of ["PRIVATE_APPROVAL","HIDDEN_MODEL_PROTOCOL","arguments_json"]) expect(html).not.toContain(hidden);
+    const submitted = renderToStaticMarkup(<ToolDetail result={result({name:"sudo__execute_as_admin",payload:{status:"submitted",executed:false,approval_id:"PRIVATE_APPROVAL"}})}/>);
+    expect(submitted).toContain(i18n.t("tool_details.sudo_submitted"));
+    expect(submitted).not.toContain("PRIVATE_APPROVAL");
+    const custom = renderToStaticMarkup(<ToolDetail result={result({name:"extension__inspect",payload:{text:"Inspection complete",sandbox:{denials:[{resource:"PRIVATE_NATIVE_TARGET"}]},sudo:{approval_id:"PRIVATE_APPROVAL"}}})}/>);
+    expect(custom).toContain("Inspection complete");
+    for(const hidden of ["PRIVATE_NATIVE_TARGET","PRIVATE_APPROVAL"]) expect(custom).not.toContain(hidden);
+  });
   test("image tools render resource thumbnails with links to the original instead of metadata", () => {
     const uri = "/v1/actors/root/resources/image-snapshot";
     const stage = "12345678-1234-1234-1234-123456789012";

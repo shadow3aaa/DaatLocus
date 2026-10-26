@@ -15,7 +15,7 @@ function TextOutput({ label, content, command, context, href }: { label: string;
 }
 
 function domainFields(payload: Record<string,JsonValue>): JsonValue {
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references"].includes(key)).map(([key,value]) => {
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references","sandbox","sudo","permission_reference"].includes(key)).map(([key,value]) => {
     if (typeof value === "string" && /^[\[{]/.test(value.trim())) { try { const decoded: unknown = JSON.parse(value); if (decoded && typeof decoded === "object") return [key, decoded as JsonValue]; } catch { /* Literal content stays literal. */ } }
     return [key,value];
   }));
@@ -76,6 +76,18 @@ function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImag
   const args = asObject(result.arguments);
   const path = asText(payload.path) || asText(args.path);
   const rejection = approvalNotice(result.payload);
+  if (result.name.startsWith("sudo__")) {
+    const target = asText(asObject(payload.sudo).tool);
+    if (target && !domainToolName(target).startsWith("sudo__")) {
+      try {
+        const argumentsValue: JsonValue = JSON.parse(asText(args.arguments_json));
+        if (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
+          return <ToolContent result={{ ...result, name: target, arguments: argumentsValue }} onActor={onActor} hasImages={hasImages} />;
+        }
+      } catch { /* Preserve malformed or historical source values in the ordinary detail view. */ }
+    }
+    if (payload.status === "submitted") return <p className="dl-tool-note">{t("tool_details.sudo_submitted")}</p>;
+  }
   if (rejection) return <section className="dl-tool-details" aria-label={approvalNoticeTitle(rejection.kind)}><p className="dl-tool-note">{approvalNoticeTitle(rejection.kind)}</p><p className="whitespace-pre-wrap break-words">{rejection.reason}</p></section>;
   if (/^mcp_[a-f0-9]{32}__/.test(result.name)) {
     const resources = asRows(payload.resources);

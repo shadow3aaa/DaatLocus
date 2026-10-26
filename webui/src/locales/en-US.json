@@ -336,6 +336,7 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "sudo_submitted": "Permission request submitted to Core",
     "image_preview_unavailable": "Image preview unavailable.",
     "application_required": "Permission application needed",
     "application_required_reason": "This operation needs new permission and has not run.",
@@ -472,6 +473,8 @@
     "clear_data_description": "Clear browser cookies, cache and site data. You will be signed out of websites. Downloads and browsing history will remain."
   },
   "tool_presentation": {
+    "sudo_execute": "Run outside sandbox",
+    "sudo_execute_as_admin": "Run as administrator",
     "message_actor": "Message Actor",
     "action_not_approved": "{{action}} · Not approved",
     "archive_actor": "Archive Actor",
