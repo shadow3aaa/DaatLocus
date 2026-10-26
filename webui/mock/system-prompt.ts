@@ -1,19 +1,19 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 
-const source = (name: string) => readFileSync(resolve(import.meta.dirname, "../../src/prompts", name), "utf8");
-/** Static instruction files only: deliberately excludes messages and tools. */
+/** Independent display examples; production inspection reads the assembled prompt. */
 export function systemPromptRoute(url: URL): Response | null {
   const match = /^\/v1\/system-prompt(?:\/(\d+))?$/.exec(url.pathname);
   if (!match) return null;
   const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
   const role = url.searchParams.get("role") || "core";
   if (!["core", "others"].includes(role)) return json({ code: "invalid_request" }, 422);
-  const files = [
-    ...(role === "core" ? [{ name: "core.md", content: source("core.md").replaceAll("{{account_name}}", "林舟") }] : []),
-    { name: "actors.md", content: source("actors.md") },
-    ...(role === "others" ? [{ name: "os/windows-patch.md", content: source("os/windows-patch.md") }] : []),
+  const files = role === "core" ? [
+    { name: "identity.md", content: "# 身份\n\n这是一份独立的界面预览示例。\n\n帮助用户明确目标，并给出简洁、自然的回复。" },
+    { name: "communication.md", content: "# 沟通方式\n\n- 先说明结果。\n- 只保留对当前任务有帮助的信息。\n- 遇到不确定的事实时，明确说明。" },
+  ] : [
+    { name: "task.md", content: "# 任务\n\n这是一份独立的界面预览示例。\n\n理解任务目标和约束，完成工作并验证结果。" },
+    { name: "workflow.md", content: "# 工作方式\n\n## 开始之前\n\n阅读相关材料，确认当前状态。\n\n## 执行与验证\n\n按依赖顺序推进任务，记录证据和未完成事项。" },
+    { name: "report.md", content: "# 汇报\n\n说明实际完成的工作、验证结果和仍未解决的问题。" },
   ];
   const encoder = new TextEncoder(), bytes = (text: string) => encoder.encode(text).length;
   const revision = createHash("sha256").update(JSON.stringify(files)).digest("hex");

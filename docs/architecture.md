@@ -1470,6 +1470,11 @@ anchors/calibration/usage, not another copy of the working window.
 Runtime input IDs and read-only flags stay outside system instructions; input
 authority is enforced by the execution context. Dynamic inputs and tools are not
 part of the settings visualization.
+Source files are embedded at compile time with `include_str!`; runtime template
+values are filled by `SystemPrompt::for_role`, shared by execution and inspection.
+The inspection API derives its file list, contents, revision and usage metadata
+from that instance, without a separate catalog or configuration. The standalone
+preview uses independent fixed examples rather than production prompt sources.
 Owner-only `/v1/system-prompt?role=core|others` lists bounded role-wide static
 file metadata; Actor metadata, Skills catalogs and workspace AGENTS.md stay out
 of this visualization. Indexed file reads return at most 16 KiB at a UTF-8 boundary and require the assembly
