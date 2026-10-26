@@ -1,10 +1,11 @@
 import { t } from "@/lib/i18n";
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftIcon, BarChart3Icon, DownloadIcon, GlobeIcon, MonitorIcon, SearchIcon, SettingsIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
+import { ArrowLeftIcon, BarChart3Icon, DownloadIcon, GlobeIcon, LayersIcon, MonitorIcon, SearchIcon, SettingsIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
+import { ContextSettings } from "@/components/settings/context-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { UsageSettings } from "@/components/settings/usage-settings";
 import { ImportSettings } from "@/components/settings/import-settings";
@@ -28,9 +29,9 @@ import { MacComputerUseSettings } from "@/components/settings/macos-computer-use
 import { BrowserSettings } from "@/components/settings/browser-settings";
 import { browserSupported } from "@/lib/browser-workspace";
 
-export type SettingsTab = "general" | "personal" | "account" | "usage" | "models" | "import" | "gui" | "browser";
+export type SettingsTab = "general" | "personal" | "account" | "usage" | "models" | "import" | "gui" | "browser" | "context";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser", context:"context"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -126,6 +127,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "general" as const, label: t("settings_page.general"), icon: SettingsIcon, keywords: t("common.language")},
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
+      {id:"context" as const, label:t("context_composition.title"), icon:LayersIcon, keywords:"system prompt AGENTS.md Skills"},
       ...(browserSupported()?[{id:"browser" as const,label:t("browser_settings.title"),icon:GlobeIcon,keywords:[t("browser_use.search_engine"),t("browser_settings.language"),t("browser_settings.zoom")].join(" ")}]:[]),
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
@@ -153,6 +155,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
           <Picker id="dl-client-language" label={t("common.language")} description={t("settings_page.interface_language")} value={preferences.language} options={[{value: "system", label: t("settings_page.detect_language")}, {value: "zh-CN", label: t("common.chinese")}, {value: "en-US", label: t("common.english")}]} onChange={value=>onPreferencesChanged({...preferences,language:value as Preferences["language"]})} />
         </SettingsGroup></div>
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
+        {canManage && tab === "context" && <ContextSettings />}
         {canManage && browserSupported() && tab==="browser" && <BrowserSettings/>}
         {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}

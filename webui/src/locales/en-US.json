@@ -1,4 +1,15 @@
 {
+  "context_composition": {
+    "title": "Context composition",
+    "role": "Role",
+    "refresh": "Refresh context",
+    "diagram": "3D system instruction layers. Select a file to read it.",
+    "total": "Total:",
+    "files": "Select an instruction file",
+    "failed": "Context is unavailable or has changed. Refresh to try again.",
+    "loading": "Loading context",
+    "empty": "No system instruction files."
+},
   "browser_settings": {
   "clear_action": "Clear…",
   "clear_summary": "Keep browsing history and downloaded files.",

@@ -204,6 +204,46 @@ html[data-desktop-platform] :is(.dl-main-search,.dl-actor-dialog-actions) { disp
 .dl-settings-category[aria-current=page] { background: var(--settings-hover); }
 .dl-settings-scroll { height: 100%; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px max(10px,var(--dl-safe-right)) max(24px,var(--dl-safe-bottom)) 0; }
 .dl-settings-content { max-width: 768px; margin: 0 auto; padding: 0 20px; }
+.dl-settings-page[data-category=context] .dl-settings-content { max-width: 1280px; }
+.dl-settings-page[data-category=context] .dl-settings-page-heading { margin-bottom: 12px; }
+.dl-settings-page[data-category=context]>.dl-settings-scroll { overflow: hidden; display: flex; flex-direction: column; }
+.dl-settings-page[data-category=context] .dl-settings-content { width: 100%; min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.dl-settings-page[data-category=context] .dl-settings-page-heading { flex: none; }
+.dl-context-settings { min-width: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dl-prompt-toolbar { flex: none; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.dl-prompt-studio { position: relative; display: grid; grid-template-columns: 66% 34%; grid-template-rows: minmax(0,1fr); flex: 1; min-height: 0; }
+.dl-prompt-scene { position: relative; min-width: 0; overflow: hidden; }
+.dl-prompt-canvas { position: absolute; inset: 48px 0 0; }
+.dl-prompt-canvas canvas { display: block; width: 100%; height: 100%; }
+.dl-prompt-total { position: absolute; inset: 9% 0 auto; text-align: center; font-size: 15px; letter-spacing: -.3px; pointer-events: none; z-index: 1; }
+.dl-prompt-total strong { font-weight: 500; }
+.dl-prompt-panel { position: relative; display: flex; min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
+.dl-prompt-target { position: absolute; left: 0; top: 50%; translate: -50% -50%; width: 9px; height: 9px; border: 1px solid var(--muted-foreground); border-radius: 50%; background: var(--background); pointer-events: none; z-index: 1; }
+.dl-prompt-content { flex: 1; padding: 9% 24px 36px; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.dl-prompt-content>h3 { font-size: 13px; display: flex; align-items: center; gap: 9px; margin: 0 0 14px; font-weight: 500; min-width: 0; }
+.dl-prompt-content>h3>span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-prompt-swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+.dl-prompt-count { color: var(--muted-foreground); margin-left: auto; font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dl-prompt-source { color: var(--muted-foreground); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; margin-bottom: 18px; }
+.dl-prompt-text { --content-font-size: 13px; --content-line-height: 1.9; font-family: inherit; font-size: 13px; line-height: 1.9; color: var(--muted-foreground); overflow-wrap: anywhere; margin: 0; animation: dl-prompt-reveal .16s ease-out; }
+.dl-prompt-connector { position: absolute; inset: 0; pointer-events: none; width: 100%; height: 100%; overflow: visible; }
+.dl-prompt-connector path { stroke: var(--muted-foreground); fill: none; stroke-width: 1; opacity: .6; }
+.dl-prompt-layer-buttons { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.dl-prompt-layer-buttons:focus-within,.dl-prompt-layer-buttons[data-fallback=true] { clip-path: none; width: auto; height: auto; inset: auto 16px 16px; display: flex; flex-wrap: wrap; gap: 8px; background: var(--background); padding: 8px; border-radius: 8px; }
+.dl-prompt-layer-buttons [aria-pressed=true] { background: var(--accent); color: var(--accent-foreground); }
+@keyframes dl-prompt-reveal { from { opacity: 0; } to { opacity: 1; } }
+@media(min-width:1300px) { .dl-prompt-content { padding-inline: 36px; } }
+@media(max-width:1050px) {
+  .dl-prompt-studio { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,.85fr) minmax(0,1fr); }
+  .dl-prompt-panel { border-left: 0; border-top: 1px solid var(--border); }
+  .dl-prompt-target { left: 50%; top: 0; }
+  .dl-prompt-content { padding: 24px 20px; }
+}
+@media(max-width:767px) {
+  .dl-settings-page[data-category=context][data-mobile-detail=true]>.dl-settings-scroll { display: flex; }
+  .dl-settings-page[data-category=context][data-mobile-detail=false]>.dl-settings-scroll { display: none; }
+}
+@media(prefers-reduced-motion:reduce) { .dl-prompt-text { animation: none; } }
 .dl-settings-page-heading { position: sticky; top: 0; z-index: 1; box-sizing: content-box; display: flex; align-items: center; gap: 12px; height: 60px; padding-top: var(--dl-safe-top); margin-bottom: 32px; border-bottom: 1px solid transparent; background: var(--background); }
 .dl-settings-page-heading::before { content: ""; position: absolute; inset: -16px -20px 0; background: var(--background); z-index: -1; }
 .dl-settings-page-heading h1 { font-size: calc(var(--ui-font-size, 14px) * 24 / 14); line-height: 1.2; font-weight: 500; }

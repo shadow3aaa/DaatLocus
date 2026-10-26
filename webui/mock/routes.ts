@@ -1,3 +1,4 @@
+import { systemPromptRoute } from "./system-prompt";
 import { appsRoute } from "./apps";
 import { configureComputerUse, getComputerUseStatus } from "./computer-use";
 import { importsRoute } from "./imports";
@@ -343,6 +344,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     if (!actor) return notFound("Unknown actor");
     return sseResponse(actor.summary.id, req.headers.get("last-event-id"));
   }
+
+  if (method === "GET") { const prompt = systemPromptRoute(url); if (prompt) return prompt; }
 
   // ---- actors -------------------------------------------------------------
   if (path === "/v1/actors" && method === "GET") {

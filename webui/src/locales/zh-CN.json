@@ -1,4 +1,15 @@
 {
+  "context_composition": {
+    "title": "上下文组成",
+    "role": "角色",
+    "refresh": "刷新上下文",
+    "diagram": "三维系统指令层叠图，选择文件查看内容",
+    "total": "合计",
+    "files": "选择指令文件",
+    "failed": "无法读取上下文，或文件已更改。请刷新重试。",
+    "loading": "正在读取上下文",
+    "empty": "没有系统指令文件。"
+},
   "browser_settings": {
   "clear_action": "清除…",
   "clear_summary": "保留历史记录和已下载的文件。",
