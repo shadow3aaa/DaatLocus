@@ -220,10 +220,64 @@ async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
     })
     .await
     .unwrap();
+    #[cfg(not(target_os = "linux"))]
     let pid = std::fs::read_to_string(&pidfile)
         .unwrap()
         .parse::<u32>()
         .unwrap();
+    let processes = sysinfo::System::new_all();
+    #[cfg(not(target_os = "linux"))]
+    let pids = std::collections::HashSet::from([sysinfo::Pid::from_u32(pid)]);
+    #[cfg(target_os = "linux")]
+    let pids = {
+        // Bubblewrap's --unshare-pid makes $$ a namespace PID. Match the
+        // unique fixture directory in the host supervisor's argv, then follow
+        // host parent IDs so this checks the actual supervisor/descendant tree.
+        let marker = directory.path().file_name().unwrap().to_string_lossy();
+        let mut pids = processes
+            .processes()
+            .iter()
+            .filter_map(|(pid, process)| {
+                process
+                    .cmd()
+                    .iter()
+                    .any(|arg| arg.to_string_lossy().contains(marker.as_ref()))
+                    .then_some(*pid)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            !pids.is_empty(),
+            "fixture has no observable host supervisor"
+        );
+        loop {
+            let children = processes
+                .processes()
+                .iter()
+                .filter_map(|(pid, process)| {
+                    process
+                        .parent()
+                        .is_some_and(|parent| pids.contains(&parent))
+                        .then_some(*pid)
+                })
+                .collect::<Vec<_>>();
+            let before = pids.len();
+            pids.extend(children);
+            if pids.len() == before {
+                break;
+            }
+        }
+        pids
+    };
+    let instances = pids
+        .into_iter()
+        .map(|pid| {
+            let started = processes
+                .process(pid)
+                .expect("fixture process exited before stop")
+                .start_time();
+            (pid, started)
+        })
+        .collect::<Vec<_>>();
     let queued = system
         .send_user("root", "Must not start".into(), vec![], None)
         .unwrap();
@@ -249,7 +303,11 @@ async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let processes = sysinfo::System::new_all();
-            if processes.process(sysinfo::Pid::from_u32(pid)).is_none() {
+            if instances.iter().all(|(pid, started)| {
+                processes
+                    .process(*pid)
+                    .is_none_or(|process| process.start_time() != *started)
+            }) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
