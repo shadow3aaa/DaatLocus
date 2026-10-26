@@ -52,7 +52,7 @@ async fn terminal_requires_the_same_read_scope_as_files_and_keeps_external_write
             .unwrap();
             assert_eq!(file.content, "outside fixture");
         }
-        let mut process = crate::terminal_app::process::TerminalProcess::spawn(
+        let mut process = daat_locus_bash::process::TerminalProcess::spawn(
             &command,
             root.to_str(),
             &process_policy,
@@ -98,33 +98,31 @@ async fn terminal_requires_the_same_read_scope_as_files_and_keeps_external_write
     assert!(!policy.is_path_readable(&outside));
 }
 
-#[cfg(windows)]
 fn command(tools: &Path, outside: &Path) -> String {
-    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"));
+    let executable = tools.join(if cfg!(windows) {
+        "dl-external-tool.cmd"
+    } else {
+        "dl-external-tool"
+    });
     std::fs::write(
-        tools.join("dl-external-tool.cmd"),
-        "@echo off\r\necho external-tool-ran\r\n",
+        &executable,
+        if cfg!(windows) {
+            "@echo off\r\necho external-tool-ran\r\n"
+        } else {
+            "#!/bin/sh\nprintf 'external-tool-ran\\n'\n"
+        },
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     format!(
-        r#"$ErrorActionPreference='Stop'; $env:PATH={}+';'+$env:PATH; dl-external-tool.cmd; if ($LASTEXITCODE -ne 0) {{exit 10}}; [Console]::WriteLine([IO.File]::ReadAllText({})); foreach ($path in @({}, {})) {{ $denied=$false; try {{ [IO.File]::WriteAllText($path, 'bad') }} catch [UnauthorizedAccessException] {{ $denied=$true }}; if (-not $denied) {{exit 20}} }}; [Console]::WriteLine('outside-write-denied'); [IO.File]::WriteAllText((Join-Path (Get-Location) 'output.txt'), 'workspace output')"#,
+        r#"set -eu; export PATH={}:"$PATH"; '{}'; while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; done < {}; for path in {} {}; do if (printf bad > "$path") 2>/dev/null; then exit 20; fi; done; printf '\noutside-write-denied\n'; printf 'workspace output' > output.txt"#,
         quote(tools),
-        quote(outside),
-        quote(outside),
-        quote(&tools.join("created.txt"))
-    )
-}
-
-#[cfg(unix)]
-fn command(tools: &Path, outside: &Path) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"));
-    let executable = tools.join("dl-external-tool");
-    std::fs::write(&executable, "#!/bin/sh\nprintf 'external-tool-ran\\n'\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    format!(
-        r#"set -eu; export PATH={}:"$PATH"; dl-external-tool; cat {}; for path in {} {}; do if (printf bad > "$path") 2>/dev/null; then exit 20; fi; done; printf '\noutside-write-denied\n'; printf 'workspace output' > output.txt"#,
-        quote(tools),
+        executable.display(),
         quote(outside),
         quote(outside),
         quote(&tools.join("created.txt"))

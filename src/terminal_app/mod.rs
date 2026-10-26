@@ -1,19 +1,11 @@
-use std::fmt::Write as _;
-pub mod process;
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    time::{Duration, Instant},
-};
-
-use crate::terminal_app::process::{
-    DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES, TerminalOutputChunk, TerminalOutputStats, TerminalProcess,
-};
 use async_trait::async_trait;
+pub use daat_locus_bash::{TerminalSessionState, TerminalToolResult};
 use miette::{Result, bail, miette};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
-
+use std::{fmt::Write as _, path::Path};
+pub type TerminalExecCommandRequest<'a> =
+    daat_locus_bash::TerminalExecCommandRequest<'a, RuntimeSandboxPolicy>;
 use crate::{
     app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
@@ -21,101 +13,18 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
     schema_utils::model_schema_for,
 };
-
+use daat_locus_bash::{TerminalManager, truncate_terminal_output_tail};
+mod backend;
+const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
 pub struct TerminalApp {
-    sessions: BTreeMap<String, TerminalSession>,
-    output_buffer_capacity: usize,
+    terminal: TerminalManager<RuntimeSandboxPolicy>,
 }
-
-pub struct TerminalExecCommandRequest<'a> {
-    pub command: String,
-    pub session_id: Option<String>,
-    pub workdir: Option<String>,
-    pub sandbox_policy: &'a RuntimeSandboxPolicy,
-    pub yield_time_ms: Option<u64>,
-    pub max_chars: Option<usize>,
-}
-
-struct TerminalSession {
-    process: Option<TerminalProcess>,
-    output_offset: usize,
-    last_activity: Instant,
-    state: TerminalSessionState,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalToolResult {
-    pub session: TerminalSessionState,
-    pub output: String,
-    pub output_missed_bytes: usize,
-    pub output_dropped_bytes: usize,
-    pub output_retained_bytes: usize,
-    pub output_buffer_capacity: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalSessionState {
-    pub session_id: String,
-    pub process_id: Option<u32>,
-    pub command: Option<String>,
-    pub status: String,
-    pub exit_code: Option<i32>,
-    pub cwd: Option<String>,
-    pub has_unread_output: bool,
-    #[serde(default)]
-    pub started_at_ms: Option<i64>,
-    #[serde(default)]
-    pub finished_at_ms: Option<i64>,
-    #[serde(default)]
-    pub output_total_written_bytes: usize,
-    #[serde(default)]
-    pub output_retained_bytes: usize,
-    #[serde(default)]
-    pub output_dropped_bytes: usize,
-    #[serde(default)]
-    pub output_buffer_capacity: usize,
-}
-
 impl Default for TerminalApp {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl TerminalApp {
-    const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
-    const WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS: u64 = 2_000;
-    const DEFAULT_WRITE_STDIN_YIELD_TIME_MS: u64 = 250;
-    const DEFAULT_WAIT_YIELD_TIME_MS: u64 = 30_000;
-    const MIN_EMPTY_POLL_YIELD_TIME_MS: u64 = 5_000;
-    const MAX_WRITE_STDIN_YIELD_TIME_MS: u64 = 30_000;
-    const MAX_WAIT_YIELD_TIME_MS: u64 = 120_000;
-    const TRAILING_OUTPUT_DRAIN_GRACE_MS: u64 = 100;
-    const FAST_EXIT_OBSERVATION_GRACE_MS: u64 = 500;
-    const MAX_EXITED_SESSION_TOMBSTONES: usize = 4;
-
-    pub const fn new() -> Self {
-        Self {
-            sessions: BTreeMap::new(),
-            output_buffer_capacity: DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES,
-        }
-    }
-
-    #[cfg(test)]
-    const fn new_with_output_buffer_capacity(output_buffer_capacity: usize) -> Self {
-        Self {
-            sessions: BTreeMap::new(),
-            output_buffer_capacity,
-        }
-    }
-
-    pub fn session_state(&self, session_id: &str) -> Result<TerminalSessionState> {
-        self.sessions
-            .get(session_id)
-            .map(|session| session.state.clone())
-            .ok_or_else(|| miette!("unknown terminal session `{session_id}`"))
-    }
-
     fn forbidden_input_reason(text: &str) -> Option<&'static str> {
         let forbidden = [
             ["gh", "auth", "login"].as_slice(),
@@ -127,8 +36,7 @@ impl TerminalApp {
             &["huggingface-cli", "login"],
             &["hf", "auth", "login"],
         ];
-        let Some(argv) = tokenize_shell_words(text).or_else(|| tokenize_powershell_words(text))
-        else {
+        let Some(argv) = daat_locus_bash::tokenize_shell_words(text) else {
             let normalized = text.trim().to_ascii_lowercase();
             return forbidden
                 .iter()
@@ -151,146 +59,46 @@ impl TerminalApp {
             .map(|_| LOGIN_COMMAND_REJECTION)
     }
 
-    fn cwd_from_shell_input(text: &str) -> Option<String> {
-        let trimmed = text.trim();
-        if cfg!(windows) {
-            let words = tokenize_powershell_words(trimmed)?;
-            if words.len() == 3
-                && words[0].eq_ignore_ascii_case("Set-Location")
-                && words[1].eq_ignore_ascii_case("-LiteralPath")
-            {
-                return Some(words[2].clone());
-            }
-            return None;
-        }
-
-        let words = tokenize_shell_words(trimmed)?;
-        if words.len() == 3 && words[0] == "cd" && words[1] == "--" {
-            Some(words[2].clone())
-        } else {
-            None
+    pub const fn new() -> Self {
+        Self {
+            terminal: TerminalManager::new(),
         }
     }
-
+    #[cfg(test)]
+    const fn new_with_output_buffer_capacity(capacity: usize) -> Self {
+        Self {
+            terminal: TerminalManager::new_with_output_buffer_capacity(capacity),
+        }
+    }
+    pub fn session_state(&self, id: &str) -> Result<TerminalSessionState> {
+        self.terminal.session_state(id)
+    }
+    pub fn terminate_session(&mut self, id: &str) -> Result<TerminalSessionState> {
+        self.terminal.terminate_session(id)
+    }
     pub async fn exec_command_with_progress<F>(
         &mut self,
         request: TerminalExecCommandRequest<'_>,
-        mut on_progress: F,
+        progress: F,
     ) -> Result<TerminalToolResult>
     where
         F: FnMut(&TerminalSessionState, &str) + Send,
     {
-        let TerminalExecCommandRequest {
-            command,
-            session_id,
-            workdir,
-            sandbox_policy,
-            yield_time_ms,
-            max_chars,
-        } = request;
-
-        let target_session_id = match session_id {
-            Some(id) if !id.trim().is_empty() && id.trim().to_lowercase() != "null" => id,
-            _ => self.create_session(),
-        };
-        if let Some(reason) = Self::forbidden_input_reason(&command) {
+        if let Some(reason) = Self::forbidden_input_reason(&request.command) {
             bail!(reason);
         }
-        let output_buffer_capacity = self.output_buffer_capacity;
-        let effective_workdir = workdir;
-        let session = self.session_mut(&target_session_id).map_err(|_| {
-            miette!(
-                "terminal session `{target_session_id}` does not exist; \
-                 pass JSON null for `session_id` to create a new session"
-            )
-        })?;
-        if session.state.status == "running" {
-            bail!("terminal session `{target_session_id}` already has a running process");
-        }
-        session.process = Some(
-            spawn_terminal_process(
-                &command,
-                effective_workdir.as_deref(),
-                sandbox_policy,
-                output_buffer_capacity,
-            )
+        self.terminal
+            .exec_command_with_progress(request, progress)
             .await
-            .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
-        );
-
-        session.output_offset = 0;
-        session.state.command = Some(command);
-        session.state.status = "running".to_string();
-        session.state.exit_code = None;
-        session.state.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
-        session.state.finished_at_ms = None;
-        session.state.output_buffer_capacity = output_buffer_capacity;
-        if let Some(workdir) = effective_workdir.clone() {
-            session.state.cwd = Some(workdir);
-        }
-        session.state.has_unread_output = true;
-        let start_offset = session.output_offset;
-        let mut progress_offset = start_offset;
-        session.last_activity = Instant::now();
-        let timeout = Duration::from_millis(Self::initial_exec_yield_time_ms(yield_time_ms));
-        let started_at = Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            refresh_terminal_session(session);
-            let chunk = session.process.as_ref().map_or_else(
-                || empty_terminal_output_chunk(progress_offset, &session.state),
-                |process| process.output_since(progress_offset),
-            );
-            progress_offset = chunk.next_offset;
-            apply_terminal_output_stats(&mut session.state, chunk.stats);
-            let delta = format_terminal_output_chunk(&chunk, max_chars);
-            if !delta.is_empty() {
-                on_progress(&session.state, &delta);
-            }
-            if session.state.status != "running" || started_at.elapsed() >= timeout {
-                break;
-            }
-        }
-        wait_for_fast_exit_after_short_initial_yield(
-            session,
-            start_offset,
-            timeout,
-            Duration::from_millis(Self::FAST_EXIT_OBSERVATION_GRACE_MS),
-        )
-        .await;
-        wait_for_trailing_terminal_output(session).await;
-        refresh_terminal_session(session);
-        let chunk = session.process.as_ref().map_or_else(
-            || empty_terminal_output_chunk(start_offset, &session.state),
-            |process| process.output_since(start_offset),
-        );
-        session.output_offset = chunk.next_offset;
-        apply_terminal_output_stats(&mut session.state, chunk.stats);
-        session.last_activity = Instant::now();
-        session.state.has_unread_output = false;
-        let state = session.state.clone();
-        let output = format_terminal_output_chunk(&chunk, max_chars);
-        let output_missed_bytes = chunk.missed_bytes;
-        let output_stats = chunk.stats;
-        self.prune_exited_sessions();
-        Ok(TerminalToolResult {
-            session: state,
-            output,
-            output_missed_bytes,
-            output_dropped_bytes: output_stats.dropped_bytes,
-            output_retained_bytes: output_stats.retained_bytes,
-            output_buffer_capacity: output_stats.buffer_capacity,
-        })
     }
-
     pub async fn write_stdin_with_progress<F>(
         &mut self,
-        session_id: &str,
+        id: &str,
         text: String,
-        wait_mode: TerminalWaitMode,
+        mode: TerminalWaitMode,
         yield_time_ms: Option<u64>,
         max_chars: Option<usize>,
-        mut on_progress: F,
+        progress: F,
     ) -> Result<TerminalToolResult>
     where
         F: FnMut(&TerminalSessionState, &str) + Send,
@@ -298,175 +106,21 @@ impl TerminalApp {
         if let Some(reason) = Self::forbidden_input_reason(&text) {
             bail!(reason);
         }
-        let session = self.session_mut(session_id)?;
-        let start_offset = session.output_offset;
-        let Some(process) = session.process.as_mut() else {
-            bail!("terminal session `{session_id}` has no running process");
-        };
-        if let Some(updated_cwd) = Self::cwd_from_shell_input(&text) {
-            session.state.cwd = Some(updated_cwd);
-        }
-        let mut progress_offset = start_offset;
-        process
-            .write(&text)
+        self.terminal
+            .write_stdin_with_progress(
+                id,
+                text,
+                match mode {
+                    TerminalWaitMode::AnyOutput => daat_locus_bash::TerminalWaitMode::AnyOutput,
+                    TerminalWaitMode::Timeout => daat_locus_bash::TerminalWaitMode::Timeout,
+                },
+                yield_time_ms,
+                max_chars,
+                progress,
+            )
             .await
-            .map_err(|err| miette!("failed to write stdin to terminal process: {err}"))?;
-        session.last_activity = Instant::now();
-        session.state.has_unread_output = true;
-        let requested_yield_ms = yield_time_ms.unwrap_or(match wait_mode {
-            TerminalWaitMode::AnyOutput => Self::DEFAULT_WRITE_STDIN_YIELD_TIME_MS,
-            TerminalWaitMode::Timeout => Self::DEFAULT_WAIT_YIELD_TIME_MS,
-        });
-        let effective_yield_ms = match wait_mode {
-            TerminalWaitMode::AnyOutput if text.is_empty() => requested_yield_ms.clamp(
-                Self::MIN_EMPTY_POLL_YIELD_TIME_MS,
-                Self::MAX_WRITE_STDIN_YIELD_TIME_MS,
-            ),
-            TerminalWaitMode::AnyOutput => {
-                requested_yield_ms.min(Self::MAX_WRITE_STDIN_YIELD_TIME_MS)
-            }
-            TerminalWaitMode::Timeout => requested_yield_ms.min(Self::MAX_WAIT_YIELD_TIME_MS),
-        };
-        let timeout = Duration::from_millis(effective_yield_ms);
-        let started_at = Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            refresh_terminal_session(session);
-            let previous_progress_offset = progress_offset;
-            let chunk = session.process.as_ref().map_or_else(
-                || empty_terminal_output_chunk(progress_offset, &session.state),
-                |process| process.output_since(progress_offset),
-            );
-            progress_offset = chunk.next_offset;
-            apply_terminal_output_stats(&mut session.state, chunk.stats);
-            let has_output_update =
-                chunk.missed_bytes > 0 || chunk.next_offset > previous_progress_offset;
-            if wait_mode == TerminalWaitMode::AnyOutput {
-                let delta = format_terminal_output_chunk(&chunk, max_chars);
-                if !delta.is_empty() {
-                    on_progress(&session.state, &delta);
-                }
-            }
-            if session.state.status != "running"
-                || started_at.elapsed() >= timeout
-                || (wait_mode == TerminalWaitMode::AnyOutput && has_output_update)
-            {
-                break;
-            }
-        }
-        wait_for_trailing_terminal_output(session).await;
-        refresh_terminal_session(session);
-        let chunk = session.process.as_ref().map_or_else(
-            || empty_terminal_output_chunk(start_offset, &session.state),
-            |process| process.output_since(start_offset),
-        );
-        session.output_offset = chunk.next_offset;
-        apply_terminal_output_stats(&mut session.state, chunk.stats);
-        session.last_activity = Instant::now();
-        session.state.has_unread_output = false;
-        let state = session.state.clone();
-        let output = format_terminal_output_chunk(&chunk, max_chars);
-        let output_missed_bytes = chunk.missed_bytes;
-        let output_stats = chunk.stats;
-        self.prune_exited_sessions();
-        Ok(TerminalToolResult {
-            session: state,
-            output,
-            output_missed_bytes,
-            output_dropped_bytes: output_stats.dropped_bytes,
-            output_retained_bytes: output_stats.retained_bytes,
-            output_buffer_capacity: output_stats.buffer_capacity,
-        })
-    }
-
-    fn initial_exec_yield_time_ms(yield_time_ms: Option<u64>) -> u64 {
-        let requested = yield_time_ms.unwrap_or(Self::DEFAULT_EXEC_YIELD_TIME_MS);
-        if cfg!(windows) {
-            requested.max(Self::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS)
-        } else {
-            requested
-        }
-    }
-
-    pub fn terminate_session(&mut self, session_id: &str) -> Result<TerminalSessionState> {
-        let state = {
-            let session = self.session_mut(session_id)?;
-            if let Some(process) = session.process.as_mut() {
-                let _ = process.start_kill();
-            }
-            session.state.status = "terminating".to_string();
-            session.state.has_unread_output = true;
-            session.last_activity = Instant::now();
-            refresh_terminal_session(session);
-            session.state.clone()
-        };
-        self.sessions.remove(session_id);
-        Ok(state)
-    }
-
-    fn session_mut(&mut self, session_id: &str) -> Result<&mut TerminalSession> {
-        self.sessions
-            .get_mut(session_id)
-            .ok_or_else(|| miette::miette!("unknown terminal session `{session_id}`"))
-    }
-
-    #[cfg(test)]
-    fn refresh_all_sessions(&mut self) {
-        for session in self.sessions.values_mut() {
-            refresh_terminal_session(session);
-        }
-        self.prune_exited_sessions();
-    }
-
-    fn create_session(&mut self) -> String {
-        // Instance reconstruction must never let an old reference target a
-        // different process, including after idle passivation or restart.
-        let session_id = format!("terminal-session-{}", uuid::Uuid::new_v4());
-        let session = TerminalSession {
-            process: None,
-            output_offset: 0,
-            last_activity: Instant::now(),
-            state: TerminalSessionState {
-                session_id: session_id.clone(),
-                process_id: None,
-                command: None,
-                status: "idle".to_string(),
-                exit_code: None,
-                cwd: None,
-                has_unread_output: true,
-                started_at_ms: None,
-                finished_at_ms: None,
-                output_total_written_bytes: 0,
-                output_retained_bytes: 0,
-                output_dropped_bytes: 0,
-                output_buffer_capacity: self.output_buffer_capacity,
-            },
-        };
-        self.sessions.insert(session_id.clone(), session);
-        session_id
-    }
-
-    fn prune_exited_sessions(&mut self) {
-        let exited_ids = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.state.status.starts_with("exited"))
-            .map(|(session_id, session)| (session_id.clone(), session.last_activity))
-            .collect::<Vec<_>>();
-
-        if exited_ids.len() <= Self::MAX_EXITED_SESSION_TOMBSTONES {
-            return;
-        }
-
-        let mut sorted = exited_ids;
-        sorted.sort_by_key(|(_, last_activity)| *last_activity);
-        let remove_count = sorted.len() - Self::MAX_EXITED_SESSION_TOMBSTONES;
-        for (session_id, _) in sorted.into_iter().take(remove_count) {
-            self.sessions.remove(&session_id);
-        }
     }
 }
-
 fn parse_terminal_tool_args<T: for<'de> Deserialize<'de>>(call: &AgentToolCall) -> Result<T> {
     serde_json::from_value(call.arguments.clone()).map_err(|err| {
         miette!(
@@ -515,50 +169,6 @@ fn terminal_session_meta(session: &TerminalSessionState) -> String {
     meta
 }
 
-const fn apply_terminal_output_stats(
-    session: &mut TerminalSessionState,
-    stats: TerminalOutputStats,
-) {
-    session.output_total_written_bytes = stats.total_written_bytes;
-    session.output_retained_bytes = stats.retained_bytes;
-    session.output_dropped_bytes = stats.dropped_bytes;
-    session.output_buffer_capacity = stats.buffer_capacity;
-}
-
-const fn empty_terminal_output_chunk(
-    next_offset: usize,
-    session: &TerminalSessionState,
-) -> TerminalOutputChunk {
-    TerminalOutputChunk {
-        text: String::new(),
-        next_offset,
-        missed_bytes: 0,
-        stats: TerminalOutputStats {
-            buffer_capacity: session.output_buffer_capacity,
-            total_written_bytes: next_offset,
-            retained_bytes: session.output_retained_bytes,
-            dropped_bytes: session.output_dropped_bytes,
-        },
-    }
-}
-
-fn format_terminal_output_chunk(chunk: &TerminalOutputChunk, max_chars: Option<usize>) -> String {
-    let output = truncate_terminal_output(chunk.text.clone(), max_chars);
-    if chunk.missed_bytes == 0 {
-        return output;
-    }
-
-    let notice = format!(
-        "[terminal output truncated: {} byte(s) dropped before this read]",
-        chunk.missed_bytes
-    );
-    if output.is_empty() {
-        notice
-    } else {
-        format!("{notice}\n{output}")
-    }
-}
-
 fn terminal_output_metadata_lines(result: &TerminalToolResult) -> Vec<String> {
     if result.output_missed_bytes == 0 && result.output_dropped_bytes == 0 {
         return Vec::new();
@@ -592,189 +202,6 @@ fn resolve_terminal_path(
     context.resolve_tool_path(Path::new(raw), base)
 }
 
-async fn spawn_terminal_process(
-    command: &str,
-    workdir: Option<&str>,
-    sandbox_policy: &RuntimeSandboxPolicy,
-    output_buffer_capacity: usize,
-) -> std::io::Result<TerminalProcess> {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    struct CancelStartup(Arc<AtomicBool>);
-    impl Drop for CancelStartup {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let _cancel_on_drop = CancelStartup(cancelled.clone());
-    let command = command.to_owned();
-    let workdir = workdir.map(str::to_owned);
-    let policy = sandbox_policy.clone();
-    tokio::task::spawn_blocking(move || {
-        TerminalProcess::spawn_cancellable(
-            &command,
-            workdir.as_deref(),
-            &policy,
-            output_buffer_capacity,
-            Some(cancelled),
-        )
-    })
-    .await
-    .map_err(std::io::Error::other)?
-}
-
-const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
-
-/// POSIX-like words. `None` means an open quote or trailing backslash.
-fn tokenize_shell_words(input: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_word = false;
-    let mut quote: Option<char> = None;
-
-    while let Some(ch) = chars.next() {
-        match quote {
-            Some('\'') => {
-                if ch == '\'' {
-                    quote = None;
-                } else {
-                    current.push(ch);
-                }
-                in_word = true;
-            }
-            Some('"') => {
-                if ch == '\\' {
-                    match chars.next() {
-                        Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
-                        Some('\n') => {}
-                        Some(other) => {
-                            current.push('\\');
-                            current.push(other);
-                        }
-                        None => return None,
-                    }
-                    in_word = true;
-                } else if ch == '"' {
-                    quote = None;
-                    in_word = true;
-                } else {
-                    current.push(ch);
-                    in_word = true;
-                }
-            }
-            None if ch == '\\' => match chars.next() {
-                Some('\n') => {}
-                Some(escaped) => {
-                    current.push(escaped);
-                    in_word = true;
-                }
-                None => return None,
-            },
-            None if ch == '\'' || ch == '"' => {
-                quote = Some(ch);
-                in_word = true;
-            }
-            None if ch.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut current));
-                    in_word = false;
-                }
-            }
-            None => {
-                current.push(ch);
-                in_word = true;
-            }
-            Some(_) => unreachable!(),
-        }
-    }
-
-    if quote.is_some() {
-        return None;
-    }
-    if in_word {
-        words.push(current);
-    }
-    Some(words)
-}
-
-/// PowerShell words. Single quotes are literal and `''` is an escaped quote.
-fn tokenize_powershell_words(input: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_word = false;
-    let mut in_single = false;
-    let mut in_double = false;
-
-    while let Some(ch) = chars.next() {
-        if in_single {
-            if ch == '\'' {
-                if chars.peek().copied() == Some('\'') {
-                    chars.next();
-                    current.push('\'');
-                } else {
-                    in_single = false;
-                }
-            } else {
-                current.push(ch);
-            }
-            in_word = true;
-            continue;
-        }
-        if in_double {
-            if ch == '`' {
-                {
-                    let escaped = chars.next()?;
-                    current.push(escaped)
-                }
-            } else if ch == '"' {
-                in_double = false;
-            } else {
-                current.push(ch);
-            }
-            in_word = true;
-            continue;
-        }
-        match ch {
-            '\'' => {
-                in_single = true;
-                in_word = true;
-            }
-            '"' => {
-                in_double = true;
-                in_word = true;
-            }
-            '`' => {
-                let escaped = chars.next()?;
-                current.push(escaped);
-                in_word = true;
-            }
-            ch if ch.is_whitespace() => {
-                if in_word {
-                    words.push(std::mem::take(&mut current));
-                    in_word = false;
-                }
-            }
-            other => {
-                current.push(other);
-                in_word = true;
-            }
-        }
-    }
-
-    if in_single || in_double {
-        return None;
-    }
-    if in_word {
-        words.push(current);
-    }
-    Some(words)
-}
-
 fn compact_terminal_model_content(
     summary: &str,
     session: &TerminalSessionState,
@@ -799,7 +226,11 @@ impl App for TerminalApp {
     fn can_passivate(&self) -> bool {
         // Retain both live processes and unread/retained output. Session IDs
         // must not silently become invalid (or be reused) across inputs.
-        self.sessions.is_empty()
+        self.terminal.is_empty()
+    }
+    async fn shutdown(&mut self) -> Result<()> {
+        self.terminal.shutdown();
+        Ok(())
     }
     fn id(&self) -> AppId {
         AppId::terminal()
@@ -843,16 +274,11 @@ impl App for TerminalApp {
 
         if call.name == "terminal_write_stdin" {
             let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
-            let session = self
-                .sessions
-                .get(&args.session_id)
-                .ok_or_else(|| miette!("unknown terminal session"))?;
             if !args.text.is_empty() {
-                session
-                    .process
-                    .as_ref()
-                    .ok_or_else(|| miette!("Terminal process is unavailable"))?
-                    .ensure_policy(&process_policy)?;
+                self.terminal
+                    .ensure_policy(&args.session_id, &process_policy)?;
+            } else {
+                self.terminal.session_state(&args.session_id)?;
             }
         }
         match call.name.as_str() {
@@ -932,7 +358,7 @@ impl App for TerminalApp {
                     }),
                     Some(model_content),
                 );
-                tool_result.sandbox = take_session_denial_report(&mut self.sessions, &session_id);
+                tool_result.sandbox = self.terminal.take_denial_report(&session_id);
                 Ok(tool_result)
             }
             "terminal_write_stdin" => {
@@ -1026,7 +452,7 @@ impl App for TerminalApp {
                     }),
                     Some(model_content),
                 );
-                tool_result.sandbox = take_session_denial_report(&mut self.sessions, &session_id);
+                tool_result.sandbox = self.terminal.take_denial_report(&session_id);
                 Ok(tool_result)
             }
             "terminal_terminate" => {
@@ -1037,8 +463,7 @@ impl App for TerminalApp {
                     json!({ "session": session }),
                     None,
                 );
-                tool_result.sandbox =
-                    take_session_denial_report(&mut self.sessions, &args.session_id);
+                tool_result.sandbox = self.terminal.take_denial_report(&args.session_id);
                 Ok(tool_result)
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
@@ -1056,108 +481,6 @@ fn terminal_process_policy(context: &AppToolExecutionContext) -> RuntimeSandboxP
 }
 
 /// Takes the native denial records an exited session captured, if any.
-fn take_session_denial_report(
-    sessions: &mut BTreeMap<String, TerminalSession>,
-    session_id: &str,
-) -> Option<crate::sandbox::DenialReport> {
-    sessions
-        .get_mut(session_id)
-        .and_then(|session| session.process.as_mut())
-        .map(|process| process.take_denial_report())
-}
-
-fn refresh_terminal_session(session: &mut TerminalSession) {
-    session.state.process_id = session
-        .process
-        .as_ref()
-        .and_then(process::TerminalProcess::process_id);
-    let mut process_running = session.process.is_some();
-    if let Some(process) = session.process.as_mut() {
-        match process.try_wait() {
-            Ok(Some(exit_status)) => {
-                session.state.exit_code = exit_status.code();
-                session.state.has_unread_output = true;
-                session.state.status = "exited".to_string();
-                session
-                    .state
-                    .finished_at_ms
-                    .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
-                process_running = false;
-            }
-            Ok(None) => {
-                process_running = true;
-            }
-            Err(_) => {}
-        }
-    }
-
-    if let Some(process) = session.process.as_ref() {
-        apply_terminal_output_stats(&mut session.state, process.output_stats());
-    }
-    session.state.has_unread_output = session
-        .process
-        .as_ref()
-        .is_some_and(|process| process.output_len() > session.output_offset);
-    if !session.state.status.starts_with("exited") {
-        session.state.status = if process_running {
-            "running".to_string()
-        } else {
-            "idle".to_string()
-        };
-    }
-}
-
-async fn wait_for_fast_exit_after_short_initial_yield(
-    session: &mut TerminalSession,
-    start_offset: usize,
-    initial_yield: Duration,
-    grace: Duration,
-) {
-    if initial_yield > grace || session.state.status != "running" {
-        return;
-    }
-    let Some(process) = session.process.as_ref() else {
-        return;
-    };
-    if process.output_len() > start_offset {
-        return;
-    }
-
-    let started_at = Instant::now();
-    loop {
-        refresh_terminal_session(session);
-        if session.state.status != "running" {
-            return;
-        }
-        let Some(process) = session.process.as_ref() else {
-            return;
-        };
-        if process.output_len() > start_offset || started_at.elapsed() >= grace {
-            return;
-        }
-        let remaining = grace.saturating_sub(started_at.elapsed());
-        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
-    }
-}
-
-async fn wait_for_trailing_terminal_output(session: &TerminalSession) {
-    if session.state.status == "running" {
-        return;
-    }
-    let Some(process) = session.process.as_ref() else {
-        return;
-    };
-    let _ = process
-        .wait_for_output_drained(Duration::from_millis(
-            TerminalApp::TRAILING_OUTPUT_DRAIN_GRACE_MS,
-        ))
-        .await;
-}
-
-fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String {
-    truncate_terminal_output_tail(content, max_chars, "terminal output shortened by max_chars")
-}
-
 fn truncate_terminal_output_for_model(content: &str, max_tokens: usize) -> String {
     let output_token_budget = max_tokens.saturating_sub(128).max(1);
     let max_chars = output_token_budget
@@ -1170,29 +493,6 @@ fn truncate_terminal_output_for_model(content: &str, max_tokens: usize) -> Strin
     )
 }
 
-fn truncate_terminal_output_tail(
-    content: String,
-    max_chars: Option<usize>,
-    reason: &str,
-) -> String {
-    if let Some(limit) = max_chars
-        && content.chars().count() > limit
-    {
-        let chars = content.chars().collect::<Vec<_>>();
-        let omitted = chars.len().saturating_sub(limit);
-        let tail = chars[chars.len().saturating_sub(limit)..]
-            .iter()
-            .collect::<String>();
-        let notice = format!("[{reason}: {omitted} char(s) omitted; showing tail]");
-        return if tail.is_empty() {
-            notice
-        } else {
-            format!("{notice}\n{tail}")
-        };
-    }
-    content
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,12 +501,12 @@ mod tests {
     fn retained_sessions_prevent_passivation_and_reconstruction_never_reuses_ids() {
         let mut app = TerminalApp::new();
         assert!(app.can_passivate());
-        let old = app.create_session();
+        let old = app.terminal.create_session();
         assert!(!app.can_passivate());
         app.terminate_session(&old).unwrap();
         assert!(app.can_passivate());
         let mut rebuilt = TerminalApp::new();
-        let fresh = rebuilt.create_session();
+        let fresh = rebuilt.terminal.create_session();
         assert_ne!(old, fresh);
         assert!(rebuilt.session_state(&old).is_err());
     }
@@ -1269,84 +569,35 @@ mod tests {
     }
 
     fn echo_command(text: &str) -> String {
-        if cfg!(windows) {
-            format!("Write-Output '{text}'")
-        } else {
-            format!("printf '%s\\n' '{text}'")
-        }
+        format!("printf '%s\\n' '{text}'")
     }
-
     fn long_running_command() -> String {
-        if cfg!(windows) {
-            "Start-Sleep -Seconds 30".to_string()
-        } else {
-            "sleep 30".to_string()
-        }
+        "sleep 30".into()
     }
-
     fn high_output_command(byte_count: usize) -> String {
-        if cfg!(windows) {
-            format!("[Console]::Out.Write(('x' * {byte_count}))")
-        } else {
-            format!("printf '%{byte_count}s' '' | tr ' ' x")
-        }
+        format!("printf '%{byte_count}s' ''")
     }
-
     fn marked_high_output_command(byte_count: usize) -> String {
-        if cfg!(windows) {
-            format!(
-                "[Console]::Out.Write('HEAD-MARKER'); [Console]::Out.Write(('x' * {byte_count})); [Console]::Out.Write('TAIL-MARKER')"
-            )
-        } else {
-            format!(
-                "printf 'HEAD-MARKER'; printf '%{byte_count}s' '' | tr ' ' x; printf 'TAIL-MARKER'"
-            )
-        }
+        format!("printf 'HEAD-MARKER'; printf '%{byte_count}s' ''; printf 'TAIL-MARKER'")
     }
-
     fn delayed_output_after_ms_then_sleep_command(text: &str, delay_ms: u64) -> String {
-        if cfg!(windows) {
-            format!(
-                "Start-Sleep -Milliseconds {delay_ms}; Write-Output '{text}'; Start-Sleep -Seconds 2"
-            )
-        } else {
-            let seconds = delay_ms / 1_000;
-            let milliseconds = delay_ms % 1_000;
-            format!("sleep {seconds}.{milliseconds:03}; printf '%s\\n' '{text}'; sleep 2")
-        }
+        let seconds = delay_ms / 1_000;
+        let milliseconds = delay_ms % 1_000;
+        format!("sleep {seconds}.{milliseconds:03}; printf '%s\\n' '{text}'; sleep 2")
     }
-
     fn interactive_shell_command() -> String {
-        if cfg!(windows) {
-            "powershell.exe -NoLogo -NoProfile -NoExit -Command -".to_string()
-        } else {
-            "bash".to_string()
-        }
+        "exec \"$BASH\" -s".into()
     }
 
     async fn start_stdin_echo_session(
         app: &mut TerminalApp,
         sandbox_policy: &RuntimeSandboxPolicy,
     ) -> String {
-        let marker = "daat-locus-shell-ready";
-        // Exercise real stdin/stdout in the terminal's existing shell, without a
-        // second PowerShell startup or an interactive prompt racing the output.
-        // After the marker, output is gated by stdin and the process stays alive
-        // awaiting more input rather than relying on a sleep to keep it running.
-        // A short output delay also catches a wait that only polls once.
-        let command = if cfg!(windows) {
-            format!(
-                "[Console]::Out.Write('{marker}'); [Console]::Out.Flush(); \
-                 while (($line = [Console]::ReadLine()) -ne $null) {{ \
-                 Start-Sleep -Milliseconds 100; \
-                 [Console]::Out.WriteLine($line); [Console]::Out.Flush() }}"
-            )
-        } else {
-            format!(
-                "printf '%s' '{marker}'; \
-                 while IFS= read -r line; do sleep 0.1; printf '%s\\n' \"$line\"; done"
-            )
-        };
+        let marker = "daat-locus-bash-ready";
+        // Exercise real stdin, including delayed output, inside the Rubash child.
+        let command = format!(
+            "printf '%s' '{marker}'; while IFS= read -r line; do sleep 0.1; printf '%s\\n' \"$line\"; done"
+        );
         let mut output = String::new();
         // Startup has its own bounded deadline, separate from wait-mode checks.
         // AnyOutput can return before the complete marker arrives.
@@ -1392,34 +643,7 @@ mod tests {
     }
 
     fn env_value_command(name: &str) -> String {
-        if cfg!(windows) {
-            format!(
-                "if ($env:{name}) {{ [Console]::Out.Write($env:{name}) }} else {{ [Console]::Out.Write('missing') }}"
-            )
-        } else {
-            format!("printf '%s' \"${{{name}-missing}}\"")
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn initial_exec_yield_time_uses_windows_floor() {
-        assert_eq!(
-            TerminalApp::initial_exec_yield_time_ms(Some(1)),
-            TerminalApp::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS
-        );
-        assert_eq!(
-            TerminalApp::initial_exec_yield_time_ms(Some(
-                TerminalApp::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS + 1
-            )),
-            TerminalApp::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS + 1
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn initial_exec_yield_time_has_no_platform_floor() {
-        assert_eq!(TerminalApp::initial_exec_yield_time_ms(Some(1)), 1);
+        format!("printf '%s' \"${{{name}-missing}}\"")
     }
 
     #[cfg(windows)]
@@ -1431,7 +655,7 @@ mod tests {
         let created = app
             .exec_command_with_progress(
                 TerminalExecCommandRequest {
-                    command: "Write-Output '中文输出'".to_string(),
+                    command: "printf '中文输出\\n'".to_string(),
                     session_id: None,
                     workdir: None,
                     sandbox_policy: &sandbox_policy,
@@ -1470,12 +694,8 @@ mod tests {
             .await
             .expect("create new session should succeed");
 
-        app.refresh_all_sessions();
-        let sessions = app
-            .sessions
-            .values()
-            .map(|session| session.state.clone())
-            .collect::<Vec<_>>();
+        app.terminal.refresh_all_sessions();
+        let sessions = app.terminal.session_states();
         assert!(
             sessions
                 .iter()
@@ -1508,12 +728,8 @@ mod tests {
             .expect("terminate should succeed");
         assert_eq!(terminated.session_id, created.session.session_id);
 
-        app.refresh_all_sessions();
-        let sessions = app
-            .sessions
-            .values()
-            .map(|session| session.state.clone())
-            .collect::<Vec<_>>();
+        app.terminal.refresh_all_sessions();
+        let sessions = app.terminal.session_states();
         assert!(
             sessions
                 .iter()
@@ -1543,7 +759,7 @@ mod tests {
             .expect("create long-running session should succeed");
         app.terminate_session(&created.session.session_id)
             .expect("terminate should succeed");
-        assert!(app.sessions.is_empty());
+        assert!(app.terminal.is_empty());
     }
 
     #[tokio::test]
@@ -1551,7 +767,7 @@ mod tests {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        for idx in 0..(TerminalApp::MAX_EXITED_SESSION_TOMBSTONES + 2) {
+        for idx in 0..(TerminalManager::<RuntimeSandboxPolicy>::MAX_EXITED_SESSION_TOMBSTONES + 2) {
             let created = app
                 .exec_command_with_progress(
                     TerminalExecCommandRequest {
@@ -1567,21 +783,20 @@ mod tests {
                 .await
                 .expect("create short-lived session should succeed");
             tokio::time::sleep(Duration::from_millis(5)).await;
-            app.refresh_all_sessions();
+            app.terminal.refresh_all_sessions();
             let _ = created;
         }
 
-        app.refresh_all_sessions();
-        let sessions = app
-            .sessions
-            .values()
-            .map(|session| session.state.clone())
-            .collect::<Vec<_>>();
+        app.terminal.refresh_all_sessions();
+        let sessions = app.terminal.session_states();
         let exited_sessions = sessions
             .iter()
             .filter(|session| session.status.starts_with("exited"))
             .count();
-        assert!(exited_sessions <= TerminalApp::MAX_EXITED_SESSION_TOMBSTONES);
+        assert!(
+            exited_sessions
+                <= TerminalManager::<RuntimeSandboxPolicy>::MAX_EXITED_SESSION_TOMBSTONES
+        );
     }
 
     #[tokio::test]
@@ -1647,11 +862,7 @@ mod tests {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
         let marker = "between-poll-output";
-        let output_delay_ms = if cfg!(windows) {
-            TerminalApp::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS + 500
-        } else {
-            2_000
-        };
+        let output_delay_ms = if cfg!(windows) { 2_000 + 500 } else { 2_000 };
 
         let started = app
             .exec_command_with_progress(
@@ -1829,17 +1040,10 @@ mod tests {
     async fn failed_command_retains_output_without_replaying_effects() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("effect.txt");
-        let command = if cfg!(windows) {
-            format!(
-                "[IO.File]::AppendAllText('{}', 'x'); [Console]::Error.WriteLine('synthetic command failure'); exit 7",
-                marker.to_string_lossy().replace('\'', "''")
-            )
-        } else {
-            format!(
-                "printf x >> '{}'; printf 'synthetic command failure\\n' >&2; exit 7",
-                marker.to_string_lossy().replace('\'', "'\"'\"'")
-            )
-        };
+        let command = format!(
+            "printf x >> '{}'; printf 'synthetic command failure\\n' >&2; exit 7",
+            marker.to_string_lossy().replace('\'', "'\"'\"'")
+        );
         let context = AppToolExecutionContext {
             restart_native: false,
             access_broker: None,
@@ -1915,11 +1119,7 @@ mod tests {
         );
 
         if started.session.status == "running" {
-            let input = if cfg!(windows) {
-                "Write-Output 'continued-output'\nexit\n".to_string()
-            } else {
-                "echo continued-output\nexit\n".to_string()
-            };
+            let input = "echo continued-output\nexit\n".to_string();
 
             let polled = app
                 .write_stdin_with_progress(
@@ -2031,32 +1231,14 @@ mod tests {
     #[test]
     fn shell_tokenizers_preserve_quotes_and_login_argv() {
         assert_eq!(
-            tokenize_shell_words("cd -- 'a b'").as_deref(),
+            daat_locus_bash::tokenize_shell_words("cd -- 'a b'").as_deref(),
             Some(["cd".to_string(), "--".to_string(), "a b".to_string()].as_slice())
         );
         assert_eq!(
-            tokenize_powershell_words("Set-Location -LiteralPath 'a''b'").as_deref(),
-            Some(
-                [
-                    "Set-Location".to_string(),
-                    "-LiteralPath".to_string(),
-                    "a'b".to_string()
-                ]
-                .as_slice()
-            )
+            TerminalManager::<RuntimeSandboxPolicy>::cwd_from_shell_input("cd -- '/tmp/my dir'")
+                .as_deref(),
+            Some("/tmp/my dir")
         );
-        if cfg!(windows) {
-            assert_eq!(
-                TerminalApp::cwd_from_shell_input("Set-Location -LiteralPath 'C:\\tmp\\a''b'")
-                    .as_deref(),
-                Some("C:\\tmp\\a'b")
-            );
-        } else {
-            assert_eq!(
-                TerminalApp::cwd_from_shell_input("cd -- '/tmp/my dir'").as_deref(),
-                Some("/tmp/my dir")
-            );
-        }
         assert!(TerminalApp::forbidden_input_reason("gh auth login --web").is_some());
         assert!(TerminalApp::forbidden_input_reason("echo gh auth login").is_none());
         assert!(TerminalApp::forbidden_input_reason("'gh auth login'").is_none());
@@ -2086,11 +1268,10 @@ mod tests {
                 turn_epoch: 0,
                 actor_call: None,
             };
-            let command = if cfg!(windows) {
-                format!("Get-Content -Raw -LiteralPath '{}'", file.display())
-            } else {
-                format!("cat '{}'", file.display())
-            };
+            let command = format!(
+                "while IFS= read -r line || [[ -n $line ]]; do printf '%s\\n' \"$line\"; done < '{}'",
+                file.display()
+            );
             let call = AgentToolCall {
                 id: "read-fixture".into(),
                 name: "terminal_exec".into(),
@@ -2146,7 +1327,7 @@ async fn live_terminal_rejects_new_input_after_scope_change_but_keeps_observatio
     let start = AgentToolCall {
         id: "start".into(),
         name: "terminal_exec".into(),
-        arguments: json!({"command":if cfg!(windows) {"Start-Sleep -Seconds 20"} else {"sleep 20"},
+        arguments: json!({"command":"sleep 20",
             "session_id":null,"workdir":null,"yield_time_ms":25,"max_chars":1000}),
     };
     let started = app.execute_tool(&start, &base).await.unwrap();
@@ -2172,7 +1353,7 @@ async fn live_terminal_rejects_new_input_after_scope_change_but_keeps_observatio
     let observed = app.execute_tool(&poll, &changed).await.unwrap();
     assert_eq!(observed.payload["session"]["session_id"], session);
     assert_eq!(
-        app.sessions.len(),
+        app.terminal.len(),
         1,
         "scope changes cannot silently recreate a process"
     );
@@ -2199,4 +1380,114 @@ fn terminal_scope_roots_are_absent_from_the_declared_schema() {
                 .any(|item| item == name)
         );
     }
+}
+
+#[cfg(all(test, windows))]
+mod native_tests;
+
+#[tokio::test]
+async fn terminal_shutdown_reaps_rubash_background_descendants() {
+    let directory = tempfile::tempdir().unwrap();
+    let child_pid = directory.path().join("child.pid");
+    let policy = RuntimeSandboxPolicy::disabled();
+    let mut app = TerminalApp::new();
+    let result = app
+        .exec_command_with_progress(
+            TerminalExecCommandRequest {
+                command: r#"sleep 120 & printf '%s' "$!" > child.pid; wait $!"#.into(),
+                session_id: None,
+                workdir: Some(directory.path().to_string_lossy().into_owned()),
+                sandbox_policy: &policy,
+                yield_time_ms: Some(20),
+                max_chars: None,
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+    let pid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&child_pid)
+                && let Ok(pid) = text.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background child never started");
+    assert!(
+        sysinfo::System::new_all()
+            .process(sysinfo::Pid::from_u32(pid))
+            .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie),
+        "fixture must identify a live OS descendant before checking cleanup"
+    );
+    assert_eq!(result.session.status, "running");
+    app.shutdown().await.unwrap();
+    assert!(app.session_state(&result.session.session_id).is_err());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let system = sysinfo::System::new_all();
+            if !system
+                .process(sysinfo::Pid::from_u32(pid))
+                .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background descendant survived terminal shutdown");
+}
+
+#[tokio::test]
+async fn explicit_shell_read_denial_is_not_overridden_by_its_runtime_dependency() {
+    if !crate::sandbox::test_support::native_sandbox_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut policy = RuntimeSandboxPolicy::disabled();
+    policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
+    policy.filesystem.full_disk_write = false;
+    let mut app = TerminalApp::new();
+    let baseline = app
+        .exec_command_with_progress(
+            TerminalExecCommandRequest {
+                command: "printf allowed > allowed.txt".into(),
+                session_id: None,
+                workdir: Some(directory.path().to_string_lossy().into_owned()),
+                sandbox_policy: &policy,
+                yield_time_ms: Some(5000),
+                max_chars: None,
+            },
+            |_, _| {},
+        )
+        .await
+        .expect("native shell must start before testing its explicit denial");
+    assert_eq!(baseline.session.exit_code, Some(0));
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("allowed.txt")).unwrap(),
+        "allowed"
+    );
+    let executable = daat_locus_bash::ProcessPolicy::shell_executable(&policy).unwrap();
+    policy.filesystem.deny_read_paths.push(executable);
+    let result = app
+        .exec_command_with_progress(
+            TerminalExecCommandRequest {
+                command: "printf bypassed > forbidden.txt".into(),
+                session_id: None,
+                workdir: Some(directory.path().to_string_lossy().into_owned()),
+                sandbox_policy: &policy,
+                yield_time_ms: Some(5000),
+                max_chars: None,
+            },
+            |_, _| {},
+        )
+        .await;
+    if let Ok(result) = result {
+        assert_ne!(result.session.exit_code, Some(0));
+    }
+    assert!(!directory.path().join("forbidden.txt").exists());
 }

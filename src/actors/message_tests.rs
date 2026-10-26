@@ -196,12 +196,6 @@ async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
     let provider = Arc::new(ReplayProvider::new(vec![]));
     let (directory, system) = runtime(provider.clone()).await;
     let pidfile = directory.path().join("workspace/process.pid");
-    #[cfg(windows)]
-    let command = format!(
-        "[IO.File]::WriteAllText('{}', [string]$PID); Start-Sleep -Seconds 300",
-        pidfile.display().to_string().replace('\'', "''")
-    );
-    #[cfg(unix)]
     let command = format!(
         "printf '%s' \"$$\" > '{}'; sleep 300",
         pidfile.display().to_string().replace('\'', "'\\''")
