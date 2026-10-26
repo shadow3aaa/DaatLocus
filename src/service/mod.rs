@@ -17,7 +17,7 @@ use crate::stage::observation::Query as ConversationRead;
 pub(crate) use auth::native_bootstrap;
 
 use crate::{
-    actors::{ActorRecord, ActorSystem, ApprovalMode, Attachment, MessageRecord, Page},
+    actors::{ActorRecord, ActorSystem, Attachment, MessageRecord, Page},
     config::{Config, ProviderConfig, resolve_env_reference},
     config_setup::PendingSetupProviderAuthFlow,
 };
@@ -459,18 +459,11 @@ async fn get_actor(
 struct ActorPreferencesPatch {
     #[serde(default, deserialize_with = "present_model")]
     model: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present_mode")]
-    approval_mode: Option<ApprovalMode>,
 }
 fn present_model<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(Some)
-}
-fn present_mode<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<ApprovalMode>, D::Error> {
-    ApprovalMode::deserialize(deserializer).map(Some)
 }
 async fn patch_actor_preferences(
     State(state): State<ServiceState>,
@@ -481,12 +474,12 @@ async fn patch_actor_preferences(
     manage(&state, &headers).await?;
     let patch: ActorPreferencesPatch =
         serde_json::from_value(value).map_err(|_| ApiError::invalid())?;
-    if patch.model.is_none() && patch.approval_mode.is_none() {
+    if patch.model.is_none() {
         return Err(ApiError::invalid());
     }
     let record = state
         .system
-        .patch_owned_preferences(&actor, patch.model, patch.approval_mode)
+        .patch_owned_preferences(&actor, patch.model)
         .await
         .map_err(ApiError::from_report)?;
     let mut value = public_actor(&record);

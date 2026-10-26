@@ -3,9 +3,8 @@ use crate::support::Fixture;
 use daat_locus::actors::ActorRecord;
 use daat_locus::actors::ActorStatus;
 use daat_locus::actors::ApprovalDecision;
-use daat_locus::actors::ApprovalMode;
 use daat_locus::actors::ApprovalRecord;
-use daat_locus::actors::ToolPermissionRequest;
+use daat_locus::sandbox::SandboxScopeRequest;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -475,11 +474,9 @@ async fn actor_creation_constraints_cannot_be_rewritten_through_client_managemen
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let actual = fixture.system.actor(&actor).unwrap().config;
-        let mut expected = original.clone();
-        expected.permissions.approval_mode = serde_json::from_value(json!(mode)).unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(actual, original);
     }
 }
 
@@ -487,9 +484,6 @@ async fn actor_creation_constraints_cannot_be_rewritten_through_client_managemen
 async fn owner_can_open_and_control_created_actors() {
     let fixture = Fixture::new().await;
     let a = fixture.child("project").await;
-    let mut config = fixture.system.actor(&a).unwrap().config;
-    config.permissions.approval_mode = ApprovalMode::Ask;
-    fixture.system.update_owned(&a, config).await.unwrap();
     let mut internal = fixture.system.actor(&a).unwrap();
     internal.id = "internal-worker".into();
     internal.parent_id = Some(a.clone());
@@ -527,19 +521,19 @@ async fn owner_can_open_and_control_created_actors() {
         .system
         .store()
         .create_approval(ApprovalRecord {
+            sudo: None,
+            execution_claim: None,
             seq: 0,
             id: uuid::Uuid::new_v4().to_string(),
-            actor_id: internal.id.clone(),
             message_id: input.id,
             call: daat_locus::model_protocol::AgentToolCall {
                 id: "internal-action".into(),
                 name: "files__read_file".into(),
                 arguments: json!({"path": "README.md"}),
             },
-            requested: ToolPermissionRequest::default(),
-            review: None,
+            requested: SandboxScopeRequest::default(),
             scopes: vec![],
-            mode: ApprovalMode::Ask,
+            previous_denials: vec![],
             decision: ApprovalDecision::Pending,
             reason: "Owner approval required".into(),
             appeal: None,
@@ -573,7 +567,7 @@ async fn owner_can_open_and_control_created_actors() {
         StatusCode::OK
     );
     let global = fixture
-        .owner(reqwest::Method::GET, "/v1/approvals?awaiting_owner=true")
+        .owner(reqwest::Method::GET, "/v1/approvals")
         .send()
         .await
         .unwrap()
@@ -619,7 +613,7 @@ async fn owner_can_open_and_control_created_actors() {
             .await
             .unwrap()
             .status(),
-        StatusCode::OK
+        StatusCode::METHOD_NOT_ALLOWED
     );
     let details = fixture
         .owner(reqwest::Method::GET, &format!("/v1/actors/{}", internal.id))

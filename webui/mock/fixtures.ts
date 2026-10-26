@@ -43,7 +43,6 @@ export function resetStore(): void {
   store.approvalSeq = 0;
   store.attachments.clear();
   store.idempotency.clear();
-  store.approvalWakers.clear();
   configHolder.current = defaultConfig();
   Object.assign(stageSettings, {
     label: "Mock Device",
@@ -62,10 +61,9 @@ export function resetStore(): void {
 export function resetAccountWork(): void {
   clearRuns();
   store.actors.clear(); store.order.length = 0; store.catalog.length = 0;
-  store.attachments.clear(); store.idempotency.clear(); store.approvalWakers.clear();
+  store.attachments.clear(); store.idempotency.clear();
   workReset.generation = {revision: (workReset.generation?.revision ?? 0) + 1, writer: STAGE_ID};
   createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors"], model: null,
-    approval_mode: "auto", readable_roots: ["~"], writable_roots: ["~"],
     workspace: "~", instructions: ""});
   broadcastResync();
 }
@@ -83,9 +81,6 @@ function seed(): void {
     parent_id: null,
     apps: ["actors"],
     model: "mock-large",
-    approval_mode: "ask",
-    readable_roots: ["~"],
-    writable_roots: ["~"],
     workspace: "~",
     instructions: "You are the root Actor of the mock account.",
   });
@@ -95,9 +90,6 @@ function seed(): void {
     parent_id: ROOT_ACTOR_ID,
     apps: ["files", "web", "browser_use"],
     model: "mock-mini",
-    approval_mode: "none",
-    readable_roots: ["~/research"],
-    writable_roots: [],
     workspace: "~/research",
     instructions: "Investigation Actor seeded by the mock server.",
   });

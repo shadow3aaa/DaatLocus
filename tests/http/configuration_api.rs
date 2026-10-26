@@ -1,6 +1,5 @@
 //! Configuration HTTP contracts.
 use crate::support::Fixture;
-use daat_locus::actors::ApprovalMode;
 use daat_locus::config::ProviderConfig;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -109,7 +108,7 @@ async fn configured_model_discovery_uses_private_credentials_only_at_the_bound_e
 }
 
 #[tokio::test]
-async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode() {
+async fn composer_model_preferences_preserve_device_scopes_and_reject_permission_settings() {
     let fixture = Fixture::new().await;
     let actor = fixture.child("preference-project").await;
     let mut config = fixture.system.config();
@@ -117,50 +116,53 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
         .models
         .insert("alternate".into(), config.models["mock"].clone());
     fixture.system.update_config(config).await.unwrap();
+    let base = std::env::current_dir().unwrap().join("target");
+    std::fs::create_dir_all(&base).unwrap();
+    let extra = tempfile::Builder::new()
+        .prefix("preference-scope-")
+        .tempdir_in(base)
+        .unwrap();
+    let mut application = fixture.approval(&actor).await;
+    application.id = uuid::Uuid::new_v4().to_string();
+    application.call.id = uuid::Uuid::new_v4().to_string();
+    application.requested = daat_locus::sandbox::SandboxScopeRequest {
+        readable_roots: vec![extra.path().to_owned()],
+        writable_roots: vec![],
+    };
+    application.scopes =
+        vec![daat_locus::sandbox::SandboxScope::filesystem(extra.path(), false).unwrap()];
+    let application = fixture.system.store().create_approval(application).unwrap();
     fixture
         .system
-        .patch_owned_preferences("core", None, Some(ApprovalMode::Ask))
-        .await
+        .store()
+        .resolve_approval(
+            &application.id,
+            daat_locus::actors::ApprovalDecision::Approved,
+            "fixture scope",
+        )
         .unwrap();
-    let mut tightened = fixture.system.actor(&actor).unwrap().config;
-    let extra = fixture.system.device_workspace().join("extra-read-access");
-    std::fs::create_dir(&extra).unwrap();
-    let extra = extra.canonicalize().unwrap();
-    tightened.permissions.readable_roots.push(extra.clone());
-    tightened.permissions.readable_roots.sort();
-    tightened.permissions.approval_mode = ApprovalMode::Ask;
-    fixture
-        .system
-        .update_owned(&actor, tightened.clone())
-        .await
-        .unwrap();
+    let scopes = fixture.system.store().sandbox_scopes().unwrap();
+    let endpoint = format!("/v1/actors/{actor}");
     let response = fixture
-        .owner(reqwest::Method::PATCH, &format!("/v1/actors/{actor}"))
+        .owner(reqwest::Method::PATCH, &endpoint)
         .json(&json!({"model":"alternate"}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let saved = fixture.system.actor(&actor).unwrap().config;
-    assert_eq!(saved.permissions, tightened.permissions);
-    assert_eq!(saved.model.as_deref(), Some("alternate"));
-    let response = fixture
-        .owner(reqwest::Method::PATCH, "/v1/actors/core")
-        .json(&json!({"approval_mode":"none"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let saved = fixture.system.actor(&actor).unwrap().config;
-    assert_eq!(saved.model.as_deref(), Some("alternate"));
     assert_eq!(
-        saved.permissions.readable_roots,
-        tightened.permissions.readable_roots
+        fixture
+            .system
+            .actor(&actor)
+            .unwrap()
+            .config
+            .model
+            .as_deref(),
+        Some("alternate")
     );
-    assert!(saved.permissions.writable_roots.contains(&saved.workspace));
-    assert_eq!(saved.permissions.approval_mode, ApprovalMode::None);
+    assert_eq!(fixture.system.store().sandbox_scopes().unwrap(), scopes);
     let response = fixture
-        .owner(reqwest::Method::PATCH, &format!("/v1/actors/{actor}"))
+        .owner(reqwest::Method::PATCH, &endpoint)
         .json(&json!({"model":null}))
         .send()
         .await
@@ -170,12 +172,13 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
     for patch in [
         json!({}),
         json!({"permissions":{"writable_roots":["C:/"]}}),
+        json!({"approval_mode":"none"}),
         json!({"approval_mode":null}),
         json!({"model":42}),
     ] {
         assert_eq!(
             fixture
-                .owner(reqwest::Method::PATCH, &format!("/v1/actors/{actor}"))
+                .owner(reqwest::Method::PATCH, &endpoint)
                 .json(&patch)
                 .send()
                 .await
@@ -184,6 +187,7 @@ async fn composer_preferences_patch_preserves_latest_grants_and_unspecified_mode
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
+    assert_eq!(fixture.system.store().sandbox_scopes().unwrap(), scopes);
 }
 
 #[tokio::test]
@@ -198,7 +202,7 @@ async fn removing_a_model_resets_old_actor_preferences_and_persists_in_the_servi
     let mut config = fixture.system.actor(&actor).unwrap().config;
     config.model = Some("specialized".into());
     fixture.system.update_owned(&actor, config).await.unwrap();
-    let permissions = fixture.system.actor(&actor).unwrap().config.permissions;
+    let scopes = fixture.system.store().sandbox_scopes().unwrap();
     let response = fixture.owner(reqwest::Method::PUT, "/v1/config").json(&json!({
         "providers": [{"kind": "openai_compatible", "name": "mock", "api_key": "fixture-secret-key", "base_url": "http://model.invalid/v1"}],
         "models": [{"name": "mock", "provider_name": "mock", "model_id": "mock"}],
@@ -221,10 +225,7 @@ async fn removing_a_model_resets_old_actor_preferences_and_persists_in_the_servi
             .as_deref(),
         None
     );
-    assert_eq!(
-        fixture.system.actor(&actor).unwrap().config.permissions,
-        permissions
-    );
+    assert_eq!(fixture.system.store().sandbox_scopes().unwrap(), scopes);
     let directory = fixture
         .system
         .infrastructure_dir()

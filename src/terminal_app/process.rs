@@ -61,6 +61,9 @@ struct OutputSegment {
 }
 
 impl TerminalProcess {
+    pub(super) fn ensure_policy(&self, current: &RuntimeSandboxPolicy) -> miette::Result<()> {
+        self.child.ensure_policy(current)
+    }
     pub fn spawn(
         command: &str,
         workdir: Option<&str>,
@@ -97,7 +100,7 @@ impl TerminalProcess {
         spawn_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> std::io::Result<Self> {
         let (shell_program, shell_args) = shell_invocation(command);
-        let process_policy = sandbox_policy.for_process();
+        let process_policy = sandbox_policy.clone();
         let mut child = SandboxAsyncChild::spawn_shell(
             &process_policy,
             &shell_program,
@@ -191,8 +194,8 @@ impl TerminalProcess {
     }
 
     /// Native denial records captured for this process, when available.
-    pub(super) fn take_denials(&mut self) -> Vec<crate::sandbox::DenialRecord> {
-        self.child.take_denials()
+    pub(super) fn take_denial_report(&mut self) -> crate::sandbox::DenialReport {
+        self.child.take_denial_report()
     }
 
     pub fn output_len(&self) -> usize {
@@ -457,7 +460,15 @@ fn shell_invocation(command: &str) -> (String, Vec<String>) {
             ],
         )
     } else {
-        ("bash".into(), vec!["-lc".to_string(), shell_command])
+        // macOS PATH often selects Homebrew bash, whose executable and dylibs
+        // require ordinary extra scopes. The default shell is the OS runtime;
+        // selecting it must not silently depend on third-party installations.
+        let program = if cfg!(target_os = "macos") {
+            "/bin/bash"
+        } else {
+            "bash"
+        };
+        (program.into(), vec!["-lc".to_string(), shell_command])
     }
 }
 
@@ -586,7 +597,10 @@ mod tests {
             .unwrap();
         let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
         policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
-        policy.filesystem.full_disk_read = false;
+        // PowerShell's provider normalizes paths through readable ancestors.
+        // This case isolates closed log handles; native contract tests cover
+        // denial of that normalization under a narrower read scope.
+        policy.filesystem.full_disk_read = true;
         policy.filesystem.full_disk_write = false;
         policy.filesystem.readable_roots = vec![workspace.path().to_path_buf()];
         policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {

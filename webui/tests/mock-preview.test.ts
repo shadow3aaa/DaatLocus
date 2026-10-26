@@ -36,7 +36,7 @@ describe("standalone WebUI preview",()=>{
   test("long history and approvals paginate instead of returning full fixture state",async()=>{
     activateScenario("long-content");const page=await (await request("/v1/actors/research/messages?limit=12")).json();
     expect(page.items).toHaveLength(12);expect(page.next_cursor).not.toBeNull();
-    activateScenario("many-approvals");const approvals=await (await request("/v1/approvals?awaiting_owner=true&limit=30")).json();
+    activateScenario("many-approvals");const approvals=await (await request("/v1/approvals?limit=30")).json();
     expect(approvals.items).toHaveLength(30);expect(approvals.next_cursor).not.toBeNull();
   });
   test("attachment fixtures are fetched through actor resource routes",async()=>{
@@ -54,23 +54,23 @@ describe("standalone WebUI preview",()=>{
     expect(frame.status).toBe(200);expect(await frame.text()).toContain("width:320px");
     expect((await request("/__mock/frame?scene=unknown")).status).toBe(422);
   });
-  test("seeded approvals reach a completed outcome for either decision",async()=>{
-    for(const decision of ["approve","deny"]){
-      activateScenario("approval");const actor=store.actors.get("research")!;
-      const approval=actor.approvals[0];
+  test("scope application preview uses Core conversation and rejects direct approval writes",async()=>{
+    activateScenario("approval");const actor=store.actors.get("research")!;
+    const approval=actor.approvals[0];expect(approval.decision).toBe("denied");
+    for(const decision of ["approve","deny"]) {
       const response=await request(`/v1/approvals/${approval.id}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({decision})});
-      expect(response.status).toBe(200);
-      const message=actor.messages.find(item=>item.id===approval.message_id)!;
-      expect(message.status).toBe("completed");expect(message.reply).toContain(decision==="approve"?"已完成":"未获批准");
-      expect(actor.summary.status).toBe("idle");
+      expect(response.status).toBe(405);
     }
+    expect(actor.messages.find(item=>item.id===approval.message_id)?.status).toBe("completed");
+    expect(store.actors.get(ROOT_ACTOR_ID)!.messages.some(item=>item.reply?.includes("/reports"))).toBe(true);
+    expect((await request("/v1/approvals?awaiting_owner=true")).status).toBe(400);
   });
   test("cancelling a running mock request retains one cancelled conversation record",async()=>{
-    activateScenario("work");const actor=store.actors.get("research")!;actor.detail.config!.permissions.approval_mode="ask";
+    activateScenario("work");const actor=store.actors.get("research")!;
     const response=await request("/v1/actors/research/messages",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content:"检查输入框",attachments:[]})});
     const record=await response.json();expect(response.status).toBe(202);
     const until=async(check:()=>boolean)=>{const deadline=Date.now()+2000;while(!check()&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));expect(check()).toBe(true);};
-    await until(()=>actor.approvals.some(item=>item.message_id===record.id));
+    await until(()=>actor.events.some(item=>item.event.type==="generation_delta"&&item.event.message_id===record.id&&item.event.channel==="assistant"&&item.event.text.includes("检查")));
     expect((await request(`/v1/actors/research/messages/${record.id}/cancel`,{method:"POST"})).status).toBe(204);
     await until(()=>actor.messages.find(item=>item.id===record.id)?.status==="cancelled");
     expect(actor.messages.filter(item=>item.id===record.id||item.in_reply_to===record.id)).toHaveLength(1);

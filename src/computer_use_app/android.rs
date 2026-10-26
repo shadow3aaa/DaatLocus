@@ -99,14 +99,6 @@ impl Client {
         backend().is_ok_and(|backend| !backend.has_resources(&self.session))
     }
     #[cfg(target_os = "android")]
-    pub fn review(&self, system: &ActorSystem) -> Result<Option<AppReview>> {
-        let scope = backend()?.scope()?;
-        Ok(Some(AppReview::new(
-            "phone_use/mobile/v1",
-            "Authorize phone GUI operation through this device's user-enabled PhoneUse connection: app launch, virtual-display screenshots, touch/key input, text replacement and task closure. GUI apps retain their Android user permissions. The privileged backend is restricted to PhoneUse; this does not grant Files/Terminal root or ADB access. Read-only remote authority and Daat Locus exclusion remain mandatory.",
-            json!({"device":system.store().public_stage_id().map_err(|e|miette!("{e}"))?.to_string(),"connection":scope}),
-        )))
-    }
     #[cfg(target_os = "android")]
     pub async fn call(
         &self,

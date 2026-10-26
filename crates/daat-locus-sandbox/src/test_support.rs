@@ -2,6 +2,20 @@ use std::io;
 
 use super::capabilities::{NativeSupport, native_support};
 
+pub(crate) fn scoped_directory() -> tempfile::TempDir {
+    let base = std::env::current_dir().unwrap().join("target");
+    assert!(
+        !super::path_is_system_temporary(&base),
+        "Scope-denial fixtures must be outside the temporary baseline: {}",
+        base.display()
+    );
+    std::fs::create_dir_all(&base).unwrap();
+    tempfile::Builder::new()
+        .prefix("native-scope-")
+        .tempdir_in(base)
+        .unwrap()
+}
+
 /// Only an explicitly absent capability may return from a native test. Keep
 /// diagnostics outside libtest's capture, including when the test returns early.
 pub(crate) fn native_sandbox_available() -> bool {

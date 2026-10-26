@@ -161,7 +161,7 @@ mod tests {
             .authorize(&own, &b.join_request(1001).unwrap(), 1001, 9000, false)
             .unwrap();
         ledger
-            .import_peer(enrollment.clone(), vec![], 1002)
+            .import_peer(enrollment.clone(), Default::default(), 1002)
             .unwrap();
         let change = Change {
             enrollment: own.clone(),
@@ -198,7 +198,11 @@ mod tests {
         apply(system.store(), local, &change, 2001).unwrap();
         apply(system.store(), local, &change, 20000).unwrap();
         assert!(ledger.peer(b.profile().stage_id, 2002).is_err());
-        assert!(ledger.import_peer(enrollment, vec![], 2003).is_err());
+        assert!(
+            ledger
+                .import_peer(enrollment, Default::default(), 2003)
+                .is_err()
+        );
         for _ in 0..39 {
             let change = Change {
                 enrollment: own.clone(),

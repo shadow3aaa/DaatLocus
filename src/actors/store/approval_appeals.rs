@@ -53,9 +53,8 @@ impl ActorStore {
             if current.actor_id != actor
                 || (!core_authorized && current.status != MessageStatus::Running)
                 || current.cancel_requested
-                || approval.actor_id != actor
-                || approval.mode == ApprovalMode::None
-                || approval.decision != ApprovalDecision::Denied
+                || original.actor_id != actor
+                || !approval.requires_core_review()
                 || current.remote_authority.is_some()
                 || original.remote_authority.is_some()
                 || original.cancel_requested
@@ -83,8 +82,10 @@ impl ActorStore {
                 "actor_id":actor, "request_message_id":approval.message_id,
                 "application":approval.application,
                 "proposed_call":approval.call,
-                "requested_access":approval.requested, "app_review":approval.review,
+                "requested_access":approval.requested,
                 "unapproved_scopes":approval.scopes, "denial_reason":approval.reason,
+                "sudo_invocation":approval.sudo,
+                "previous_denials":approval.previous_denials,
                 "explanation":explanation
             })
             .to_string();
@@ -104,7 +105,7 @@ impl ActorStore {
                     reply_to: ReplyTarget::User,
                     kind: MessageKind::Request,
                     in_reply_to: None,
-                    delegation_grant: None,
+
                     remote_authority: None,
                     content,
                     attachments: vec![],
@@ -188,8 +189,7 @@ impl ActorStore {
             }
             let original = message_tx(&tx, &approval.message_id)?;
             let request = message_tx(&tx, &appeal.request_message_id)?;
-            if approval.mode == ApprovalMode::None
-                || approval.decision != ApprovalDecision::Denied
+            if !approval.requires_core_review()
                 || original.cancel_requested
                 || original.remote_authority.is_some()
                 || request.cancel_requested
@@ -201,26 +201,30 @@ impl ActorStore {
                     original.status,
                     MessageStatus::Cancelled | MessageStatus::Interrupted | MessageStatus::Failed
                 )
-                || actor_tx(&tx, &approval.actor_id)?.status == ActorStatus::Archived
+                || actor_tx(&tx, &original.actor_id)?.status == ActorStatus::Archived
             {
                 return Err(
                     ActorError::Conflict("Appeal authority is no longer valid".into()).into(),
                 );
             }
-            admission(&tx, &approval.actor_id)?;
+            admission(&tx, &original.actor_id)?;
             if decision == ApprovalDecision::Approved {
-                super::super::grants::remember(&tx, &approval.actor_id, &approval.scopes)?;
+                crate::sandbox::scopes::remember(&tx, &approval.scopes)?;
             }
             let notification_id = Uuid::new_v4().to_string();
             let now = now();
             insert_message(&tx, MessageRecord {
-                seq:0, id:notification_id.clone(), actor_id:approval.actor_id.clone(),
+                seq:0, id:notification_id.clone(), actor_id:original.actor_id.clone(),
                 source:MessageSource::Actor{actor_id:core.into()}, reply_to:original.reply_to.clone(),
                 kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()),
-                delegation_grant:original.delegation_grant.clone(), remote_authority:None,
+                remote_authority:None,
                 content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,
                     "decision":decision, "reason":reason,
-                    "instruction":"Permission memory has been updated if approved. No effect was executed. Recheck current targets and retry only if still needed; do not replay uncertain effects."}).to_string(),
+                    "instruction":if approval.sudo.is_some() {
+                        "No effect was executed. If approved and still needed, explicitly retry the unchanged Sudo invocation with this approval_id. Consent is single-use and remembers no device scope."
+                    } else {
+                        "Permission memory has been updated if approved. No effect was executed. Recheck current targets and retry only if still needed; do not replay uncertain effects."
+                    }}).to_string(),
                 attachments:vec![], status:MessageStatus::Queued, cancel_requested:false,
                 started_at_ms:None, finished_at_ms:None, final_generation:None, reply:None,error:None,
                 created_at_ms:now, updated_at_ms:now,

@@ -4,8 +4,8 @@ use super::{
     protocol::{BlobRef, Body, Envelope, InvocationState, Origin, RemoteCeiling, invocation_id},
 };
 use crate::actors::{
-    ActorRecord, DelegationGrant, MessageKind, MessageRecord, MessageSource, MessageStatus,
-    RemoteAuthority, store::ActorStore,
+    ActorRecord, MessageKind, MessageRecord, MessageSource, MessageStatus, RemoteAuthority,
+    store::ActorStore,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -15,13 +15,14 @@ struct Sent {
     target: ActorAddress,
     local_actor: String,
     request_id: Option<String>,
-    grant: DelegationGrant,
+    read_only: bool,
 }
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_sent(invocation TEXT PRIMARY KEY,peer TEXT NOT NULL,record TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS stage_ready_deliveries(message TEXT PRIMARY KEY,peer TEXT NOT NULL,record BLOB NOT NULL,created INTEGER NOT NULL,acknowledged INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS stage_delivery_receipts(peer TEXT NOT NULL,message TEXT NOT NULL,digest TEXT NOT NULL,local_message TEXT,expires INTEGER NOT NULL,confirmed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(peer,message));
         CREATE TABLE IF NOT EXISTS stage_send_keys(actor TEXT NOT NULL,principal TEXT NOT NULL,key TEXT NOT NULL,digest TEXT NOT NULL,frame BLOB NOT NULL,PRIMARY KEY(actor,principal,key));")?;
+    tx.execute("UPDATE stage_sent SET record=json_set(json_remove(record,'$.grant'),'$.read_only',json(CASE WHEN COALESCE(json_extract(record,'$.grant.read_only'),json_extract(record,'$.grant.permissions.read_only'),1) THEN 'true' ELSE 'false' END)) WHERE json_type(record,'$.grant') IS NOT NULL", [])?;
     Ok(())
 }
 fn json<T: Serialize>(value: &T) -> Result<String> {
@@ -159,28 +160,16 @@ impl<'a> Deliveries<'a> {
                     .map_err(|_| StageError::Invalid("Invalid originating request"))?,
                 ceiling: RemoteCeiling {
                     read_only: source.remote_read_only,
-                    approval_mode: source.config.permissions.approval_mode,
                 },
             }
         } else {
             Origin::User
         };
-        let mut permissions = source.config.permissions.clone();
-        if request.is_none_or(|message| message.remote_authority.is_none()) {
-            let remembered = self
-                .store
-                .filesystem_approval_scopes(&source.id)
-                .map_err(|_| StageError::Invalid("Invalid remembered filesystem scope"))?;
-            crate::actors::grants::extend_permissions(&mut permissions, &remembered);
-        }
         let record = Sent {
             target: target.clone(),
             local_actor: source.id.clone(),
             request_id: request.map(|message| message.id.clone()),
-            grant: DelegationGrant {
-                read_only: source.remote_read_only,
-                permissions,
-            },
+            read_only: source.remote_read_only,
         };
         self.store.stage_transaction(|tx| {
             let peer = ledger::peer(tx, target.stage_id, now)?;
@@ -281,9 +270,9 @@ impl<'a> Deliveries<'a> {
             let message=if let Some(request)=&source.request_id{
                 let data:String=tx.query_row("SELECT record FROM messages WHERE id=?1 AND actor_id=?2",params![request,source.local_actor],|r|r.get(0)).optional()?.ok_or(StageError::Forbidden("Originating request is unavailable"))?;
                 let original:MessageRecord=parse(data)?;
-                let mut grant=source.grant;
-                if matches!(frame.body,Body::Delivery{state:InvocationState::ResultUnknown,..}) {grant.read_only=true;grant.permissions.writable_roots.clear();}
-                let input=MessageRecord{seq:0,id:Uuid::new_v4().to_string(),actor_id:source.local_actor.clone(),source:MessageSource::RemoteActor{stage_id:peer,actor_id:actor.actor_id.clone(),invocation_id:*invocation},reply_to:original.reply_to,kind:if matches!(frame.body,Body::Delivery{state:InvocationState::Running,..}){MessageKind::Progress}else{MessageKind::Result},in_reply_to:Some(original.id),delegation_grant:Some(grant),remote_authority:Some(RemoteAuthority{peer,grant_actor:source.local_actor,reply_for:Some(*invocation)}),content:text,attachments:vec![],status:MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
+                let mut read_only=source.read_only;
+                if matches!(frame.body,Body::Delivery{state:InvocationState::ResultUnknown,..}) {read_only=true;}
+                let input=MessageRecord{seq:0,id:Uuid::new_v4().to_string(),actor_id:source.local_actor.clone(),source:MessageSource::RemoteActor{stage_id:peer,actor_id:actor.actor_id.clone(),invocation_id:*invocation},reply_to:original.reply_to,kind:if matches!(frame.body,Body::Delivery{state:InvocationState::Running,..}){MessageKind::Progress}else{MessageKind::Result},in_reply_to:Some(original.id),remote_authority:Some(RemoteAuthority{peer,read_only,origin_actor:source.local_actor,reply_for:Some(*invocation)}),content:text,attachments:vec![],status:MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Reply inbox could not be persisted"))?.id)
             }else{None};
             tx.execute("INSERT INTO stage_delivery_receipts(peer,message,digest,local_message,expires) VALUES(?1,?2,?3,?4,?5)",params![peer.to_string(),frame.message_id.to_string(),hash,message,frame.expires_at_ms])?;Ok(message)

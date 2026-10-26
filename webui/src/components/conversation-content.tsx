@@ -1,13 +1,12 @@
-import { motionScrollBehavior } from "@/lib/appearance";
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon, ShieldCheckIcon } from "lucide-react";
+import { CheckIcon, ChevronRightIcon, CopyIcon, DownloadIcon, MessageCircleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { actorIdFromUrl, localActorId } from "@/lib/conversation-links";
-import { getActor, getMessage, listMessages, subscribeActorEvents, getToolResult, resolveApproval, type ApprovalRecord, type Attachment, type ToolResult, type ToolSummary, type MessageStatus } from "@/lib/actor-api";
-import { ToolDetail, ApprovalDetails } from "@/components/tool-details";
+import { getActor, getMessage, listMessages, subscribeActorEvents, getToolResult, type Attachment, type ToolResult, type ToolSummary, type MessageStatus } from "@/lib/actor-api";
+import { ToolDetail } from "@/components/tool-details";
 import { asObject as object, asText as string, readableSummary, toolLabel, toolIcon, activitySummary, activityIcon, activityLabel, domainToolName, approvalNotice } from "@/lib/tool-presentation";
 
 
@@ -114,21 +113,6 @@ export function Activities({ actorId, tools, onActor, thinking }: { actorId: str
       })}
     </div>}
   </div>;
-}
-
-export function Approval({ record, canManage, onResolved }: { record: ApprovalRecord; canManage: boolean; onResolved(): void }) {
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [open, setOpen] = useState(false);
-  const actionsRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { if (open) actionsRef.current?.scrollIntoView({ block: "nearest", behavior: motionScrollBehavior() }); }, [open]);
-    if (record.mode !== "ask" || record.decision === "application_required") return null;
-  const awaiting = record.decision === "pending" && record.mode === "ask";
-  const explanation = record.decision === "pending" ? canManage ? t("conversation_content.review_the_action_and_requested_access") : t("conversation_content.waiting_for_the_owner_to_approve") : record.decision === "approved" ? t("conversation_content.this_action_was_approved") : record.decision === "denied" ? t("conversation_content.this_action_was_denied") : t("conversation_content.this_action_was_cancelled");
-  async function decide(decision: "approve" | "deny") { setBusy(true); setError(""); try { await resolveApproval(record.id, decision); onResolved(); } catch { setError(t("conversation_content.approval_status_changed_refresh_and_try_again")); } finally { setBusy(false); } }
-  return <section className="dl-approval"><div className="dl-approval-heading"><ShieldCheckIcon aria-hidden="true" /><span>{awaiting ? t("conversation_content.waiting_for_your_approval") : record.decision === "approved" ? t("conversation_content.approved") : record.decision === "denied" ? t("conversation_content.action_denied") : t("conversation_content.approval_cancelled")}</span></div><p>{explanation}</p>
-    <button type="button" className="dl-disclosure" onClick={() => setOpen(!open)} aria-expanded={open}>{t("conversation_content.view_action_and_requested_access")}<ChevronRightIcon aria-hidden="true" className={open ? "dl-chevron-open" : undefined} /></button>
-    {open && <><p className="dl-approval-operation">{toolLabel(record.call.name)}</p><ApprovalDetails result={record.call.arguments} requested={record.requested} review={record.review} scopes={record.scopes} /></>}
-    {awaiting && canManage && <div className="dl-approval-actions" ref={actionsRef}><Button size="sm" variant="outline" disabled={busy} onClick={() => { void decide("deny"); }}>{t("conversation_content.deny")}</Button><Button size="sm" disabled={busy} onClick={() => { void decide("approve"); }}>{t("conversation_content.approve_action")}</Button></div>}{awaiting && !canManage && <small>{t("conversation_content.only_the_owner_can_approve_this_action")}</small>}{error && <p role="alert">{error}</p>}
-  </section>;
 }
 
 export function CopyMessage({ content }: { content: string }) {

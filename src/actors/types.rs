@@ -16,15 +16,6 @@ pub enum ActorError {
     Unavailable(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalMode {
-    #[default]
-    Auto,
-    Ask,
-    None,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -35,44 +26,24 @@ pub enum ApprovalDecision {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ToolPermissionRequest {
-    pub readable_roots: Vec<PathBuf>,
-    pub writable_roots: Vec<PathBuf>,
-    /// App-observed facts for this specific action, such as an opaque browser
-    /// reference's target. This is bounded data, not worker/model history.
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub operation_details: Value,
-}
-
-impl ToolPermissionRequest {
-    pub fn canonicalized(mut self) -> miette::Result<Self> {
-        for roots in [&mut self.readable_roots, &mut self.writable_roots] {
-            *roots = roots
-                .iter()
-                .map(|path| super::permissions::canonical_path(path))
-                .collect::<miette::Result<_>>()?;
-            roots.sort();
-            roots.dedup();
-        }
-        Ok(self)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRecord {
     pub seq: i64,
     pub id: String,
-    pub actor_id: String,
     pub message_id: String,
     pub call: crate::model_protocol::AgentToolCall,
-    pub requested: ToolPermissionRequest,
+    pub requested: crate::sandbox::SandboxScopeRequest,
+    /// Explicit one-call sandbox bypass; it never becomes device filesystem memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sudo: Option<crate::sudo_app::Invocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_claim: Option<SudoExecutionClaim>,
     #[serde(default)]
-    pub review: Option<super::AppReview>,
-    #[serde(default)]
-    pub scopes: Vec<super::ApprovalScope>,
-    pub mode: ApprovalMode,
+    pub scopes: Vec<super::SandboxScope>,
+    /// Immutable refusals for overlapping scopes of this same source event.
+    /// A linked application keeps its own scope and never repeats their review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_denials: Vec<String>,
     pub decision: ApprovalDecision,
     pub reason: String,
     pub created_at_ms: i64,
@@ -81,6 +52,26 @@ pub struct ApprovalRecord {
     pub appeal: Option<ApprovalAppeal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application: Option<ReviewApplication>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SudoExecutionClaim {
+    pub message_id: String,
+    pub call_id: String,
+}
+
+impl ApprovalRecord {
+    pub(crate) fn requires_core_review(&self) -> bool {
+        self.decision == ApprovalDecision::Denied
+            || self.decision == ApprovalDecision::ApplicationRequired
+                && !self.previous_denials.is_empty()
+    }
+
+    /// Provenance is resolved from the immutable input, never persisted as an
+    /// Actor permission owner or used to partition the device's grants.
+    pub fn source_actor(&self, store: &super::store::ActorStore) -> miette::Result<String> {
+        Ok(store.message(&self.message_id)?.actor_id)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,24 +109,6 @@ pub struct ApprovalAppealAuthorization {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActorPermissions {
-    #[serde(default)]
-    pub approval_mode: ApprovalMode,
-    pub readable_roots: Vec<PathBuf>,
-    pub writable_roots: Vec<PathBuf>,
-}
-
-impl ActorPermissions {
-    pub fn workspace(workspace: PathBuf) -> Self {
-        Self {
-            approval_mode: ApprovalMode::Auto,
-            readable_roots: vec![workspace.clone()],
-            writable_roots: vec![workspace],
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ActorConfig {
     pub name: String,
@@ -143,7 +116,6 @@ pub struct ActorConfig {
     pub apps: Vec<String>,
     pub model: Option<String>,
     pub instructions: String,
-    pub permissions: ActorPermissions,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,42 +235,11 @@ pub struct Attachment {
     pub uri: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct DelegationGrant {
-    #[serde(default)]
-    pub read_only: bool,
-    pub permissions: ActorPermissions,
-}
-
-impl<'de> Deserialize<'de> for DelegationGrant {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Stored {
-            #[serde(default)]
-            read_only: Option<bool>,
-            permissions: Value,
-        }
-        let stored = Stored::deserialize(deserializer)?;
-        let read_only = stored.read_only.unwrap_or_else(|| {
-            stored
-                .permissions
-                .get("read_only")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        });
-        let permissions =
-            serde_json::from_value(stored.permissions).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            read_only,
-            permissions,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteAuthority {
+    pub read_only: bool,
     pub peer: crate::stage::StageId,
-    pub grant_actor: String,
+    pub origin_actor: String,
     #[serde(default)]
     pub reply_for: Option<uuid::Uuid>,
 }
@@ -314,8 +255,6 @@ pub struct MessageRecord {
     pub in_reply_to: Option<String>,
     /// Immutable authority at delegation time; stored privately, never accepted
     /// from clients or repeated in conversation responses.
-    #[serde(default, skip_serializing)]
-    pub delegation_grant: Option<DelegationGrant>,
     #[serde(default, skip_serializing)]
     pub remote_authority: Option<RemoteAuthority>,
     pub content: String,

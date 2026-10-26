@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ExternalLinkIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeBlock, Markdown } from "@/components/markdown";
-import type { ApprovalScope, JsonValue, ToolResult } from "@/lib/actor-api";
+import type { JsonValue, ToolResult } from "@/lib/actor-api";
 import { resourceActorId, safeLink } from "@/lib/conversation-links";
 import { asObject, asRows, asText, readableSummary, domainToolName, approvalNotice, approvalNoticeTitle } from "@/lib/tool-presentation";
 import { FileChangeView } from "@/components/file-change";
@@ -15,7 +15,7 @@ function TextOutput({ label, content, command, context, href }: { label: string;
 }
 
 function domainFields(payload: Record<string,JsonValue>): JsonValue {
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references"].includes(key)).map(([key,value]) => {
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references","sandbox","sudo","permission_reference"].includes(key)).map(([key,value]) => {
     if (typeof value === "string" && /^[\[{]/.test(value.trim())) { try { const decoded: unknown = JSON.parse(value); if (decoded && typeof decoded === "object") return [key, decoded as JsonValue]; } catch { /* Literal content stays literal. */ } }
     return [key,value];
   }));
@@ -76,6 +76,18 @@ function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImag
   const args = asObject(result.arguments);
   const path = asText(payload.path) || asText(args.path);
   const rejection = approvalNotice(result.payload);
+  if (result.name.startsWith("sudo__")) {
+    const target = asText(asObject(payload.sudo).tool);
+    if (target && !domainToolName(target).startsWith("sudo__")) {
+      try {
+        const argumentsValue: JsonValue = JSON.parse(asText(args.arguments_json));
+        if (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
+          return <ToolContent result={{ ...result, name: target, arguments: argumentsValue }} onActor={onActor} hasImages={hasImages} />;
+        }
+      } catch { /* Preserve malformed or historical source values in the ordinary detail view. */ }
+    }
+    if (payload.status === "submitted") return <p className="dl-tool-note">{t("tool_details.sudo_submitted")}</p>;
+  }
   if (rejection) return <section className="dl-tool-details" aria-label={approvalNoticeTitle(rejection.kind)}><p className="dl-tool-note">{approvalNoticeTitle(rejection.kind)}</p><p className="whitespace-pre-wrap break-words">{rejection.reason}</p></section>;
   if (/^mcp_[a-f0-9]{32}__/.test(result.name)) {
     const resources = asRows(payload.resources);
@@ -149,17 +161,4 @@ function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImag
   const text = [payload.message, payload.description, payload.text, payload.content].map(value => readableSummary(asText(value))).find(Boolean);
   const fields = text ? Object.fromEntries(Object.entries(payload).filter(([key]) => !["message","description","text","content"].includes(key))) : payload;
   return <div className="dl-tool-note">{text ? <Markdown content={text} /> : <p>{readableSummary(result.summary) || t("tool_details.action_completed")}</p>}<ToolParameters value={domainFields(fields)} /></div>;
-}
-
-export function ApprovalDetails({ result, requested, review, scopes }: { result: ToolResult["arguments"]; review?: {criteria:string} | null; scopes?: ApprovalScope[]; requested: { readable_roots: string[]; writable_roots: string[]; operation_details?: ToolResult["arguments"] } }) {
-  const operation=asObject(requested.operation_details ?? undefined);
-  const app=asObject(operation.app);
-  const source=asObject(app.source);
-  const connection=asText(source.url)||asText(source.command);
-  const mcp=/^mcp_[a-f0-9]{32}$/.test(asText(app.id)) && operation.parameters != null;
-  const paths = scopes?.filter((scope): scope is Extract<ApprovalScope,{kind:"filesystem"}> => scope.kind === "filesystem");
-  const reads = paths?.length ? paths.filter(scope=>!scope.write).map(scope=>scope.path) : requested.readable_roots;
-  const writes = paths?.length ? paths.filter(scope=>scope.write).map(scope=>scope.path) : requested.writable_roots;
-  const recursive = new Set(paths?.filter(scope=>scope.recursive).map(scope=>scope.path));
-  return <div className="dl-approval-details">{review && <section className="dl-permission-roots"><h4>{t("tool_details.review_criteria")}</h4><p className="dl-parameter-text">{review.criteria}</p></section>}{mcp && <><p>{asText(app.name)} · {asText(operation.tool)}</p>{connection&&<p className="dl-parameter-text">{t("apps.connection")}: {connection}</p>}</>}<ToolParameters value={mcp?operation.parameters:result} />{reads.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_read_access")}</h4><ul>{reads.map(path => <li key={path}><code>{path}</code>{recursive.has(path) && <small> · {t("tool_details.includes_subdirectories")}</small>}</li>)}</ul></section>}{writes.length > 0 && <section className="dl-permission-roots"><h4>{t("tool_details.additional_write_access")}</h4><ul>{writes.map(path => <li key={path}><code>{path}</code>{recursive.has(path) && <small> · {t("tool_details.includes_subdirectories")}</small>}</li>)}</ul></section>}{requested.operation_details != null && !mcp && <section className="dl-permission-roots"><h4>{t("tool_details.execution_details")}</h4><ToolParameters value={requested.operation_details} /></section>}</div>;
 }

@@ -15,6 +15,7 @@ mod approval_appeals;
 #[path = "store/history_handoff_tests.rs"]
 mod history_handoff_tests;
 mod review_applications;
+mod sudo;
 mod tool_provenance;
 
 pub struct ActorStore {
@@ -111,6 +112,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "byte_len",
         ],
         "actors__create"
+        | "actors__stop"
         | "actors__import_conversation"
         | "actors__message"
         | "actors__archive"
@@ -125,6 +127,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "kind",
             "reply_to",
             "show_to_user",
+            "cancelled_count",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
             &["path", "created", "byte_count", "sha256"]
@@ -140,6 +143,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     if matches!(
         domain_name,
         "actors__create"
+            | "actors__stop"
             | "actors__import_conversation"
             | "actors__message"
             | "actors__archive"
@@ -247,22 +251,7 @@ fn read_actor(db: &Connection, id: &str) -> Result<ActorRecord> {
     .ok_or_else(|| missing("Actor"))?;
     account_actor(db, decode(record)?)
 }
-fn account_actor(db: &Connection, mut actor: ActorRecord) -> Result<ActorRecord> {
-    // Core's replicated preference is the single account-wide review mode.
-    // Old hosted records can retain creation snapshots but cannot override it.
-    if actor.id != crate::stage::shared::ACTOR_ID {
-        let core: Option<String> = sql(db
-            .query_row("SELECT record FROM actors WHERE id='core'", [], |r| {
-                r.get(0)
-            })
-            .optional())?;
-        if let Some(core) = core {
-            actor.config.permissions.approval_mode = decode::<ActorRecord>(core)?
-                .config
-                .permissions
-                .approval_mode;
-        }
-    }
+fn account_actor(_db: &Connection, actor: ActorRecord) -> Result<ActorRecord> {
     Ok(actor)
 }
 fn save_actor(tx: &Transaction<'_>, actor: &ActorRecord) -> Result<()> {
@@ -305,7 +294,6 @@ fn message_tx(tx: &Connection, id: &str) -> Result<MessageRecord> {
 }
 fn encode_message(message: &MessageRecord) -> Result<String> {
     let mut data = serde_json::to_value(message).into_diagnostic()?;
-    data["delegation_grant"] = serde_json::to_value(&message.delegation_grant).into_diagnostic()?;
     data["remote_authority"] = serde_json::to_value(&message.remote_authority).into_diagnostic()?;
     encode(&data)
 }
@@ -450,14 +438,13 @@ impl ActorStore {
           CREATE TABLE IF NOT EXISTS stage_local_tool_results(id TEXT PRIMARY KEY,record TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS resources(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,id TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(actor_id,id));
           CREATE TABLE IF NOT EXISTS idempotency(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,principal TEXT NOT NULL,key TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(actor_id,principal,key));
-          CREATE TABLE IF NOT EXISTS approvals(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,record TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS actor_approval_scopes(actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE,fingerprint TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(actor_id,fingerprint));
-          CREATE INDEX IF NOT EXISTS approval_scope_kind ON actor_approval_scopes(actor_id,json_extract(record,'$.kind'));
-          CREATE INDEX IF NOT EXISTS approval_actor ON approvals(actor_id,seq);"))?;
+          CREATE TABLE IF NOT EXISTS approvals(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,record TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS approval_message ON approvals(message_id,seq);"))?;
             crate::persistence::set_private_file_permissions(path).into_diagnostic()?;
             let tx = sql(db.transaction())?;
             super::migrations::retire_guest_execution(&tx, now()).into_diagnostic()?;
             super::migrations::remove_actor_capability_lists(&tx).into_diagnostic()?;
+            crate::sandbox::scopes::initialize(&tx)?;
             crate::stage::blob::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             crate::stage::journal::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             crate::stage::sync::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
@@ -595,16 +582,45 @@ impl ActorStore {
             self.commit(tx)
         })
     }
-    pub(crate) fn save_actor_with_resource(
+    pub(crate) fn save_created_actor(
         &self,
         actor: &ActorRecord,
-        resource: StoredResource,
+        resource: Option<StoredResource>,
+        initial_scopes: &[SandboxScope],
+        source_message: Option<&str>,
     ) -> Result<()> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
+            if let Some(source) = source_message {
+                let input = message_tx(&tx, source)?;
+                if actor.parent_id.as_deref() != Some(input.actor_id.as_str())
+                    || input.status != MessageStatus::Running
+                    || input.cancel_requested
+                {
+                    return Err(ActorError::Forbidden(
+                        "Actor creation authority is no longer valid".into(),
+                    )
+                    .into());
+                }
+            }
+            if initial_scopes
+                .iter()
+                .any(|scope| scope.active_filesystem().is_none())
+            {
+                return Err(
+                    ActorError::Forbidden("Initial authorization target changed".into()).into(),
+                );
+            }
             save_actor(&tx, actor)?;
-            save_resource(&tx, resource, None)?;
+            if let Some(resource) = resource {
+                save_resource(&tx, resource, None)?;
+            }
+            if let Some(parent) = &actor.parent_id {
+                crate::stage::ledger::inherit_account_ownership(&tx, parent, &actor.id)
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
+            crate::sandbox::scopes::remember(&tx, initial_scopes)?;
             self.commit(tx)
         })
     }
@@ -1245,23 +1261,9 @@ impl ActorStore {
                 }
                 ActorEvent::ActorDeleted { actor_id } => *actor_id = qualify(actor_id),
                 ActorEvent::ApprovalRequested { approval_id, .. } => {
-                    sql(crate::stage::approval_index::remember(
-                        &tx,
-                        &source.to_string(),
-                        approval_id,
-                        &record.actor_id,
-                        true,
-                    ))?;
                     *approval_id = qualify(approval_id)
                 }
                 ActorEvent::ApprovalResolved { approval_id, .. } => {
-                    sql(crate::stage::approval_index::remember(
-                        &tx,
-                        &source.to_string(),
-                        approval_id,
-                        &record.actor_id,
-                        false,
-                    ))?;
                     *approval_id = qualify(approval_id)
                 }
                 ActorEvent::MessageUpdated { .. } => {}
@@ -1386,17 +1388,59 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let input = message_tx(&tx, &approval.message_id)?;
-            if input.actor_id != approval.actor_id
-                || input.status != MessageStatus::Running
-                || input.cancel_requested
-            {
+            if input.status != MessageStatus::Running || input.cancel_requested {
                 return Err(
                     ActorError::Conflict("Approval request is no longer active".into()).into(),
                 );
             }
+            if approval.sudo.is_some() {
+                if approval.requested != crate::sandbox::SandboxScopeRequest::default()
+                    || !approval.scopes.is_empty()
+                    || approval.execution_claim.is_some()
+                {
+                    return Err(ActorError::Invalid(
+                        "Sudo reviews exactly one invocation and cannot remember filesystem scopes"
+                            .into(),
+                    )
+                    .into());
+                }
+                let existing: Option<String> = sql(tx.query_row(
+                    "SELECT record FROM approvals WHERE message_id=?1 AND json_extract(record,'$.call.id')=?2 AND json_type(record,'$.sudo')='object' LIMIT 1",
+                    params![approval.message_id,approval.call.id],|row|row.get(0)).optional())?;
+                if let Some(existing) = existing {
+                    let existing: ApprovalRecord = decode(existing)?;
+                    if existing.sudo != approval.sudo || existing.call != approval.call {
+                        return Err(ActorError::Conflict(
+                            "Sudo incident target is immutable".into(),
+                        )
+                        .into());
+                    }
+                    return Ok(existing);
+                }
+            }
+            if approval.sudo.is_none()
+                && let Some(existing) = review_applications::sandbox_application(
+                    &tx,
+                    &approval.message_id,
+                    &approval.call.id,
+                    &approval.requested,
+                )?
+            {
+                return Ok(existing);
+            }
+            approval.previous_denials = review_applications::overlapping_denials(
+                &tx,
+                &approval.message_id,
+                &approval.call.id,
+                &approval.scopes,
+            )?;
+            if !approval.previous_denials.is_empty() {
+                approval.decision = ApprovalDecision::ApplicationRequired;
+                approval.reason = "The requested scope overlaps an immutable refusal for this source operation. Automatic review is not repeated; apply to Core for exactly this scope.".into();
+            }
             sql(tx.execute(
-                "INSERT INTO approvals(id,actor_id,message_id,record) VALUES(?1,?2,?3,'')",
-                params![approval.id, approval.actor_id, approval.message_id],
+                "INSERT INTO approvals(id,message_id,record) VALUES(?1,?2,'')",
+                params![approval.id, approval.message_id],
             ))?;
             approval.seq = tx.last_insert_rowid();
             sql(tx.execute_batch(
@@ -1413,7 +1457,7 @@ impl ActorStore {
             if approval.decision == ApprovalDecision::Pending {
                 event(
                     &tx,
-                    &approval.actor_id,
+                    &message_tx(&tx, &approval.message_id)?.actor_id,
                     ActorEvent::ApprovalRequested {
                         approval_id: approval.id.clone(),
                         message_id: approval.message_id.clone(),
@@ -1464,34 +1508,20 @@ impl ActorStore {
         before: Option<i64>,
         limit: usize,
     ) -> Result<Page<ApprovalRecord>> {
-        self.approval_page(actor, before, limit, false)
-    }
-    pub fn pending_approvals(
-        &self,
-        actor: Option<&str>,
-        before: Option<i64>,
-        limit: usize,
-    ) -> Result<Page<ApprovalRecord>> {
-        self.approval_page(actor, before, limit, true)
+        self.approval_page(actor, before, limit)
     }
     fn approval_page(
         &self,
         actor: Option<&str>,
         before: Option<i64>,
         limit: usize,
-        awaiting_owner: bool,
     ) -> Result<Page<ApprovalRecord>> {
         database_io(|| {
             let limit = limit.clamp(1, 100);
             let db = self.db.lock();
-            let mut stmt=sql(db.prepare("SELECT record FROM approvals WHERE (?1 IS NULL OR actor_id=?1) AND seq<?2 AND (?3=0 OR (json_extract(record,'$.mode')='ask' AND json_extract(record,'$.decision')='pending')) ORDER BY seq DESC LIMIT ?4"))?;
+            let mut stmt=sql(db.prepare("SELECT record FROM approvals WHERE (?1 IS NULL OR message_id IN (SELECT id FROM messages WHERE actor_id=?1)) AND seq<?2 ORDER BY seq DESC LIMIT ?3"))?;
             let rows = sql(stmt.query_map(
-                params![
-                    actor,
-                    before.unwrap_or(i64::MAX),
-                    awaiting_owner,
-                    (limit + 1) as i64
-                ],
+                params![actor, before.unwrap_or(i64::MAX), (limit + 1) as i64],
                 |r| r.get::<_, String>(0),
             ))?;
             let mut items: Vec<ApprovalRecord> =
@@ -1535,7 +1565,7 @@ impl ActorStore {
             }
             approval.decision = decision;
             if decision == ApprovalDecision::Approved {
-                super::grants::remember(&tx, &approval.actor_id, &approval.scopes)?;
+                crate::sandbox::scopes::remember(&tx, &approval.scopes)?;
             }
             approval.reason = reason.chars().take(1000).collect();
             if decision != ApprovalDecision::Pending {
@@ -1547,7 +1577,7 @@ impl ActorStore {
             ))?;
             event(
                 &tx,
-                &approval.actor_id,
+                &message_tx(&tx, &approval.message_id)?.actor_id,
                 ActorEvent::ApprovalResolved {
                     approval_id: approval.id.clone(),
                     message_id: approval.message_id.clone(),
@@ -1885,7 +1915,7 @@ impl ActorStore {
                 reply_to: source.reply_to.clone(),
                 kind: MessageKind::Delivery,
                 in_reply_to: Some(source.id.clone()),
-                delegation_grant: None,
+
                 remote_authority: None,
                 content: String::new(),
                 attachments: vec![],
@@ -1919,7 +1949,6 @@ impl ActorStore {
                 delivery.reply = None;
                 delivery.status = MessageStatus::Queued;
                 delivery.finished_at_ms = None;
-                delivery.delegation_grant = original.delegation_grant;
                 delivery.remote_authority = original.remote_authority;
             }
             if let Ok(existing) = message_tx(&tx, &delivery.id) {
@@ -2027,7 +2056,7 @@ impl ActorStore {
                 ))?;
                 event(
                     &tx,
-                    &approval.actor_id,
+                    &message_tx(&tx, &approval.message_id)?.actor_id,
                     ActorEvent::ApprovalResolved {
                         approval_id: approval.id,
                         message_id: approval.message_id,
@@ -2144,11 +2173,6 @@ impl ActorStore {
                                 reply_to: original.reply_to,
                                 kind: MessageKind::Result,
                                 in_reply_to: Some(original.id.clone()),
-                                delegation_grant: if original.remote_authority.is_some() {
-                                    original.delegation_grant.clone()
-                                } else {
-                                    None
-                                },
                                 remote_authority: original.remote_authority.clone(),
                                 content: answer,
                                 attachments,
@@ -2187,6 +2211,45 @@ impl ActorStore {
             self.commit(tx)?;
             Ok(message)
         })
+    }
+    pub(crate) fn request_cancel_actor(&self, actor: &str) -> Result<Vec<String>> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            actor_tx(&tx, actor)?;
+            let ids = {
+                let mut query = sql(tx.prepare("SELECT id FROM messages WHERE actor_id=?1 AND status IN ('\"queued\"','\"running\"') ORDER BY seq"))?;
+                sql(query.query_map([actor], |row| row.get::<_, String>(0)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .into_diagnostic()?
+            };
+            for id in &ids {
+                let mut message = message_tx(&tx, id)?;
+                message.cancel_requested = true;
+                message.updated_at_ms = now();
+                save_message(&tx, &message)?;
+            }
+            self.commit(tx)?;
+            Ok(ids)
+        })
+    }
+
+    pub(crate) fn settle_cancelled_inputs(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            let message = self.message(id)?;
+            if message.cancel_requested
+                && matches!(
+                    message.status,
+                    MessageStatus::Running | MessageStatus::Queued
+                )
+            {
+                self.interrupt_message(
+                    id,
+                    "Actor stopped; completed effects were not rolled back",
+                )?;
+            }
+        }
+        Ok(())
     }
     pub fn register_resource(&self, resource: StoredResource) -> Result<()> {
         self.register_resource_for_message(resource, None)
@@ -2254,7 +2317,7 @@ impl ActorStore {
     /// Used after an individual worker has terminated, including forced stops.
     /// It never replays effects or interrupts another inbox.
     pub fn interrupt_actor(&self, actor_id: &str, reason: &str) -> Result<()> {
-        if let Some(message) = self.current_message(actor_id)? {
+        while let Some(message) = self.current_message(actor_id)? {
             self.interrupt_message(&message.id, reason)?;
         }
         self.set_status(actor_id, ActorStatus::Idle)

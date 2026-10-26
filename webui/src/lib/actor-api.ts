@@ -5,7 +5,6 @@ export type { StreamStatus } from "./event-stream";
 export type JsonValue = null | boolean | number | string | JsonValue[] | {
   [key: string]: JsonValue;
 };
-export type ApprovalMode = "auto" | "ask" | "none";
 export type ActorStatus = "idle" | "running" | "archived";
 export type MessageStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type ApprovalDecision = "application_required" | "pending" | "approved" | "denied" | "cancelled";
@@ -17,18 +16,13 @@ export type Page<T, C = number> = {
   next_cursor: C | null;
   event_cursor?: number;
 };
-export type ActorPermissions = {
-  approval_mode: ApprovalMode;
-  readable_roots: string[];
-  writable_roots: string[];
-};
+
 export type ActorConfig = {
   name: string;
   workspace: string;
   apps: string[];
   model: string | null;
   instructions: string;
-  permissions: ActorPermissions;
 };
 export type ActorSummary = {
   id: string;
@@ -137,13 +131,12 @@ export type ToolResult = Omit<ToolSummary, "seq"> & {
   payload: JsonValue;
   model_content: string;
 };
-export type ApprovalScope = {kind:"filesystem";path:string;write:boolean;recursive:boolean} | {kind:"app";namespace:string;policy:string;action:string};
+export type ApprovalScope = {path:string;write:boolean;recursive:boolean};
 export type ApprovalRecord = {
-  review?: {namespace:string;criteria:string;action:JsonValue} | null;
   scopes?: ApprovalScope[];
+  previous_denials?: string[];
   seq: number;
   id: string;
-  actor_id: string;
   message_id: string;
   call: {
     id: string;
@@ -153,9 +146,7 @@ export type ApprovalRecord = {
   requested: {
     readable_roots: string[];
     writable_roots: string[];
-    operation_details?: JsonValue;
   };
-  mode: ApprovalMode;
   decision: ApprovalDecision;
   reason: string;
   created_at_ms: number;
@@ -369,7 +360,6 @@ export const getActor = (id: string, options?: FetchOptions) => request<ActorDet
 export const patchActorPreferences = (id: string, preferences: {
   model?: string | null;
   // Account-wide; accepted only for Core.
-  approval_mode?: ApprovalMode;
 }, options?: FetchOptions) => request<ActorDetail>(actorPath(id), { ...options, method: "PATCH", body: preferences });
 export type ConversationPage = Page<MessageRecord> & { active?: MessageRecord | null };
 export const listMessages = (actor: string, options: FetchOptions & {
@@ -402,10 +392,8 @@ export const getToolResult = (actor: string, id: string, options?: FetchOptions)
 export const listApprovals = (actor?: string, options: FetchOptions & {
   before?: number;
   limit?: number;
-  awaiting_owner?: boolean;
-} = {}) => request<Page<ApprovalRecord>>(query(actor ? `${actorPath(actor)}/approvals` : "/v1/approvals", { before: options.before, limit: options.limit ?? 30, awaiting_owner: options.awaiting_owner }), options);
+} = {}) => request<Page<ApprovalRecord>>(query(actor ? `${actorPath(actor)}/approvals` : "/v1/approvals", { before: options.before, limit: options.limit ?? 30 }), options);
 export const getApproval = (id: string, actor?: string, options?: FetchOptions) => request<ApprovalRecord>(`${actor ? `${actorPath(actor)}/approvals` : "/v1/approvals"}/${segment(id)}`, options);
-export const resolveApproval = (id: string, decision: "approve" | "deny", options?: FetchOptions) => request<ApprovalRecord>(`/v1/approvals/${segment(id)}`, { ...options, method: "POST", body: { decision } });
 export const resourceUrl = (actor: string, resource: string) => `${actorPath(actor)}/resources/${segment(resource)}`;
 export const uploadAttachment = (actor: string, file: File, options?: FetchOptions) => {
   const maximum = file.type.startsWith("image/") ? 10 * 1024 * 1024 : 32 * 1024 * 1024;

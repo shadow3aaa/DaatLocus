@@ -10,7 +10,7 @@ fn message(id: &str, kind: MessageKind, content: &str, parent: Option<&str>) -> 
         reply_to: ReplyTarget::User,
         kind,
         in_reply_to: parent.map(str::to_owned),
-        delegation_grant: None,
+
         remote_authority: None,
         content: content.into(),
         attachments: vec![],

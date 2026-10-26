@@ -24,7 +24,7 @@ struct Profile {
     parameters: Vec<String>,
 }
 impl Profile {
-    fn filter(&mut self, path: &Path) -> Result<String> {
+    fn filter(&mut self, path: &Path, recursive: bool) -> Result<String> {
         let path = path
             .to_str()
             .filter(|value| !value.contains('\0'))
@@ -33,12 +33,24 @@ impl Profile {
         self.parameters.push(format!("-D{key}={path}"));
         // Paths are arguments, never executable SBPL. Literal also covers an
         // absent path itself (including its first creation), not only children.
+        if !recursive {
+            return Ok(format!("(literal (param \"{key}\"))"));
+        }
         Ok(format!(
             "(require-any (literal (param \"{key}\")) (subpath (param \"{key}\")))"
         ))
     }
     fn rule(&mut self, action: &str, operations: &str, path: &Path) -> Result<()> {
-        let filter = self.filter(path)?;
+        self.scoped_rule(action, operations, path, true)
+    }
+    fn scoped_rule(
+        &mut self,
+        action: &str,
+        operations: &str,
+        path: &Path,
+        recursive: bool,
+    ) -> Result<()> {
+        let filter = self.filter(path, recursive)?;
         self.rules
             .push_str(&format!("({action} {operations} {filter})\n"));
         Ok(())
@@ -62,19 +74,36 @@ pub fn wrap_command(
     if fs.full_disk_read || fs.full_disk_write {
         profile.rule("allow", read_ops, Path::new("/"))?;
     } else {
+        for scope in super::runtime_read_scopes().map_err(|error| miette!("{error}"))? {
+            for path in policy_paths_with_resolved(std::slice::from_ref(&scope.path)) {
+                profile.scoped_rule("allow", read_ops, &path, scope.recursive)?;
+            }
+        }
         let mut roots = fs.readable_roots.clone();
+        roots.extend(super::system_temporary_paths().iter().cloned());
         roots.extend(fs.writable_roots.iter().map(|root| root.root.clone()));
         for root in policy_paths_with_resolved(&roots) {
             profile.rule("allow", read_ops, &root)?;
         }
     }
-    if fs.full_disk_write {
+    if fs.full_disk_write && !fs.deny_all_writes {
         profile.rule("allow", "file-write*", Path::new("/"))?;
     }
-    for root in &fs.writable_roots {
+    let mut writable_roots = fs.writable_roots.clone();
+    writable_roots.extend(
+        super::system_temporary_paths()
+            .iter()
+            .map(|root| super::WritableRoot {
+                root: root.clone(),
+                read_only_subpaths: vec![],
+            }),
+    );
+    for root in &writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
-            profile.rule("allow", "file-write*", &root)?;
-            profile.filter(&root)?;
+            if !fs.deny_all_writes {
+                profile.rule("allow", "file-write*", &root)?;
+            }
+            profile.filter(&root, false)?;
             // Keep authority anchors from being unlinked/replaced while a
             // sandboxed process (or one of its descendants) is running.
             let literal_key = profile.parameters.len() - 1;
@@ -85,6 +114,9 @@ pub fn wrap_command(
         for path in policy_paths_with_resolved(&root.read_only_subpaths) {
             profile.rule("deny", "file-write*", &path)?;
         }
+    }
+    if fs.deny_all_writes {
+        profile.rules.push_str("(deny file-write*)\n");
     }
     let deny_read = &fs.deny_read_paths;
     let deny_write = &fs.deny_write_paths;
@@ -119,7 +151,7 @@ pub fn wrap_command(
         }
     }
     for path in ancestors {
-        profile.filter(&path)?;
+        profile.filter(&path, false)?;
         let key = profile.parameters.len() - 1;
         profile.rules.push_str(&format!("(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal (param \"DL_PATH_{key}\"))))\n"));
     }
@@ -143,6 +175,7 @@ pub fn wrap_command(
 
 pub(super) struct MacosSandboxAsyncChild {
     child: tokio::process::Child,
+    group_termination_sent: bool,
 }
 
 fn finish_exited_group_cleanup(pid: u32, result: std::io::Result<()>) -> std::io::Result<()> {
@@ -190,6 +223,9 @@ impl MacosSandboxAsyncChild {
         self.child.id()
     }
     pub fn start_kill(&mut self) -> std::io::Result<()> {
+        if self.group_termination_sent {
+            return Ok(());
+        }
         if let Some(pid) = self.child.id() {
             let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             if result < 0 {
@@ -198,6 +234,10 @@ impl MacosSandboxAsyncChild {
                     return Err(error);
                 }
             }
+            // A successful group signal already targets the leader and its
+            // descendants. Repeating it while they become zombies can return
+            // EPERM on XNU despite the original termination having succeeded.
+            self.group_termination_sent = result == 0;
         }
         self.child.start_kill()
     }
@@ -253,6 +293,7 @@ pub(super) fn spawn_restricted_async(
     }
     let child = MacosSandboxAsyncChild {
         child: command.spawn()?,
+        group_termination_sent: false,
     };
     if cancelled
         .as_ref()
@@ -278,6 +319,7 @@ mod tests {
         SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: false,
+                deny_all_writes: false,
                 full_disk_write: false,
                 readable_roots: vec![root.to_owned()],
                 writable_roots: vec![WritableRoot {
@@ -328,13 +370,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn actor_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
+    async fn device_scope_runs_shell_and_enforces_future_and_ancestor_denies() {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
+        let fixture = crate::test_support::scoped_directory();
         let temp = tempfile::Builder::new()
             .prefix("dl quoted \" (root)\n")
-            .tempdir()
+            .tempdir_in(fixture.path())
             .unwrap();
         let root = temp.path().join("work");
         std::fs::create_dir(&root).unwrap();

@@ -169,7 +169,7 @@ fn receive_inner(
             let archive = super::recovery::archive(tx, device, &current)?;
             // The original records remain in the private branch archive. Only
             // the active conversation and model window switch to the winner.
-            tx.execute_batch("DELETE FROM approvals WHERE actor_id='core';DELETE FROM tools WHERE actor_id='core';DELETE FROM history WHERE actor_id='core';DELETE FROM messages WHERE actor_id='core';DELETE FROM events WHERE actor_id='core';DELETE FROM idempotency WHERE actor_id='core';DELETE FROM core_rows;DELETE FROM core_prepared;DELETE FROM core_dirty;")?;
+            tx.execute_batch("DELETE FROM approvals WHERE message_id IN (SELECT id FROM messages WHERE actor_id='core');DELETE FROM tools WHERE actor_id='core';DELETE FROM history WHERE actor_id='core';DELETE FROM messages WHERE actor_id='core';DELETE FROM events WHERE actor_id='core';DELETE FROM idempotency WHERE actor_id='core';DELETE FROM core_rows;DELETE FROM core_prepared;DELETE FROM core_dirty;")?;
             Some(archive)
         } else { None };
         // Speculative follower captures cannot reserve committed order positions.

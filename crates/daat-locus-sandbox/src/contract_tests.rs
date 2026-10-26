@@ -5,7 +5,7 @@ use std::{io, path::Path, process::ExitStatus, time::Duration};
 
 use tokio::io::AsyncReadExt;
 
-use super::test_support::native_sandbox_available;
+use super::test_support::{native_sandbox_available, scoped_directory};
 use super::{
     FileSystemSandboxPolicy, SandboxAsyncChild, SandboxPolicy, SandboxProcessOptions, SandboxStdio,
     StrongFilesystemSandboxMode, WritableRoot,
@@ -15,6 +15,7 @@ fn policy(root: &Path) -> SandboxPolicy {
     SandboxPolicy {
         filesystem: FileSystemSandboxPolicy {
             full_disk_read: false,
+            deny_all_writes: false,
             full_disk_write: false,
             readable_roots: vec![root.to_owned()],
             writable_roots: vec![WritableRoot {
@@ -53,14 +54,14 @@ async fn collect(mut child: SandboxAsyncChild) -> (ExitStatus, String, String) {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::try_join!(
             async {
-                let mut value = String::new();
-                out.read_to_string(&mut value).await?;
-                Ok::<_, io::Error>(value)
+                let mut value = Vec::new();
+                out.read_to_end(&mut value).await?;
+                Ok::<_, io::Error>(String::from_utf8_lossy(&value).into_owned())
             },
             async {
-                let mut value = String::new();
-                err.read_to_string(&mut value).await?;
-                Ok::<_, io::Error>(value)
+                let mut value = Vec::new();
+                err.read_to_end(&mut value).await?;
+                Ok::<_, io::Error>(String::from_utf8_lossy(&value).into_owned())
             },
             async {
                 loop {
@@ -83,11 +84,79 @@ async fn collect(mut child: SandboxAsyncChild) -> (ExitStatus, String, String) {
 }
 
 #[tokio::test]
+async fn native_temporary_paths_share_host_bytes_under_the_common_policy() {
+    if !native_sandbox_available() {
+        return;
+    }
+    let root = scoped_directory();
+    let scratch = tempfile::tempdir().unwrap();
+    let input = scratch.path().join("from-host.txt");
+    let output = scratch.path().join("from-child.txt");
+    std::fs::write(&input, "shared-scratch").unwrap();
+    let policy = policy(root.path());
+    assert!(policy.is_path_readable(&input));
+    assert!(policy.is_path_writable(&output));
+    #[cfg(windows)]
+    let script = format!(
+        "$ErrorActionPreference='Stop'; if ([IO.File]::ReadAllText('{}') -cne 'shared-scratch') {{exit 73}}; [IO.File]::WriteAllText('{}', 'child-scratch')",
+        input.display().to_string().replace('\'', "''"),
+        output.display().to_string().replace('\'', "''")
+    );
+    #[cfg(unix)]
+    let script = format!(
+        "test \"$(cat '{}')\" = shared-scratch && printf child-scratch > '{}'",
+        input.display().to_string().replace('\'', "'\\''"),
+        output.display().to_string().replace('\'', "'\\''")
+    );
+    let (status, out, err) = collect(launch(&policy, root.path(), script)).await;
+    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "child-scratch");
+}
+
+#[tokio::test]
+async fn native_runtime_reads_match_the_common_policy_and_explicit_denials() {
+    if !native_sandbox_available() {
+        return;
+    }
+    let root = scoped_directory();
+    #[cfg(windows)]
+    let file = super::runtime_read_scopes().unwrap()[0]
+        .path
+        .join("win.ini");
+    #[cfg(target_os = "linux")]
+    let file = std::path::PathBuf::from("/etc/hosts");
+    #[cfg(target_os = "macos")]
+    let file = std::path::PathBuf::from("/private/etc/hosts");
+    let expected = std::fs::metadata(&file).unwrap().len();
+    assert!(expected > 0, "runtime fixture must contain observable data");
+    let mut policy = policy(root.path());
+    assert!(policy.is_path_readable(&file));
+    assert!(!policy.is_path_writable(&file));
+    #[cfg(windows)]
+    let script = format!(
+        "try {{ [Console]::WriteLine([IO.File]::ReadAllBytes('{}').Length) }} catch {{ [Console]::WriteLine(0) }}",
+        file.display().to_string().replace('\'', "''")
+    );
+    #[cfg(unix)]
+    let script = format!(
+        "cat '{}' 2>/dev/null | wc -c",
+        file.display().to_string().replace('\'', "'\\''")
+    );
+    let (status, out, err) = collect(launch(&policy, root.path(), script.clone())).await;
+    assert!(status.success(), "runtime read failed: {err}");
+    assert_eq!(out.trim().parse::<u64>().unwrap(), expected);
+    policy.filesystem.deny_read_paths.push(file.clone());
+    assert!(!policy.is_path_readable(&file));
+    let (_, out, _) = collect(launch(&policy, root.path(), script)).await;
+    assert_eq!(out.trim().parse::<u64>().unwrap(), 0);
+}
+
+#[tokio::test]
 async fn native_writable_scope_allows_file_and_directory_rename_and_delete() {
     if !native_sandbox_available() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = scoped_directory();
     let root = temp.path().join("work");
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("host.txt"), "initial").unwrap();
@@ -110,7 +179,7 @@ async fn native_rename_and_delete_preserve_readonly_and_denied_targets() {
     if !native_sandbox_available() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
+    let temp = scoped_directory();
     let root = temp.path().join("work");
     std::fs::create_dir(&root).unwrap();
     let readonly = root.join("readonly.txt");
@@ -166,6 +235,215 @@ async fn native_rename_and_delete_preserve_readonly_and_denied_targets() {
     assert!(out.contains("protected-targets-complete"), "stdout={out}");
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn native_powershell_provider_path_normalization_obeys_the_read_scope() {
+    if !native_sandbox_available() {
+        return;
+    }
+    for full_read in [false, true] {
+        let directory = scoped_directory();
+        let root = directory.path();
+        std::fs::write(root.join("source.txt"), "original").unwrap();
+        let mut policy = policy(root);
+        policy.filesystem.full_disk_read = full_read;
+        let script = script_with_root(
+            root,
+            r#"
+$ErrorActionPreference = 'Stop'
+$file = [IO.FileInfo]::new((Join-Path $root 'source.txt'))
+$file.MoveTo((Join-Path $root 'moved.txt'))
+try {
+    Rename-Item -LiteralPath (Join-Path $root 'moved.txt') -NewName 'renamed.txt'
+    Remove-Item -LiteralPath (Join-Path $root 'renamed.txt') -Force
+} catch [UnauthorizedAccessException] { exit 71 }
+"#,
+        );
+        let (status, out, err) = collect(launch(&policy, root, script)).await;
+        if full_read {
+            assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+            assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
+        } else {
+            // FileInfo moved the authorized file. PowerShell's provider also
+            // normalizes absolute paths through ancestors outside that root;
+            // allowing writes must not implicitly grant those reads.
+            assert_eq!(status.code(), Some(71), "stdout={out}; stderr={err}");
+            assert_eq!(
+                std::fs::read_to_string(root.join("moved.txt")).unwrap(),
+                "original"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_children_and_grandchildren_inherit_granted_and_denied_scopes() {
+    if !native_sandbox_available() {
+        return;
+    }
+    for full_disk_read in [false, true] {
+        let temp = scoped_directory();
+        let root = temp.path().join("work");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("input.txt"), "outside source").unwrap();
+        #[cfg(windows)]
+        let (name, body) = (
+            "descendant.ps1",
+            r#"
+param([string]$root, [string]$outside, [int]$depth, [int]$readable)
+$ErrorActionPreference = 'Stop'
+$read = $false
+try { $read = [IO.File]::ReadAllText((Join-Path $outside 'input.txt')) -ceq 'outside source' } catch [UnauthorizedAccessException] {} catch { if (($_.Exception.HResult -band 0xffff) -ne 5 -and ($_.Exception.InnerException.HResult -band 0xffff) -ne 5) { throw } }
+if ($read -ne ($readable -eq 1)) { throw 'descendant lost read policy' }
+[IO.File]::WriteAllText((Join-Path $root "$depth.txt"), 'allowed')
+$blocked = $false
+try { [IO.File]::WriteAllText((Join-Path $outside "$depth.txt"), 'forbidden') }
+catch [UnauthorizedAccessException] { $blocked = $true }
+catch { if (($_.Exception.HResult -band 0xffff) -eq 5 -or ($_.Exception.InnerException.HResult -band 0xffff) -eq 5) { $blocked = $true } else { throw } }
+if (-not $blocked) { throw 'descendant escaped write isolation' }
+if ($depth -lt 2) {
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $root $outside ($depth + 1) $readable
+    if ($LASTEXITCODE -ne 0) { throw 'descendant failed' }
+}
+"#,
+        );
+        #[cfg(unix)]
+        let (name, body) = (
+            "descendant.sh",
+            r#"
+set -eu
+root="$1"; outside="$2"; depth="$3"
+if [ "$4" = 1 ]; then
+    [ "$(cat "$outside/input.txt")" = 'outside source' ]
+elif cat "$outside/input.txt" >/dev/null 2>&1; then exit 42; fi
+printf allowed > "$root/$depth.txt"
+if (printf forbidden > "$outside/$depth.txt") 2>/dev/null; then exit 41; fi
+if [ "$depth" -lt 2 ]; then /bin/sh "$0" "$root" "$outside" "$((depth + 1))" "$4"; fi
+"#,
+        );
+        std::fs::write(root.join(name), body).unwrap();
+        #[cfg(windows)]
+        let script = script_with_root(
+            &root,
+            &format!(
+                "& (Join-Path $root '{name}') $root '{}' 0 {}; if (-not $?) {{ exit 1 }}",
+                outside.to_str().unwrap().replace('\'', "''"),
+                u8::from(full_disk_read)
+            ),
+        );
+        #[cfg(unix)]
+        let script = script_with_root(
+            &root,
+            &format!(
+                "/bin/sh \"$root/{name}\" \"$root\" '{}' 0 {}",
+                outside.to_str().unwrap().replace('\'', "'\\''"),
+                u8::from(full_disk_read)
+            ),
+        );
+        let mut sandbox = policy(&root);
+        sandbox.filesystem.full_disk_read = full_disk_read;
+        let (status, out, err) = collect(launch(&sandbox, &root, script)).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        for depth in 0..=2 {
+            assert_eq!(
+                std::fs::read_to_string(root.join(format!("{depth}.txt"))).unwrap(),
+                "allowed"
+            );
+            assert!(
+                !outside.join(format!("{depth}.txt")).exists(),
+                "descendant {depth} escaped sandbox"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_process_scope_change_requires_explicit_restart_without_replaying_effects() {
+    if !native_sandbox_available() {
+        return;
+    }
+    let temp = scoped_directory();
+    let root = temp.path();
+    let original = policy(root);
+    #[cfg(windows)]
+    let body =
+        "[IO.File]::WriteAllText((Join-Path $root 'once.txt'), 'once'); Start-Sleep -Seconds 20";
+    #[cfg(unix)]
+    let body = "printf once > \"$root/once.txt\"; sleep 20";
+    let mut child = launch(&original, root, script_with_root(root, body));
+    child.ensure_policy(&original).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !root.join("once.txt").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("original effect never started");
+    let mut changed = original.clone();
+    changed
+        .filesystem
+        .readable_roots
+        .push(temp.path().join("extra"));
+    let error = child.ensure_policy(&changed).unwrap_err();
+    assert!(error.to_string().contains("Explicitly restart"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("once.txt")).unwrap(),
+        "once"
+    );
+    assert!(!root.join("extra").exists());
+    child.start_kill().unwrap();
+    // Cancellation and completion may both request cleanup of the same tree.
+    #[cfg(target_os = "macos")]
+    child.start_kill().unwrap();
+    let _ = collect(child).await;
+}
+
+#[tokio::test]
+async fn native_readonly_authority_overrides_full_access_and_temp_baseline() {
+    if !native_sandbox_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let target = root.join("existing.txt");
+    std::fs::write(&target, "original").unwrap();
+    let mut policy = policy(root);
+    policy.filesystem.full_disk_read = true;
+    policy.filesystem.full_disk_write = true;
+    policy.filesystem.deny_all_writes = true;
+    #[cfg(windows)]
+    let script = script_with_root(
+        root,
+        r#"
+$ErrorActionPreference = 'Stop'
+if ([IO.File]::ReadAllText((Join-Path $root 'existing.txt')) -ne 'original') { throw 'read access lost' }
+foreach ($name in @('existing.txt', 'new.txt')) {
+    $blocked = $false
+    try { [IO.File]::WriteAllText((Join-Path $root $name), 'forbidden') }
+    catch { if (($_.Exception.HResult -band 0xffff) -eq 5 -or ($_.Exception.InnerException.HResult -band 0xffff) -eq 5) { $blocked = $true } else { throw } }
+    if (-not $blocked) { throw 'readonly write allowed' }
+}
+"#,
+    );
+    #[cfg(unix)]
+    let script = script_with_root(
+        root,
+        r#"
+set -eu
+[ "$(cat "$root/existing.txt")" = original ]
+for name in existing.txt new.txt; do
+    if (printf forbidden > "$root/$name") 2>/dev/null; then exit 42; fi
+done
+"#,
+    );
+    let (status, out, err) = collect(launch(&policy, root, script)).await;
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "original");
+    assert!(!root.join("new.txt").exists());
+    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+}
+
 #[cfg(target_os = "windows")]
 fn command(script: String) -> (String, Vec<String>) {
     use std::os::windows::ffi::OsStringExt;
@@ -188,6 +466,8 @@ fn command(script: String) -> (String, Vec<String>) {
         vec![
             "-NoProfile".into(),
             "-NonInteractive".into(),
+            "-ExecutionPolicy".into(),
+            "Bypass".into(),
             "-Command".into(),
             script,
         ],
@@ -235,11 +515,11 @@ foreach ($name in @('host.txt', 'sandbox.txt')) {
     [IO.File]::AppendAllText($path, '+append')
     if ([IO.File]::ReadAllText($path) -ne 'initial+append') { throw 'append mismatch' }
     [Console]::WriteLine("rename file: $name")
-    Rename-Item -LiteralPath $path -NewName "$name.renamed"
+    [IO.File]::Move($path, $renamed)
     if (Test-Path -LiteralPath $path) { throw 'original file survived rename' }
     if ([IO.File]::ReadAllText($renamed) -ne 'initial+append') { throw 'rename lost content' }
     [Console]::WriteLine("delete file: $name")
-    Remove-Item -LiteralPath $renamed -Force
+    [IO.File]::Delete($renamed)
     if (Test-Path -LiteralPath $renamed) { throw 'file survived delete' }
 }
 $null = [IO.Directory]::CreateDirectory((Join-Path $root 'empty-directory'))
@@ -249,7 +529,7 @@ foreach ($name in @('host-directory', 'host-empty-directory', 'empty-directory',
     $path = Join-Path $root $name
     $renamed = "$path.renamed"
     [Console]::WriteLine("rename directory: $name")
-    Rename-Item -LiteralPath $path -NewName "$name.renamed"
+    [IO.Directory]::Move($path, $renamed)
     if (Test-Path -LiteralPath $path) { throw 'original directory survived rename' }
     if (-not [IO.Directory]::Exists($renamed)) { throw 'renamed directory missing' }
     if ($name -notin @('empty-directory', 'host-empty-directory')) {
@@ -258,7 +538,7 @@ foreach ($name in @('host-directory', 'host-empty-directory', 'empty-directory',
         }
     }
     [Console]::WriteLine("delete directory: $name")
-    Remove-Item -LiteralPath $renamed -Recurse -Force
+    [IO.Directory]::Delete($renamed, $true)
     if (Test-Path -LiteralPath $renamed) { throw 'directory survived delete' }
 }
 [Console]::WriteLine('rename-delete-complete')
@@ -269,27 +549,28 @@ const PROTECTED_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 # Prove the same operations work on unprotected siblings in this process.
 [IO.File]::WriteAllText((Join-Path $root 'control.txt'), 'control')
-Rename-Item -LiteralPath (Join-Path $root 'control.txt') -NewName 'control.txt.renamed'
+[IO.File]::Move((Join-Path $root 'control.txt'), (Join-Path $root 'control.txt.renamed'))
 if ([IO.File]::ReadAllText((Join-Path $root 'control.txt.renamed')) -ne 'control') {
     throw 'control rename lost content'
 }
-Remove-Item -LiteralPath (Join-Path $root 'control.txt.renamed') -Force
+[IO.File]::Delete((Join-Path $root 'control.txt.renamed'))
 $null = [IO.Directory]::CreateDirectory((Join-Path $root 'control-directory'))
-Rename-Item -LiteralPath (Join-Path $root 'control-directory') -NewName 'control-directory.renamed'
+[IO.Directory]::Move((Join-Path $root 'control-directory'), (Join-Path $root 'control-directory.renamed'))
 if (-not [IO.Directory]::Exists((Join-Path $root 'control-directory.renamed'))) {
     throw 'control directory rename failed'
 }
-Remove-Item -LiteralPath (Join-Path $root 'control-directory.renamed') -Recurse -Force
+[IO.Directory]::Delete((Join-Path $root 'control-directory.renamed'), $true)
 foreach ($name in @('readonly.txt', 'denied.txt', 'readonly-directory', 'denied-directory')) {
     $path = Join-Path $root $name
+    $renamed = "$path.renamed"
     foreach ($operation in @('rename', 'delete')) {
         [Console]::WriteLine("deny ${operation}: $name")
         $blocked = $false
         try {
             if ($operation -eq 'rename') {
-                Rename-Item -LiteralPath $path -NewName "$name.renamed"
+                if ([IO.Directory]::Exists($path)) { [IO.Directory]::Move($path, $renamed) } else { [IO.File]::Move($path, $renamed) }
             } else {
-                Remove-Item -LiteralPath $path -Recurse -Force
+                if ([IO.Directory]::Exists($path)) { [IO.Directory]::Delete($path, $true) } else { [IO.File]::Delete($path) }
             }
         } catch {
             $failure = $_

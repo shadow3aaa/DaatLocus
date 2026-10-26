@@ -207,12 +207,12 @@ describe("cookie-only requests", () => {
       requests.push({ url: String(url), init: init! });
       return Response.json({});
     }) as typeof fetch;
-    await patchActorPreferences("actor/path", { approval_mode: "none" });
+    await patchActorPreferences("actor/path", { model: "alternate" });
     await patchActorPreferences("actor/path", { model: null });
     await listToolSummaries("root", "message", { before: 24, limit: 30 });
     expect(requests[0].url).toBe("/v1/actors/actor%2Fpath");
     expect(requests[0].init.method).toBe("PATCH");
-    expect(JSON.parse(String(requests[0].init.body))).toEqual({ approval_mode: "none" });
+    expect(JSON.parse(String(requests[0].init.body))).toEqual({ model: "alternate" });
     expect(JSON.parse(String(requests[1].init.body))).toEqual({ model: null });
     expect(requests[2].url).toBe("/v1/actors/root/messages/message/results?before=24&limit=30");
   });

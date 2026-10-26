@@ -93,7 +93,7 @@ pub fn read(
         return Err(StageError::Forbidden("Observation targets another host"));
     }
     let grant =
-        StageLedger::attach(system.store(), local).actor_grant(peer, &actor.actor_id, now)?;
+        StageLedger::attach(system.store(), local).authorize_actor(peer, &actor.actor_id, now)?;
     if !grant.read {
         return Err(StageError::Forbidden("Actor observation is not authorized"));
     }
@@ -138,7 +138,7 @@ pub fn read(
         Query::Result {id} => {let record=system.store().tool_result(id).map_err(fail)?;if record.actor_id!=actor.actor_id{return Err(StageError::Forbidden("Result belongs to another Actor"));} serde_json::to_value(record)},
         Query::Activity {message,after,limit} => serde_json::to_value(system.store().message_events(&actor.actor_id,message,*after,*limit as usize).map_err(fail)?),
         Query::Approvals {before,limit} => serde_json::to_value(system.store().approvals(Some(&actor.actor_id),*before,*limit as usize).map_err(fail)?),
-        Query::Approval {id} => {let record=system.store().approval(id).map_err(fail)?;if record.actor_id!=actor.actor_id{return Err(StageError::Forbidden("Approval belongs to another Actor"));}serde_json::to_value(record)},
+        Query::Approval {id} => {let record=system.store().approval(id).map_err(fail)?;if record.source_actor(system.store()).map_err(fail)?!=actor.actor_id{return Err(StageError::Forbidden("Application source belongs to another Actor"));}serde_json::to_value(record)},
     }.map_err(|_|StageError::Invalid("Cannot encode observation"))?;
     if let Some(cursor) = event_head {
         value["event_head"] = serde_json::to_value(cursor)

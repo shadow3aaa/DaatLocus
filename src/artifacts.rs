@@ -55,9 +55,9 @@ pub fn store_artifact(
     store_prepared_artifact(request, source)
 }
 
-/// Store bytes already admitted through an Actor resource ledger. Resource
-/// authorization is handled by the caller; no filesystem grant is inferred here.
-pub(crate) fn store_resource_artifact(
+/// Store bytes already admitted through the filesystem boundary or an Actor
+/// resource ledger. The caller checks access before reading the bytes.
+pub(crate) fn store_admitted_bytes(
     request: &ArtifactRequest,
     bytes: Vec<u8>,
     name: &str,

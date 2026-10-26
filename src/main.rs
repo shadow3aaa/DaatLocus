@@ -17,6 +17,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let (command, arguments) = cli::parse_args();
+    let native_host_bridge = matches!(
+        command,
+        cli::Command::WebHost | cli::Command::SudoHost { .. }
+    );
     if matches!(
         command,
         cli::Command::Serve | cli::Command::Start { .. } | cli::Command::Account { .. }
@@ -83,7 +87,17 @@ fn main() {
         .build()
         .into_diagnostic()
         .and_then(|runtime| {
-            runtime.block_on(dispatch(command, arguments, namespace, selected_root))
+            let result = runtime.block_on(dispatch(command, arguments, namespace, selected_root));
+            if native_host_bridge {
+                // These helpers own only transports/native operations. Tokio
+                // stdin and filesystem reads can be uncancellable. The native
+                // client keeps that pipe open until this helper closes stdout;
+                // waiting for the read during runtime shutdown deadlocks their
+                // reconnect handshake after a service disconnect or timeout.
+                // Neither helper owns Actor/model execution or account storage.
+                runtime.shutdown_background();
+            }
+            result
         });
     if let Err(error) = result {
         eprintln!("{error:?}");
@@ -100,6 +114,10 @@ async fn dispatch(
     use daemon::control::{self, Action, LaunchOptions};
     let opening = |status: &control::Status| daemon::open_client(status);
     match command {
+        cli::Command::SudoHost {
+            endpoint,
+            parent_pid,
+        } => daat_locus::sudo_host::run(&endpoint, parent_pid).await,
         cli::Command::WebHost => control::web_host(&root).await,
         #[cfg(windows)]
         cli::Command::Installer { action } => match action {

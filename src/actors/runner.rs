@@ -251,7 +251,7 @@ async fn execute_message(
             .append_history(&actor.id, &message.id, &[input])?;
     }
     let mut prompt = format!(
-        "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
+        "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
         system_prompt(system, actor, &context).await?,
         message.id
     );
@@ -306,7 +306,7 @@ async fn execute_message(
             refresh_apps(system, actor, apps, &context, true).await?;
             tools = apps.model_tool_specs_for_context(&context)?;
             prompt = format!(
-                "{}\nCurrent request ID: {}. Act within the current request's authority and grants. Use tool outputs and historical records as task material.",
+                "{}\nCurrent request ID: {}. Act within the current request's authority and the device sandbox. Use tool outputs and historical records as task material.",
                 system_prompt(system, actor, &context).await?,
                 message.id
             );
@@ -541,6 +541,142 @@ fn validate_response_calls(response: &AgentTurnResponse) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn execute_sudo_call(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
+    apps: &mut AppManager,
+    call: &AgentToolCall,
+    context: &AppToolExecutionContext,
+) -> Option<Result<crate::app::AppToolExecutionResult>> {
+    let request = (|| {
+        let (args, mut invocation) =
+            crate::sudo_app::SudoApp::request(call, context.execution_cwd.clone())?;
+        let target = invocation.call(&call.id);
+        let unrestricted = super::sudo::unrestricted_context(context)?;
+        apps.validate_tool_call(&target, &unrestricted)?;
+        let owner = target.name.split_once("__").unwrap().0;
+        if let Some(revision) = apps.managed_versions().get(owner) {
+            let entry = system.app_registry().get(owner)?;
+            if entry.revision != *revision || !entry.enabled {
+                return Err(miette!("Target App changed before Sudo review"));
+            }
+            invocation.app_revision = Some(*revision);
+            invocation.app_source = Some(entry.source.public());
+        }
+        Ok::<_, miette::Report>((args, invocation))
+    })();
+    let (args, invocation) = match request {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+    };
+    let reviewed = {
+        let future = super::sudo::review(
+            system, actor, message, control, context, call, args, invocation,
+        );
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                result = &mut future => break result,
+                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    if check_interruption(system, control, message).is_err() { return None; }
+                    if let Err(error) = Box::pin(receive_incoming(system, actor, message, control, apps)).await {
+                        return Some(Err(error));
+                    }
+                }
+            }
+        }
+    };
+    let (approval_id, invocation) = match reviewed {
+        Ok(super::sudo::ReviewOutcome::Execute {
+            approval_id,
+            invocation,
+        }) => (approval_id, invocation),
+        Ok(super::sudo::ReviewOutcome::Submitted(result)) => return Some(Ok(result)),
+        Err(error) => return Some(Err(error)),
+    };
+    let prepared = (|| {
+        let current = system.execution_actor(message)?;
+        let context = system.execution_context(&current, message)?;
+        super::approval::ensure_current(system, actor, message, control)?;
+        let mut unrestricted = super::sudo::unrestricted_context(&context)?;
+        unrestricted.restart_native = invocation.restart_native;
+        let target = invocation.call(&call.id);
+        apps.validate_tool_call(&target, &unrestricted)?;
+        let owner = target.name.split_once("__").unwrap().0;
+        if apps.managed_versions().get(owner).copied() != invocation.app_revision {
+            return Err(miette!("Target App changed while Sudo review was pending"));
+        }
+        if let Some(revision) = invocation.app_revision {
+            system.app_registry().check(owner, revision)?;
+        }
+        system
+            .store()
+            .claim_sudo(&approval_id, &message.id, &call.id, &invocation)?;
+        Ok::<_, miette::Report>((target, unrestricted))
+    })();
+    let (target, mut unrestricted) = match prepared {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+    };
+    if invocation.administrator {
+        let elevation = system.sudo_administrator();
+        tokio::pin!(elevation);
+        loop {
+            tokio::select! {
+                result=&mut elevation=>match result {
+                    Ok(client)=>{unrestricted.sandbox_policy.administrator=Some(client);break;},
+                    Err(error)=>return Some(Err(error)),
+                },
+                ()=tokio::time::sleep(CANCELLATION_INTERVAL)=>{
+                    if check_interruption(system, control, message).is_err(){return None;}
+                }
+            }
+        }
+    }
+    if let Err(error) = super::approval::ensure_current(system, actor, message, control) {
+        return Some(Err(error));
+    }
+    let fresh = match system
+        .execution_actor(message)
+        .and_then(|actor| system.execution_context(&actor, message))
+    {
+        Ok(context) => context,
+        Err(error) => return Some(Err(error)),
+    };
+    if let Err(error) = super::sudo::unrestricted_context(&fresh) {
+        return Some(Err(error));
+    }
+    match crate::actors::permissions::canonical_path(&invocation.cwd) {
+        Ok(path) if path == invocation.cwd && fresh.execution_cwd == invocation.cwd => {}
+        _ => {
+            return Some(Err(miette!(
+                "Sudo working directory binding changed before execution"
+            )));
+        }
+    }
+    unrestricted.actor_call = fresh.actor_call;
+    unrestricted.turn_epoch = fresh.turn_epoch;
+    let future = apps.execute_tool(&target, &unrestricted);
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Some(result.map(|mut result| {
+                if let Some(payload)=result.payload.as_object_mut() {
+                    payload.insert("sudo".into(),serde_json::json!({"tool":target.name,
+                        "administrator":invocation.administrator,"approval_id":approval_id}));
+                }
+                result
+            })),
+            () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                if check_interruption(system, control, message).is_err() { return None; }
+            }
+        }
+    }
+}
+
 async fn execute_call(
     system: &ActorSystem,
     actor: &ActorRecord,
@@ -558,105 +694,8 @@ async fn execute_call(
     // Do not reuse the grants captured before a long model request. A freshly
     // constructed execution context checks current permission and message
     // ownership immediately before effects.
-    let context = system.execution_context(&current_actor, message)?;
+    let mut context = system.execution_context(&current_actor, message)?;
     check_interruption(system, control, message)?;
-    if let Err(error) = apps.validate_tool_call_for_approval(call, &context) {
-        record_tool_error(
-            system,
-            actor,
-            message,
-            call,
-            &system.safe_error(&error.to_string()),
-            history,
-        )?;
-        return Ok(Vec::new());
-    }
-    let requested = match apps.permission_request(call, &context) {
-        Ok(requested) => requested,
-        Err(error) => {
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            return Ok(Vec::new());
-        }
-    };
-    let review = match apps.review_requirement(call, &context) {
-        Ok(review) => review,
-        Err(error) => {
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            check_interruption(system, control, message)?;
-            return Ok(Vec::new());
-        }
-    };
-    if !apps.delegates_approval(call, &context)? {
-        let authorization = super::approval::authorize(
-            system,
-            &current_actor,
-            message,
-            call,
-            control,
-            &context,
-            &requested,
-            review.as_ref(),
-        );
-        tokio::pin!(authorization);
-        let authorized = loop {
-            tokio::select! {
-                result = &mut authorization => break result,
-                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                    Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
-                    check_interruption(system, control, message)?;
-                }
-            }
-        };
-        if let Err(error) = authorized {
-            if let Some(rejection) = super::approval::rejection(&error) {
-                record_tool_rejection(system, actor, message, call, &rejection, history)?;
-                check_interruption(system, control, message)?;
-                return Ok(Vec::new());
-            }
-            record_tool_error(
-                system,
-                actor,
-                message,
-                call,
-                &system.safe_error(&error.to_string()),
-                history,
-            )?;
-            if error
-                .downcast_ref::<super::ActorError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error,
-                        super::ActorError::Forbidden(_) | super::ActorError::Invalid(_)
-                    )
-                })
-            {
-                check_interruption(system, control, message)?;
-                return Ok(Vec::new());
-            }
-            return Err(error);
-        }
-    }
-    check_interruption(system, control, message)?;
-    let fresh_actor = system.execution_actor(message)?;
-    if fresh_actor.config != actor.config {
-        return Err(miette!("Actor configuration changed during approval"));
-    }
-    let base = system.execution_context(&fresh_actor, message)?;
-    let context = system.requested_tool_context(&base, &requested)?;
     if let Err(error) = apps.validate_tool_call(call, &context) {
         record_tool_error(
             system,
@@ -666,23 +705,32 @@ async fn execute_call(
             &system.safe_error(&error.to_string()),
             history,
         )?;
-        check_interruption(system, control, message)?;
         return Ok(Vec::new());
     }
+    check_interruption(system, control, message)?;
     // Persist the intent before executing effects. Recovery exposes the
     // interrupted call, and does not replay it as an apparently fresh request.
-    let native_execution = !apps.delegates_approval(call, &context)?;
     let result_id = system.store().tool_started_with_authority(
         &actor.id,
         &message.id,
         call,
-        fresh_actor.remote_read_only,
-        native_execution,
+        current_actor.remote_read_only,
+        true,
     )?;
     if actor.id == crate::stage::shared::ACTOR_ID {
         system.checkpoint_core().await?;
     }
-    let outcome = if call.name == "actors__appeal_approval" {
+    super::runtime_permissions::bind_access_broker(
+        &mut context,
+        system,
+        &current_actor,
+        message,
+        call,
+        control,
+    );
+    let outcome = if call.name.starts_with("sudo__") {
+        execute_sudo_call(system, actor, message, control, apps, call, &context).await
+    } else if call.name == "actors__appeal_approval" {
         // Actors is a stateless facade. Keep its review-control future while
         // retaining this Actor's existing stateful Apps for incoming input.
         use crate::app::App;
@@ -707,9 +755,6 @@ async fn execute_call(
                 result = &mut future => break Some(result),
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
-                    if !native_execution && system.store().has_queued_input(&actor.id)? {
-                        Box::pin(receive_during_remote_review(system, actor, message, control, call)).await?;
-                    }
                 }
             }
         }
@@ -736,35 +781,31 @@ async fn execute_call(
                 return Ok(Vec::new());
             }
             let mut result = super::runtime_permissions::error_result(system, &error);
-            if native_execution {
-                super::runtime_permissions::attach_reference(
-                    system,
-                    actor,
-                    message,
-                    call,
-                    &context,
-                    &result_id,
-                    &mut result,
-                    Some(&error),
-                )?;
-            }
+            super::runtime_permissions::attach_reference(
+                system,
+                actor,
+                message,
+                call,
+                &context,
+                &result_id,
+                &mut result,
+                Some(&error),
+            )?;
             finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
             Ok(Vec::new())
         }
         Some(Ok(mut result)) => {
-            if native_execution {
-                super::runtime_permissions::attach_reference(
-                    system,
-                    actor,
-                    message,
-                    call,
-                    &context,
-                    &result_id,
-                    &mut result,
-                    None,
-                )?;
-            }
+            super::runtime_permissions::attach_reference(
+                system,
+                actor,
+                message,
+                call,
+                &context,
+                &result_id,
+                &mut result,
+                None,
+            )?;
             let images =
                 finish_tool_result(system, actor, message, call, &context, result, history)?;
             check_interruption(system, control, message)?;
@@ -795,6 +836,11 @@ fn finish_tool_result(
     } else {
         false
     };
+    if let Some(report) = &result.sandbox
+        && let Some(payload) = result.payload.as_object_mut()
+    {
+        payload.insert("sandbox".into(), json!(report));
+    }
     let mut full_text = result
         .model_content
         .unwrap_or_else(|| result.payload.to_string());
@@ -812,7 +858,7 @@ fn finish_tool_result(
     if let Some(reference) = &result.permission_reference {
         reference.append_to(&mut model_content);
     }
-    super::runtime_permissions::append_denial_summary(&result.sandbox_denials, &mut model_content);
+    super::runtime_permissions::append_denial_summary(result.sandbox.as_ref(), &mut model_content);
     system.store().tool_finished_with_reference(
         &actor.id,
         &message.id,
@@ -912,6 +958,10 @@ async fn system_prompt(
     }
     prompt.push_str("\n\n");
     prompt.push_str(include_str!("../app_instructions/actors.md"));
+    if let Some(patch) = crate::os_patch::for_os(std::env::consts::OS) {
+        prompt.push_str("\n\n");
+        prompt.push_str(patch);
+    }
     if actor.id == crate::stage::shared::ACTOR_ID {
         // Device-local project instructions and Skills belong to hosted workers.
         return Ok(prompt);
@@ -1191,64 +1241,6 @@ async fn receive_incoming(
         system.store().resume_input(&actor.id, &current.id)?;
     }
     Ok(received)
-}
-
-/// A delegated native invocation may be waiting for review on another device.
-/// Suspend it atomically before borrowing a fresh portable Actors facade for
-/// incoming Core input. The operation device keeps the original future and
-/// cannot start its effect until this input releases the execution stream.
-async fn receive_during_remote_review(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    message: &MessageRecord,
-    control: &ActorControl,
-    call: &AgentToolCall,
-) -> Result<()> {
-    use crate::stage::core_wire::{Request, Response};
-    let Some(core) = system.shared_core() else {
-        return Ok(());
-    };
-    let Some(stage) = call
-        .arguments
-        .get("stage_id")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<crate::stage::StageId>(value).ok())
-    else {
-        return Ok(());
-    };
-    let pause = |paused| Request::InvocationPause {
-        epoch: core.epoch(),
-        message: message.id.clone(),
-        call_id: call.id.clone(),
-        paused,
-    };
-    if !matches!(
-        core.request(stage, pause(true)).await,
-        Ok(Response::InvocationPaused { paused: true })
-    ) {
-        return Ok(());
-    }
-    let received = async {
-        let mut incoming_apps = core.model_apps().await?;
-        let result = Box::pin(receive_incoming(
-            system,
-            actor,
-            message,
-            control,
-            &mut incoming_apps,
-        ))
-        .await;
-        let shutdown = incoming_apps.shutdown().await;
-        result?;
-        shutdown
-    }
-    .await;
-    // Always release the native suspension, including on cancellation/error.
-    // Epoch, authority and target checks still precede the original effect.
-    let resumed = core.request(stage, pause(false)).await;
-    received?;
-    resumed.map_err(miette::Report::new)?;
-    Ok(())
 }
 
 // Keep Actor and request authority explicit at the model execution boundary.

@@ -45,7 +45,7 @@ pub fn wrap_command(
     command.extend(args);
     Ok(SandboxSpawnSpec {
         program: bwrap,
-        args: create_bwrap_args(&policy.filesystem, command),
+        args: create_bwrap_args(&policy.filesystem, command)?,
     })
 }
 
@@ -54,12 +54,13 @@ fn unwrapped_spawn_spec(program: PathBuf, args: Vec<String>) -> SandboxSpawnSpec
 }
 
 pub(super) fn requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
-    !(policy.full_disk_read
-        && policy.full_disk_write
-        && policy.readable_roots.is_empty()
-        && policy.writable_roots.is_empty()
-        && policy.deny_read_paths.is_empty()
-        && policy.deny_write_paths.is_empty())
+    policy.deny_all_writes
+        || !(policy.full_disk_read
+            && policy.full_disk_write
+            && policy.readable_roots.is_empty()
+            && policy.writable_roots.is_empty()
+            && policy.deny_read_paths.is_empty()
+            && policy.deny_write_paths.is_empty())
 }
 
 pub(super) fn find_bwrap_in_path() -> Option<PathBuf> {
@@ -93,7 +94,10 @@ pub(super) fn find_bwrap_in_path() -> Option<PathBuf> {
         })
 }
 
-fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> Vec<String> {
+fn create_bwrap_args(
+    policy: &FileSystemSandboxPolicy,
+    command: Vec<String>,
+) -> Result<Vec<String>> {
     let mut args = vec![
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
@@ -106,7 +110,7 @@ fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> 
         "--disable-userns".to_string(),
     ];
 
-    push_root_mounts(&mut args, policy);
+    push_root_mounts(&mut args, policy)?;
     push_writable_root_mounts(&mut args, policy);
     // A later host bind (especially a writable `/`) would hide these mounts
     // and restore host devices/procfs inside the new PID namespace.
@@ -114,36 +118,56 @@ fn create_bwrap_args(policy: &FileSystemSandboxPolicy, command: Vec<String>) -> 
     push_read_only_subpath_mounts(&mut args, policy);
     push_deny_write_mounts(&mut args, policy);
     push_deny_read_mounts(&mut args, policy);
+    if policy.deny_all_writes {
+        args.extend(["--remount-ro".to_string(), "/".to_string()]);
+        if Path::new("/tmp").exists() {
+            args.extend(["--remount-ro".to_string(), "/tmp".to_string()]);
+        }
+    }
 
     args.push("--".to_string());
     args.extend(command);
-    args
+    Ok(args)
 }
 
-fn push_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
-    if policy.full_disk_write {
+fn push_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) -> Result<()> {
+    if policy.full_disk_write && !policy.deny_all_writes {
         push_mount(args, "--bind", Path::new("/"), Path::new("/"));
-    } else if policy.full_disk_read {
+    } else if policy.full_disk_read || policy.full_disk_write {
         push_mount(args, "--ro-bind", Path::new("/"), Path::new("/"));
     } else {
         args.push("--tmpfs".to_string());
         args.push("/".to_string());
-        // Shells and compilers need scratch space. This tmpfs exposes no host
-        // data; explicit read/write grants beneath /tmp are mounted afterwards.
+        // Establish the mount point before applying the shared temporary roots
+        // and explicit grants. Every host path uses the common policy below.
         args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
-        for root in runtime_read_roots()
+        let runtime_roots = super::runtime_read_scopes()
+            .map_err(|error| miette!("{error}"))?
+            .iter()
+            .map(|scope| scope.path.clone())
+            .collect::<Vec<_>>();
+        for root in policy_paths_with_resolved(&runtime_roots)
             .into_iter()
             .chain(policy_paths_with_resolved(&policy.readable_roots))
         {
             push_existing_mount(args, "--ro-bind", &root);
         }
     }
+    Ok(())
 }
 
 fn push_writable_root_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolicy) {
+    let flag = if policy.deny_all_writes {
+        "--ro-bind"
+    } else {
+        "--bind"
+    };
+    for root in policy_paths_with_resolved(super::system_temporary_paths()) {
+        push_existing_mount(args, flag, &root);
+    }
     for writable_root in &policy.writable_roots {
         for root in policy_paths_with_resolved(std::slice::from_ref(&writable_root.root)) {
-            push_existing_mount(args, "--bind", &root);
+            push_existing_mount(args, flag, &root);
         }
     }
 }
@@ -199,31 +223,6 @@ fn protection_boundary(path: &Path) -> PathBuf {
     path.to_owned()
 }
 
-fn runtime_read_roots() -> Vec<PathBuf> {
-    [
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/lib",
-        "/lib64",
-        "/etc/ld.so.cache",
-        "/etc/ld.so.conf",
-        "/etc/ld.so.conf.d",
-        "/etc/alternatives",
-        "/etc/nsswitch.conf",
-        "/etc/passwd",
-        "/etc/group",
-        "/etc/hosts",
-        "/etc/resolv.conf",
-        "/etc/localtime",
-        "/etc/ssl/certs",
-        "/etc/pki/ca-trust",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect()
-}
-
 fn validate_paths(policy: &FileSystemSandboxPolicy) -> Result<()> {
     super::validate_native_policy_paths(policy)
 }
@@ -258,6 +257,7 @@ mod tests {
         std::fs::create_dir_all(&source_root).expect("create source root");
         let policy = FileSystemSandboxPolicy {
             full_disk_read: true,
+            deny_all_writes: false,
             full_disk_write: true,
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
@@ -266,7 +266,7 @@ mod tests {
             deny_write_paths: vec![source_root.clone()],
         };
 
-        let args = create_bwrap_args(&policy, vec!["sh".to_string(), "-lc".to_string()]);
+        let args = create_bwrap_args(&policy, vec!["sh".to_string(), "-lc".to_string()]).unwrap();
 
         assert!(contains_triplet(&args, "--bind", "/", "/"));
         assert!(contains_pair(
@@ -293,7 +293,7 @@ mod tests {
         std::fs::write(nested.join("secret.txt"), "secret").unwrap();
         let mut policy = FileSystemSandboxPolicy::unrestricted();
         policy.deny_read_paths = vec![nested.clone(), private.clone(), nested.join("secret.txt")];
-        let args = create_bwrap_args(&policy, vec!["/bin/sh".into()]);
+        let args = create_bwrap_args(&policy, vec!["/bin/sh".into()]).unwrap();
         assert!(contains_pair(&args, "--tmpfs", private.to_str().unwrap()));
         assert!(contains_pair(
             &args,
@@ -311,6 +311,7 @@ mod tests {
         std::fs::create_dir_all(&git_dir).expect("create git dir");
         let policy = FileSystemSandboxPolicy {
             full_disk_read: true,
+            deny_all_writes: false,
             full_disk_write: false,
             readable_roots: Vec::new(),
             writable_roots: vec![WritableRoot {
@@ -322,7 +323,7 @@ mod tests {
             deny_write_paths: Vec::new(),
         };
 
-        let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
+        let args = create_bwrap_args(&policy, vec!["sh".to_string()]).unwrap();
 
         assert!(contains_triplet(&args, "--ro-bind", "/", "/"));
         assert!(contains_triplet(
@@ -358,7 +359,7 @@ mod tests {
                 read_only_subpaths: vec![],
             },
         ];
-        let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
+        let args = create_bwrap_args(&policy, vec!["sh".to_string()]).unwrap();
         let root_grant = args
             .windows(3)
             .rposition(|triple| triple == ["--bind", "/", "/"])
@@ -468,6 +469,7 @@ printf ok > "$ALLOWED"
     fn no_backend_needed_for_unrestricted_policy() {
         let policy = FileSystemSandboxPolicy {
             full_disk_read: true,
+            deny_all_writes: false,
             full_disk_write: true,
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
@@ -477,6 +479,35 @@ printf ok > "$ALLOWED"
         };
 
         assert!(!requires_backend(&policy));
+    }
+
+    #[test]
+    fn readonly_override_requires_isolation_and_preserves_read_access_to_write_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut policy = FileSystemSandboxPolicy {
+            full_disk_read: true,
+            full_disk_write: true,
+            deny_all_writes: true,
+            readable_roots: vec![],
+            writable_roots: vec![],
+            deny_read_paths: vec![],
+            deny_write_paths: vec![],
+            bound_roots: vec![],
+        };
+        assert!(requires_backend(&policy));
+        let args = create_bwrap_args(&policy, vec!["/bin/true".into()]).unwrap();
+        assert!(contains_triplet(&args, "--ro-bind", "/", "/"));
+        assert!(!contains_triplet(&args, "--bind", "/", "/"));
+        policy.full_disk_read = false;
+        policy.full_disk_write = false;
+        policy.writable_roots.push(super::super::WritableRoot {
+            root: temp.path().to_owned(),
+            read_only_subpaths: vec![],
+        });
+        let args = create_bwrap_args(&policy, vec!["/bin/true".into()]).unwrap();
+        let path = temp.path().to_str().unwrap();
+        assert!(contains_triplet(&args, "--ro-bind", path, path));
+        assert!(!contains_triplet(&args, "--bind", path, path));
     }
 
     fn contains_triplet(args: &[String], flag: &str, source: &str, destination: &str) -> bool {

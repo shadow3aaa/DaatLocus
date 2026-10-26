@@ -1,7 +1,7 @@
 //! Window-directed desktop tools. Native state lives on one dedicated OS thread.
 #![cfg_attr(not(windows), allow(dead_code))]
 use crate::{
-    actors::{ActorSystem, AppReview, ToolPermissionRequest},
+    actors::ActorSystem,
     app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
@@ -403,40 +403,6 @@ impl App for ComputerUseApp {
         {
             true
         }
-    }
-    fn permission_request(
-        &self,
-        _: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        Self::check_context(context)?;
-        Ok(ToolPermissionRequest::default())
-    }
-    fn before_tool_call(&self, _: &AgentToolCall, context: &AppToolExecutionContext) -> Result<()> {
-        Self::check_context(context)
-    }
-    fn review_requirement(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<Option<AppReview>> {
-        Self::check_context(context)?;
-        if matches!(
-            call.name.as_str(),
-            "list_apps" | "list_windows" | "release_window"
-        ) {
-            return Ok(None);
-        }
-        #[cfg(target_os = "android")]
-        return self.android.review(&self.system);
-        #[cfg(target_os = "macos")]
-        return self.macos.review(&self.system);
-        #[cfg(not(any(target_os = "android", target_os = "macos")))]
-        Ok(Some(AppReview::new(
-            "computer_use/desktop/v1",
-            "Authorize interactive computer operation on this device's Windows user desktop, including screenshots, taking and giving windows, launching supported apps and GUI input. This is one remembered desktop capability and an explicit exception to the project filesystem sandbox: target apps can access files available to this Windows user. It does not change other Apps' sandbox policies. Read-only remote authority and Daat Locus window/process exclusion remain mandatory.",
-            json!({"device":self.system.store().public_stage_id().map_err(|e| miette!("{e}"))?.to_string(),"desktop":"WinSta0/Default"}),
-        )))
     }
     async fn execute_tool(
         &mut self,

@@ -33,6 +33,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Internal OS-elevated native broker; accepts only its verified parent IPC.
+    #[command(hide = true)]
+    SudoHost {
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        parent_pid: u32,
+    },
     /// Internal unelevated installer lifecycle; never exposed through HTTP or Apps.
     #[cfg(windows)]
     #[command(hide = true)]

@@ -106,6 +106,12 @@ pub struct Session {
     pub dirty: Arc<AtomicBool>,
 }
 impl Session {
+    pub fn ensure_policy(&self, current: &crate::sandbox::RuntimeSandboxPolicy) -> Result<()> {
+        if let Some(child) = &self.child {
+            child.0.ensure_policy(current)?;
+        }
+        Ok(())
+    }
     pub async fn connect(source: &Source, context: &AppToolExecutionContext) -> Result<Self> {
         source.validate()?;
         let dirty = Arc::new(AtomicBool::new(false));
@@ -141,7 +147,7 @@ impl Session {
                 #[cfg(windows)]
                 let (command, arguments) =
                     windows_command(command, arguments, &context.execution_cwd, environment)?;
-                let policy = context.sandbox_policy.for_process();
+                let policy = context.sandbox_policy.clone();
                 let cwd = dunce::simplified(&context.execution_cwd).to_path_buf();
                 let command = command.clone();
                 let arguments = arguments.clone();
@@ -199,9 +205,27 @@ impl Session {
                     Duration::from_secs(20),
                     handler.serve(AsyncRwTransport::new_client(output, input)),
                 )
-                .await
-                .map_err(|_| miette!("MCP handshake timed out"))?;
-                let result = result.map_err(|_| miette!("MCP process handshake failed"))?;
+                .await;
+                let result = match result {
+                    Ok(Ok(service)) => service,
+                    outcome => {
+                        let message = if outcome.is_err() {
+                            "MCP handshake timed out"
+                        } else {
+                            "MCP process handshake failed"
+                        };
+                        if let Some(child) = &mut guard.child {
+                            let _ = child.0.start_kill();
+                            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                                while child.0.try_wait().ok().flatten().is_none() {
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                }
+                            })
+                            .await;
+                        }
+                        return Err(guard.with_diagnostics(miette!("{message}")));
+                    }
+                };
                 child_guard = guard.child.take();
                 result
             }
@@ -261,11 +285,20 @@ impl Session {
 
     /// Native denial records the MCP child captured, when available.
     /// Sessions are long-lived, so records finalize when the child exits.
-    #[allow(dead_code)] // Surfaced once MCP call results consume it.
-    pub fn take_denials(&mut self) -> Vec<crate::sandbox::DenialRecord> {
+    pub fn take_denial_report(&mut self) -> Option<crate::sandbox::DenialReport> {
         self.child
             .as_mut()
-            .map(|guard| guard.0.take_denials())
-            .unwrap_or_default()
+            .map(|guard| guard.0.take_denial_report())
+    }
+    pub(crate) fn with_diagnostics(&mut self, error: miette::Report) -> miette::Report {
+        if let Some(report) = self.take_denial_report() {
+            crate::sandbox::ProcessFailure {
+                message: error.to_string(),
+                report,
+            }
+            .into()
+        } else {
+            error
+        }
     }
 }

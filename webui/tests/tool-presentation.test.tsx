@@ -1,7 +1,7 @@
 import i18n from "../src/lib/i18n";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ToolDetail, ApprovalDetails } from "../src/components/tool-details";
+import { ToolDetail } from "../src/components/tool-details";
 import { ToolParameters } from "../src/components/tool-parameters";
 import { readableSummary, activityLabel, approvalNotice } from "../src/lib/tool-presentation";
 import { Activities } from "../src/components/conversation-content";
@@ -10,6 +10,18 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("Sudo preserves target command output and keeps submitted applications separate from effects", () => {
+    const html = renderToStaticMarkup(<ToolDetail result={result({ name:"sudo__execute", arguments:{tool:"terminal__terminal_exec",arguments_json:JSON.stringify({command:"winget --version"})},payload:{output:"v1.12.350",session:{exit_code:0},sudo:{tool:"terminal__terminal_exec",administrator:false,approval_id:"PRIVATE_APPROVAL"}}})}/>);
+    expect(html).toContain("winget --version");
+    expect(html).toContain("v1.12.350");
+    for(const hidden of ["PRIVATE_APPROVAL","HIDDEN_MODEL_PROTOCOL","arguments_json"]) expect(html).not.toContain(hidden);
+    const submitted = renderToStaticMarkup(<ToolDetail result={result({name:"sudo__execute_as_admin",payload:{status:"submitted",executed:false,approval_id:"PRIVATE_APPROVAL"}})}/>);
+    expect(submitted).toContain(i18n.t("tool_details.sudo_submitted"));
+    expect(submitted).not.toContain("PRIVATE_APPROVAL");
+    const custom = renderToStaticMarkup(<ToolDetail result={result({name:"extension__inspect",payload:{text:"Inspection complete",sandbox:{denials:[{resource:"PRIVATE_NATIVE_TARGET"}]},sudo:{approval_id:"PRIVATE_APPROVAL"}}})}/>);
+    expect(custom).toContain("Inspection complete");
+    for(const hidden of ["PRIVATE_NATIVE_TARGET","PRIVATE_APPROVAL"]) expect(custom).not.toContain(hidden);
+  });
   test("image tools render resource thumbnails with links to the original instead of metadata", () => {
     const uri = "/v1/actors/root/resources/image-snapshot";
     const stage = "12345678-1234-1234-1234-123456789012";
@@ -105,11 +117,9 @@ describe("tool observations are product content, never protocol dumps", () => {
     const label=activityLabel({seq:1,...result({name,outcome:{app:{name:"Example",tool:"lookup.with space"}}})});
     expect(label.label).toBe("Example");expect(label.detail).toBe("lookup.with space");
   });
-  test("MCP approval inspects decoded original parameters rather than the JSON adapter", () => {
-    const html=renderToStaticMarkup(<ApprovalDetails result={{arguments_json:'{"path":"exact <file>","value":null}'}} requested={{readable_roots:[],writable_roots:[],operation_details:{app:{id:"mcp_00000000000000000000000000000001",name:"Records"},tool:"lookup",parameters:{path:"exact <file>",value:null}}}}/>);
-    expect(html).toContain("Records");expect(html).toContain("lookup");expect(html).toContain("exact &lt;file&gt;");
-    expect(html).not.toContain("arguments_json");expect(html).not.toContain("&quot;path&quot;");
-    expect(html).toContain(i18n.t("tool_parameters.not_specified"));
+  test("MCP structured results preserve original values without adapter JSON", () => {
+    const html=renderToStaticMarkup(<ToolDetail result={result({name:"mcp_00000000000000000000000000000001__lookup",payload:{structuredContent:{path:"exact <file>",value:null}}})}/>);
+    expect(html).toContain("exact &lt;file&gt;");expect(html).not.toContain("arguments_json");expect(html).not.toContain("&quot;path&quot;");expect(html).toContain(i18n.t("tool_parameters.not_specified"));
   });
   test("resource readers do not expose serialized tool output", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({name:"actors__read_resource",payload:{content:'{"internal":"HIDDEN_COMPLETE_OUTPUT"}',resource_id:"opaque-id"}})} />);
@@ -164,17 +174,17 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("&quot;refresh&quot;");
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
-  test("approval fields preserve exact values, absence and requested roots without serialization", () => {
+  test("structured scalar facts preserve exact values and absence without serialization", () => {
     const args = Object.freeze({ command: "echo <danger>", max_chars: 0, refresh: false, expected_sha256: null });
-    const html = renderToStaticMarkup(<ApprovalDetails result={args} requested={{ readable_roots: ["C:/read"], writable_roots: ["C:/write"] }} />);
-    for (const value of ["echo &lt;danger&gt;", "C:/read", "C:/write"]) expect(html).toContain(value);
+    const html = renderToStaticMarkup(<ToolParameters value={args} />);
+    for (const value of ["echo &lt;danger&gt;"]) expect(html).toContain(value);
     expect(html).toContain(i18n.t("tool_parameters.not_specified"));
     expect(html).toContain(i18n.t("tool_parameters.no"));
     expect(html).toContain("<span>0</span>");
     expect(html).not.toContain("expected_sha256");
     expect(html).not.toContain("<danger>");
   });
-  test("nested approval data has a disclosure rather than an encoded object", () => {
+  test("nested structured data has a disclosure rather than an encoded object", () => {
     const html = renderToStaticMarkup(<ToolParameters value={{ environment: { HOME: "/workspace", FLAG: "on" } }} />);
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("&quot;HOME&quot;");

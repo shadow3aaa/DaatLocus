@@ -30,6 +30,8 @@ struct CreateArgs {
     stage_id: String,
     name: String,
     workspace: Option<String>,
+    /// Additional absolute read/write roots. The working directory is included automatically; Core grants these device scopes without review.
+    initial_authorization: Option<crate::actor_app::InitialAuthorizationGroup>,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -72,7 +74,7 @@ struct RequestArgs {
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ArchiveArgs {
+struct ActorTargetArgs {
     stage_id: String,
     actor_id: String,
 }
@@ -115,19 +117,6 @@ impl App for AccountActors {
     fn id(&self) -> AppId {
         AppId::new("actors").expect("Actors App")
     }
-    fn delegates_approval(&self, call: &AgentToolCall) -> bool {
-        matches!(
-            call.name.as_str(),
-            "list"
-                | "create"
-                | "import_conversation"
-                | "message"
-                | "status"
-                | "cancel"
-                | "archive"
-                | "unarchive"
-        )
-    }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut specs = self.local.tool_specs();
         for spec in &mut specs {
@@ -137,7 +126,7 @@ impl App for AccountActors {
                 "import_conversation" => model_schema_for::<ImportArgs>(),
                 "message" => model_schema_for::<MessageArgs>(),
                 "status" | "cancel" => model_schema_for::<RequestArgs>(),
-                "archive" | "unarchive" => model_schema_for::<ArchiveArgs>(),
+                "stop" | "archive" | "unarchive" => model_schema_for::<ActorTargetArgs>(),
                 "resolve_approval_appeal" => model_schema_for::<ResolveAppealArgs>(),
                 "appeal_approval" => model_schema_for::<AppealArgs>(),
                 _ => continue,
@@ -156,11 +145,12 @@ impl App for AccountActors {
         specs.push(AppToolSpec {name:"devices".into(), description:"List authorized account devices and actual connectivity. Select an explicit stage_id for hosted Actor operations. Offline targets are never silently moved.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
         specs
     }
-    fn before_tool_call(
-        &self,
+
+    async fn execute_tool(
+        &mut self,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<AppToolExecutionResult> {
         let caller = context
             .actor_call
             .as_ref()
@@ -175,14 +165,6 @@ impl App for AccountActors {
         }
         self.system.record_for_tool(shared::ACTOR_ID, caller)?;
         self.local.check_import_operation(call, context)?;
-        Ok(())
-    }
-    async fn execute_tool(
-        &mut self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> miette::Result<AppToolExecutionResult> {
-        self.before_tool_call(call, context)?;
         if call.name == "devices" {
             return Ok(AppToolExecutionResult::new(
                 "Account devices",

@@ -1,11 +1,9 @@
 //! Isolated actual HTTP servers and OPAQUE accounts; never contacts real models.
+use daat_locus::sandbox::SandboxScopeRequest;
 const FIXTURE_ACTOR_ID: &str = "root";
 use daat_locus::{
     accounts::AccountStore,
-    actors::{
-        ActorConfig, ActorPermissions, ActorSystem, ApprovalDecision, ApprovalMode, ApprovalRecord,
-        ModelFactory, ToolPermissionRequest,
-    },
+    actors::{ActorConfig, ActorSystem, ApprovalDecision, ApprovalRecord, ModelFactory},
     config::{Config, ModelConfig, ProviderConfig},
     core::ModelProvider,
     service::{ServiceState, router},
@@ -201,8 +199,7 @@ impl Fixture {
             .map(|app| (*app).to_owned())
             .collect();
         system.store().save_actor(&actor).unwrap();
-        let mut root_config = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
-        root_config.permissions.approval_mode = ApprovalMode::None;
+        let root_config = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         system
             .update_owned(FIXTURE_ACTOR_ID, root_config)
             .await
@@ -304,24 +301,21 @@ impl Fixture {
             .workspace
             .join(name);
         std::fs::create_dir_all(&workspace).unwrap();
-        let mut config = ActorConfig {
+        let config = ActorConfig {
             name: name.into(),
             workspace: workspace.clone(),
             apps: vec!["files".into()],
             model: None,
             instructions: String::new(),
-            permissions: ActorPermissions::workspace(workspace),
         };
-        config.permissions.approval_mode = ApprovalMode::None;
         self.system
             .create_owned(FIXTURE_ACTOR_ID, config)
             .unwrap()
             .id
     }
 
-    pub async fn approval(&self, actor: &str, mode: ApprovalMode) -> ApprovalRecord {
-        let mut config = self.system.actor(actor).unwrap().config;
-        config.permissions.approval_mode = mode;
+    pub async fn approval(&self, actor: &str) -> ApprovalRecord {
+        let config = self.system.actor(actor).unwrap().config;
         self.system
             .update_owned(actor, config.clone())
             .await
@@ -331,10 +325,12 @@ impl Fixture {
             .unwrap();
         let message = self.system.store().claim_next(actor).unwrap().unwrap();
         self.system.store().create_approval(ApprovalRecord {
-            seq: 0, id: uuid::Uuid::new_v4().to_string(), actor_id: actor.into(), message_id: message.id,
+            sudo: None,
+            execution_claim: None,
+            seq: 0, id: uuid::Uuid::new_v4().to_string(), message_id: message.id,
             call: daat_locus::model_protocol::AgentToolCall { id: uuid::Uuid::new_v4().to_string(), name: "files__write_file".into(), arguments: json!({"path": "proposal.txt", "content": "fixture-secret-key", "expected_sha256": null}) },
-            requested: ToolPermissionRequest { readable_roots: vec![config.workspace.clone()], writable_roots: vec![config.workspace.join("extra")], ..Default::default() },
-            review:None, scopes:vec![], mode, decision: ApprovalDecision::Pending, reason: "Owner approval required".into(), created_at_ms: chrono::Utc::now().timestamp_millis(), resolved_at_ms: None, appeal: None, application: None,
+            requested: SandboxScopeRequest { readable_roots: vec![config.workspace.clone()], writable_roots: vec![config.workspace.join("extra")] },
+            scopes:vec![], previous_denials:vec![], decision: ApprovalDecision::Pending, reason: "Sandbox scope review pending".into(), created_at_ms: chrono::Utc::now().timestamp_millis(), resolved_at_ms: None, appeal: None, application: None,
         }).unwrap()
     }
 }
@@ -342,7 +338,7 @@ pub fn fixture_enrollment(
     host: &daat_locus::stage::host::Host,
     request: &daat_locus::stage::identity::JoinRequest,
     can_enroll: bool,
-    grants: Vec<daat_locus::stage::ledger::ActorGrant>,
+    authority: daat_locus::stage::ledger::DeviceAuthority,
 ) -> daat_locus::stage::Result<daat_locus::stage::identity::Enrollment> {
     let now = chrono::Utc::now().timestamp_millis();
     let own = host.enrollment()?;
@@ -361,7 +357,7 @@ pub fn fixture_enrollment(
     )?;
     daat_locus::stage::ledger::StageLedger::attach(host.system.store(), host.local).import_peer(
         enrollment.clone(),
-        grants,
+        authority,
         now,
     )?;
     Ok(enrollment)

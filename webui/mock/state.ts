@@ -11,7 +11,6 @@ import type {
   ActorStatus,
   ActorSummary,
   ApprovalDecision,
-  ApprovalMode,
   ApprovalRecord,
   Attachment,
   EventRecord,
@@ -68,7 +67,6 @@ export type Store = {
   approvalSeq: number;
   attachments: Map<string, AttachmentBlob>;
   idempotency: Map<string, MessageRecord>;
-  approvalWakers: Map<string, (decision: ApprovalDecision) => void>;
 };
 
 export const store: Store = {
@@ -79,7 +77,6 @@ export const store: Store = {
   approvalSeq: 0,
   attachments: new Map(),
   idempotency: new Map(),
-  approvalWakers: new Map(),
 };
 export const workReset: {generation: import("../src/lib/stage-api").WorkGeneration | null} = {generation: null};
 
@@ -164,9 +161,6 @@ export type ActorSeed = {
   parent_id: string | null;
   apps: string[];
   model: string | null;
-  approval_mode: ApprovalMode;
-  readable_roots: string[];
-  writable_roots: string[];
   workspace: string;
   instructions: string;
 };
@@ -196,11 +190,7 @@ export function createActor(seed: ActorSeed): ActorStore {
       apps: [...apps],
       model: seed.model,
       instructions: seed.instructions,
-      permissions: {
-        approval_mode: seed.approval_mode,
-            readable_roots: [...seed.readable_roots],
-        writable_roots: Array.from(new Set([seed.workspace,...seed.writable_roots])),
-      },
+
     },
     status: "idle",
     created_at_ms: ts,
@@ -323,18 +313,15 @@ export function addApproval(
   input: {
     message_id: string;
     call: { id: string; name: string; arguments: JsonValue };
-    requested: { readable_roots: string[]; writable_roots: string[]; operation_details?: JsonValue };
-    mode: ApprovalMode;
+    requested: { readable_roots: string[]; writable_roots: string[] };
   },
 ): ApprovalRecord {
   const record: ApprovalRecord = {
     seq: ++store.approvalSeq,
     id: newId(),
-    actor_id: actor.summary.id,
     message_id: input.message_id,
     call: input.call,
     requested: input.requested,
-    mode: input.mode,
     decision: "pending",
     reason: "",
     created_at_ms: now(),
@@ -346,8 +333,7 @@ export function addApproval(
 
 /**
  * Resolve a pending approval, emit `approval_resolved` on both streams and
- * wake the engine step waiting on it. Already-resolved records are returned
- * unchanged.
+ * retain the immutable resolved record for audit history.
  */
 export function resolveApprovalRecord(
   approvalId: string,
@@ -361,18 +347,13 @@ export function resolveApprovalRecord(
       record.decision = decision;
       record.reason = reason;
       record.resolved_at_ms = now();
-      emitEvent(record.actor_id, {
+      emitEvent(actor.summary.id, {
         type: "approval_resolved",
         approval_id: record.id,
         message_id: record.message_id,
         decision,
         reason,
       });
-    }
-    const wake = store.approvalWakers.get(approvalId);
-    if (wake) {
-      store.approvalWakers.delete(approvalId);
-      wake(decision);
     }
     return record;
   }

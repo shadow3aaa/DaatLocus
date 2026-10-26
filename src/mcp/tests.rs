@@ -64,30 +64,19 @@ async fn installations_and_tools_survive_reopen_and_growth_beyond_former_quotas(
 }
 
 #[test]
-fn installation_approval_binds_the_full_connection_without_disclosing_hidden_parameters() {
-    use crate::actors::ApprovalFingerprint;
-    let directory = tempfile::tempdir().unwrap();
-    let app = AppsManager::new(
-        Registry::open(directory.path().join("apps.json")).unwrap(),
-        "test-actor".into(),
-    );
-    let context = context(directory.path());
-    let review = |query| {
-        app.review_requirement(&call("install", json!({
-        "name":"Requested App","description":null,"transport":"http",
-        "url":format!("https://example.invalid/mcp?target={query}"),"command":null,"arguments":[]
-    })), &context).unwrap().unwrap()
+fn installed_connection_public_view_hides_query_fragment_and_credentials() {
+    let source = Source::Http {
+        url: "https://example.invalid/mcp?target=private-query#private-fragment".into(),
+        bearer_token: Some("private-token".into()),
     };
-    let first = review("private-first-target");
-    let second = review("private-second-target");
-    assert_eq!(first.action["connection"], second.action["connection"]);
-    assert_ne!(
-        first.approval_fingerprint().unwrap(),
-        second.approval_fingerprint().unwrap()
-    );
-    let public = serde_json::to_string(&first).unwrap();
-    assert!(!public.contains("private-first-target"));
-    assert!(!public.contains("target="));
+    let public = source.public();
+    assert_eq!(public["url"], "https://example.invalid/mcp");
+    assert_eq!(public["credential_configured"], true);
+    let text = public.to_string();
+    for private in ["private-query", "private-fragment", "private-token"] {
+        assert!(!text.contains(private));
+        assert!(serde_json::to_string(&source).unwrap().contains(private));
+    }
 }
 
 #[derive(Default)]
@@ -156,6 +145,8 @@ pub(crate) async fn server() -> Server {
 }
 fn context(directory: &std::path::Path) -> AppToolExecutionContext {
     AppToolExecutionContext {
+        restart_native: false,
+        access_broker: None,
         execution_cwd: directory.into(),
         sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
         tool_output_max_tokens: 4096,
@@ -225,8 +216,6 @@ async fn standard_http_install_call_and_close_preserve_mcp_schema_and_credential
     crate::schema_utils::validate_model_facing_schema(&tool.input_schema).unwrap();
     let original = json!({"value":7,"dynamic":{"preserved":true}});
     let invocation = call(&tool.name, json!({"arguments_json":original.to_string()}));
-    let review = app.permission_request(&invocation, &context).unwrap();
-    assert_eq!(review.operation_details["parameters"], original);
     let outcome = app.execute_tool(&invocation, &context).await.unwrap();
     assert_eq!(
         outcome.model_content.as_deref(),
@@ -235,14 +224,15 @@ async fn standard_http_install_call_and_close_preserve_mcp_schema_and_credential
     assert_eq!(server.state.requests.lock()[0]["name"], "lookup.with space");
     assert_eq!(server.state.requests.lock()[0]["arguments"], original);
     assert!(
-        app.before_tool_call(&call(&tool.name, json!({"arguments_json":"{}"})), &context)
+        app.execute_tool(&call(&tool.name, json!({"arguments_json":"{}"})), &context)
+            .await
             .is_err()
     );
     registry
         .set_enabled(&entry.id, entry.revision, false)
         .await
         .unwrap();
-    assert!(app.before_tool_call(&invocation, &context).is_err());
+    assert!(app.execute_tool(&invocation, &context).await.is_err());
     assert!(
         registry
             .set_enabled(&entry.id, entry.revision, true)
@@ -361,16 +351,6 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
             .payload,
         2
     );
-    for name in ["list", "inspect", "refresh"] {
-        assert!(
-            apps.review_requirement(&call(&format!("apps_manager__{name}"), json!({})), &context)
-                .unwrap()
-                .is_none()
-        );
-    }
-    assert!(
-        apps.review_requirement(&call("apps_manager__install", json!({"name":"Reviewed","description":null,"transport":"http","url":"http://localhost:1234/mcp","command":null,"arguments":[]})), &context).unwrap().is_some()
-    );
     let manager = crate::app::AppId::new("apps_manager").unwrap();
     apps.execute_tool_for_app(
         &manager,
@@ -383,9 +363,8 @@ async fn refresh_preserves_other_app_instances_and_queries_are_exempt() {
     assert_eq!(server.state.calls.load(Ordering::SeqCst), 0);
     apps.shutdown().await.unwrap();
 }
-#[cfg(target_os = "windows")]
 #[tokio::test]
-async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
+async fn stdio_enforces_native_and_explicit_sudo_connection_authority_and_reaps_processes() {
     if !crate::sandbox::test_support::native_sandbox_available() {
         return;
     }
@@ -477,7 +456,60 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         .unwrap()
         .parse()
         .unwrap();
+    let mut host = context.clone();
+    host.sandbox_policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":false})), &host)
+            .await
+            .is_err(),
+        "selecting host authority cannot silently replace an existing sandboxed process"
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
+    host.restart_native = true;
+    let result = app
+        .execute_tool(&call(&name, json!({"value":false})), &host)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.model_content.as_deref(),
+        Some("explicit|ambient-fixture|private|write-allowed")
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
+    let host_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(host_pid, running_pid);
+    assert_eq!(
+        result.sandbox.unwrap().status,
+        crate::sandbox::CaptureStatus::NotRequested
+    );
+    let broker = crate::sudo_host::tests::local_client();
+    let mut administrator = host.clone();
+    administrator.sandbox_policy.administrator = Some(broker.clone());
+    let result = app
+        .execute_tool(&call(&name, json!({"value":true})), &administrator)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.model_content.as_deref(),
+        Some("explicit|ambient-fixture|public")
+    );
+    let administrator_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(administrator_pid, host_pid);
+    app.prepare_turn(&context, true).await.unwrap();
+    assert!(
+        app.execute_tool(&call(&name, json!({"value":false})), &context)
+            .await
+            .is_err(),
+        "ordinary requests cannot borrow a reviewed administrator connection"
+    );
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "bad");
     app.shutdown().await.unwrap();
+    broker.close();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let mut processes = sysinfo::System::new();
@@ -485,6 +517,8 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
                 sysinfo::ProcessesToUpdate::Some(&[
                     sysinfo::Pid::from_u32(preflight_pid),
                     sysinfo::Pid::from_u32(running_pid),
+                    sysinfo::Pid::from_u32(host_pid),
+                    sysinfo::Pid::from_u32(administrator_pid),
                 ]),
                 true,
             );

@@ -67,7 +67,7 @@ pub(super) fn routes() -> Router<ServiceState> {
         )
         .route(
             "/v1/stages/{stage}/actors/{actor}/approvals/{approval}",
-            get(approval).post(resolve_approval),
+            get(approval),
         )
         .route(
             "/v1/stages/{stage}/actors/{actor}/resources/{resource}",
@@ -121,9 +121,9 @@ async fn patch(
     Json(value): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     if !value.is_object()
-        || value.as_object().is_some_and(|o| {
-            o.is_empty() || o.keys().any(|key| key != "model" && key != "approval_mode")
-        })
+        || value
+            .as_object()
+            .is_some_and(|o| o.is_empty() || o.keys().any(|key| key != "model"))
     {
         return Err(ApiError::invalid());
     }
@@ -135,14 +135,6 @@ async fn patch(
     } else {
         None
     };
-    let approval_mode = value
-        .get("approval_mode")
-        .map(|value| serde_json::from_value(value.clone()))
-        .transpose()
-        .map_err(|_| ApiError::invalid())?;
-    if approval_mode.is_some() && id != crate::stage::shared::ACTOR_ID {
-        return Err(ApiError::invalid());
-    }
     Ok(Json(
         administer(
             state,
@@ -151,7 +143,6 @@ async fn patch(
             crate::stage::protocol::ActorAdminAction::Preferences {
                 model_present: model.is_some(),
                 model: model.flatten(),
-                approval_mode,
             },
         )
         .await?,
@@ -688,65 +679,6 @@ async fn approval(
     Ok(Json(
         read(&s, &h, address(stage, id)?, Read::Approval { id: m }).await?,
     ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Resolution {
-    decision: String,
-}
-pub(super) async fn core_approval_resolution(
-    state: ServiceState,
-    headers: HeaderMap,
-    target: ActorAddress,
-    id: String,
-    decision: &str,
-) -> ApiResult<Json<Value>> {
-    let Json(mut value) = resolve_approval(
-        State(state),
-        headers,
-        Path((target.stage_id, target.actor_id.clone(), id)),
-        Json(Resolution {
-            decision: decision.into(),
-        }),
-    )
-    .await?;
-    qualify_core(&mut value, &target);
-    Ok(Json(value))
-}
-async fn resolve_approval(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path((stage, actor, id)): Path<(StageId, String, String)>,
-    Json(input): Json<Resolution>,
-) -> ApiResult<Json<Value>> {
-    manage(&state, &headers).await?;
-    let target = address(stage, actor)?;
-    let handle = authorize(&state, &headers, &target).await?;
-    let Body::Approval { record } = handle
-        .rpc(Body::ApprovalQuery { id: id.clone() })
-        .await
-        .map_err(stages::failure)?
-    else {
-        return Err(ApiError::internal());
-    };
-    if record.actor_id != target.actor_id {
-        return Err(ApiError::forbidden());
-    }
-    let decision = match input.decision.as_str() {
-        "approve" => crate::actors::ApprovalDecision::Approved,
-        "deny" => crate::actors::ApprovalDecision::Denied,
-        _ => return Err(ApiError::invalid()),
-    };
-    let Body::Approval { record } = handle
-        .rpc(Body::ApprovalResolve { id, decision })
-        .await
-        .map_err(stages::failure)?
-    else {
-        return Err(ApiError::internal());
-    };
-    let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    qualify(&mut value, &target);
-    Ok(Json(value))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

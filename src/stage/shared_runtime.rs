@@ -36,7 +36,6 @@ pub struct Controller {
     checkpoint: tokio::sync::Mutex<()>,
     replica: tokio::sync::Mutex<()>,
     device_apps: tokio::sync::Mutex<Option<(String, AppManager)>>,
-    invocation_pauses: Mutex<std::collections::HashSet<(StageId, u64, String, String)>>,
     wake: Notify,
     replica_wake: Notify,
     desired: RwLock<Option<shared::Reply>>,
@@ -46,16 +45,6 @@ pub struct Controller {
     frozen: Mutex<Option<(StageId, Instant)>>,
     failure: RwLock<Option<&'static str>>,
     last_confirmed: Mutex<Instant>,
-}
-
-struct InvocationPauseGuard<'a> {
-    controller: &'a Controller,
-    key: (StageId, u64, String, String),
-}
-impl Drop for InvocationPauseGuard<'_> {
-    fn drop(&mut self) {
-        self.controller.invocation_pauses.lock().remove(&self.key);
-    }
 }
 
 impl Controller {
@@ -98,7 +87,6 @@ impl Controller {
             checkpoint: tokio::sync::Mutex::new(()),
             replica: tokio::sync::Mutex::new(()),
             device_apps: tokio::sync::Mutex::new(None),
-            invocation_pauses: Mutex::new(std::collections::HashSet::new()),
             wake: Notify::new(),
             replica_wake: Notify::new(),
             desired: RwLock::new(None),
@@ -210,11 +198,7 @@ impl Controller {
             _ => Err(StageError::Unavailable("Queue was not changed")),
         }
     }
-    pub async fn preferences(
-        &self,
-        model: Option<Option<String>>,
-        approval_mode: Option<crate::actors::ApprovalMode>,
-    ) -> Result<()> {
+    pub async fn preferences(&self, model: Option<Option<String>>) -> Result<()> {
         let reply = self.coordinate(Operation::Inspect, vec![]).await?;
         let lease = reply
             .lease
@@ -225,7 +209,6 @@ impl Controller {
                 Request::Preferences {
                     model_present: model.is_some(),
                     model: model.flatten(),
-                    approval_mode,
                 },
             )
             .await?
@@ -942,7 +925,6 @@ impl Controller {
             Request::Preferences {
                 model_present,
                 model,
-                approval_mode,
             } => {
                 self.require_worker(runtime.host.local, self.epoch())
                     .await?;
@@ -950,7 +932,6 @@ impl Controller {
                     .apply_owned_preferences(
                         shared::ACTOR_ID,
                         if model_present { Some(model) } else { None },
-                        approval_mode,
                     )
                     .await
                     .map_err(|_| {
@@ -1023,7 +1004,6 @@ impl Controller {
                     || message.id.len() > 128
                     || message.content.len() > 64 * 1024
                     || message.remote_authority.is_some()
-                    || message.delegation_grant.is_some()
                 {
                     return Err(StageError::Forbidden("Invalid account Actor input"));
                 }
@@ -1089,29 +1069,6 @@ impl Controller {
                     identity_read_only,
                 )
                 .await
-            }
-            Request::InvocationPause {
-                epoch,
-                message,
-                call_id,
-                paused,
-            } => {
-                self.require_worker(peer, epoch).await?;
-                let key = (peer, epoch, message.clone(), call_id.clone());
-                let mut pauses = self.invocation_pauses.lock();
-                // Serialize suspension with the durable effect-start intent. A
-                // running effect can never be paused or implicitly cancelled.
-                let waiting = system.store().stage_transaction(|tx| {
-                    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM approvals WHERE message_id=?1 AND json_extract(record,'$.call.id')=?2 AND json_extract(record,'$.decision')='pending') AND NOT EXISTS(SELECT 1 FROM core_app_effects WHERE message=?1 AND call=?2)", params![message,call_id], |row| row.get::<_,bool>(0))?)
-                })?;
-                if paused && waiting {
-                    pauses.insert(key.clone());
-                } else if !paused {
-                    pauses.remove(&key);
-                }
-                Ok(Response::InvocationPaused {
-                    paused: pauses.contains(&key),
-                })
             }
             Request::ToolResult { message, call_id } => self.effect_result(&message, &call_id),
         }
@@ -2064,13 +2021,8 @@ impl Controller {
         if exists {
             return self.effect_result(message, &call.id);
         }
-        let _pause_guard = InvocationPauseGuard {
-            controller: self,
-            key: (peer, epoch, message.into(), call.id.clone()),
-        };
         if identity_read_only {
             actor.remote_read_only = true;
-            actor.config.permissions.writable_roots.clear();
         }
         let cache_revision = super::digest(
             &serde_json::to_vec(
@@ -2101,103 +2053,26 @@ impl Controller {
         }
         let call = call.with_name(format!("{app}__{}", call.name));
         manager
-            .validate_tool_call_for_approval(&call, &context)
+            .validate_tool_call(&call, &context)
             .map_err(|_| StageError::Forbidden("App call is outside its schema or grants"))?;
-        let requested = manager
-            .permission_request(&call, &context)
-            .map_err(|_| StageError::Forbidden("App scope cannot be determined"))?;
         let control = Arc::new(ActorControl::default());
         let deadline = Instant::now() + Duration::from_secs(1190);
-        let requirement = manager
-            .review_requirement(&call, &context)
-            .map_err(|_| StageError::Invalid("App review policy is unavailable"))?;
-        drop(resources);
-        let review = crate::actors::approval::authorize(
+        self.require_worker(peer, epoch).await?;
+        crate::actors::approval::ensure_current(system, &actor, &input, &control)
+            .map_err(|_| StageError::Forbidden("App authority changed before execution"))?;
+        let result_id = system
+            .store()
+            .shared_tool_started(&actor.id, message, &call, actor.remote_read_only, &digest)
+            .map_err(|_| StageError::Unavailable("Cannot persist device execution provenance"))?;
+        crate::actors::runtime_permissions::bind_access_broker(
+            &mut context,
             system,
             &actor,
             &input,
             &call,
             &control,
-            &context,
-            &requested,
-            requirement.as_ref(),
         );
-        tokio::pin!(review);
-        let approved = loop {
-            tokio::select! {
-                result=&mut review=>break result.map_err(|error| {
-                    crate::actors::approval::rejection(&error).map(StageError::ApprovalDenied)
-                        .unwrap_or(StageError::Forbidden("App authorization could not be completed"))
-                })?,
-                _=tokio::time::sleep(Duration::from_millis(25))=>{
-                    if Instant::now() >= deadline || !self.fence.lock().permits(peer,epoch,Instant::now())
-                        || system.store().message(message).is_ok_and(|input| input.cancel_requested || input.status != MessageStatus::Running) {
-                        control.stop.store(true,Ordering::Release);
-                        // Let authorize observe cancellation and resolve its own
-                        // pending Ask or Auto record before dropping the wait.
-                        let _ = (&mut review).await;
-                        return Err(StageError::Forbidden("Worker changed during App approval"));
-                    }
-                },
-            }
-        };
-        let (mut resources, result_id) = loop {
-            self.require_worker(peer, epoch).await?;
-            crate::actors::approval::ensure_current(system, &actor, &input, &control)
-                .map_err(|_| StageError::Forbidden("App authority changed while suspended"))?;
-            if Instant::now() >= deadline {
-                return Err(StageError::Unavailable(
-                    "App invocation timed out while suspended",
-                ));
-            }
-            let mut resources = self.device_apps.lock().await;
-            if resources
-                .as_ref()
-                .is_none_or(|(revision, _)| revision != &cache_revision)
-            {
-                if let Some((_, old)) = resources.take() {
-                    let _ = old.shutdown().await;
-                }
-                *resources = Some((
-                    cache_revision.clone(),
-                    builtin_apps::create_apps(&actor, system.clone(), &system.config())
-                        .map_err(|_| StageError::Unavailable("Device Apps could not start"))?,
-                ));
-            }
-            let started = {
-                let pauses = self.invocation_pauses.lock();
-                if pauses.contains(&(peer, epoch, message.into(), call.id.clone())) {
-                    None
-                } else {
-                    Some(
-                        system
-                            .store()
-                            .shared_tool_started(
-                                &actor.id,
-                                message,
-                                &call,
-                                actor.remote_read_only,
-                                &digest,
-                            )
-                            .map_err(|_| {
-                                StageError::Unavailable(
-                                    "Cannot persist device execution provenance",
-                                )
-                            })?,
-                    )
-                }
-            };
-            if let Some(result_id) = started {
-                break (resources, result_id);
-            }
-            drop(resources);
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
-        let manager = &mut resources.as_mut().expect("device Apps installed").1;
-        manager.validate_tool_call(&call, &approved).map_err(|_| {
-            StageError::Forbidden("App target or installation changed while suspended")
-        })?;
-        let mut future = Box::pin(manager.execute_tool(&call, &approved));
+        let mut future = Box::pin(manager.execute_tool(&call, &context));
         let result = loop {
             tokio::select! {
                 result=&mut future=>break Some(result),
@@ -2212,7 +2087,7 @@ impl Controller {
                     &actor,
                     &input,
                     &call,
-                    &approved,
+                    &context,
                     &result_id,
                     &mut result,
                     None,
@@ -2237,7 +2112,7 @@ impl Controller {
                         &actor,
                         &input,
                         &call,
-                        &approved,
+                        &context,
                         &result_id,
                         &mut result,
                         Some(&error),
@@ -2518,7 +2393,6 @@ impl Controller {
         }
         self.push_resources(leader).await?;
         for mut message in inputs {
-            message.delegation_grant = None;
             message.remote_authority = None;
             match self
                 .request(
@@ -2894,7 +2768,7 @@ mod tests {
             name: "actors__devices".into(),
             arguments: json!({}),
         };
-        apps.before_tool_call(&call, &context).unwrap();
+        apps.validate_tool_call(&call, &context).unwrap();
         core.ready.store(false, Ordering::Release);
         assert!(
             !core.permitted(),

@@ -6,11 +6,10 @@ use miette::{Result, miette};
 use serde_json::json;
 
 use crate::{
-    actors::ToolPermissionRequest,
     app::{App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec, EmptyAppArgs},
     file_io::{
-        self, CopyFileArgs, EditFileArgs, ListDirectoryArgs, ReadFileArgs, SearchTextArgs,
-        ViewImageArgs, WriteFileArgs,
+        CopyFileArgs, EditFileArgs, ListDirectoryArgs, ReadFileArgs, SearchTextArgs, ViewImageArgs,
+        WriteFileArgs,
     },
     model_protocol::AgentToolCall,
     openskills::load_openskills_with_policy,
@@ -60,158 +59,16 @@ impl App for FilesApp {
         specs
     }
 
-    fn permission_request(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<ToolPermissionRequest> {
-        if call.name == "copy_file" {
-            let args: CopyFileArgs = serde_json::from_value(call.arguments.clone())
-                .map_err(|_| miette!("invalid copy_file arguments"))?;
-            let source = file_io::resolve_read_file_path(
-                &context.execution_cwd,
-                &context.sandbox_policy,
-                &args.source,
-            )?;
-            let destination =
-                file_io::resolve_file_path(&context.execution_cwd, &args.destination)?;
-            let parent = destination
-                .parent()
-                .ok_or_else(|| miette!("copy destination has no parent"))?
-                .to_path_buf();
-            let mut readable_roots = Vec::new();
-            if file_io::read_requires_permission(&source, &context.sandbox_policy)? {
-                readable_roots.push(source);
-            }
-            // The source exemption never grants read/write scope to a target.
-            if !context.sandbox_policy.is_path_readable(&destination) {
-                readable_roots.push(destination);
-            }
-            return Ok(ToolPermissionRequest {
-                operation_details: serde_json::Value::Null,
-                readable_roots,
-                writable_roots: if context.sandbox_policy.is_path_writable(&parent) {
-                    Vec::new()
-                } else {
-                    vec![parent]
-                },
-            });
-        }
-        let path = call
-            .arguments
-            .get("path")
-            .and_then(serde_json::Value::as_str);
-        let Some(path) = path else {
-            return Ok(ToolPermissionRequest::default());
-        };
-        let write = matches!(call.name.as_str(), "write_file" | "edit_file");
-        let actual = if write {
-            file_io::resolve_file_path(&context.execution_cwd, path)?
-        } else {
-            file_io::resolve_read_file_path(&context.execution_cwd, &context.sandbox_policy, path)?
-        };
-        let writable_roots = if write {
-            let parent = actual
-                .parent()
-                .ok_or_else(|| miette!("file path has no parent"))?;
-            if context.sandbox_policy.is_path_writable(parent) {
-                Vec::new()
-            } else {
-                vec![parent.to_path_buf()]
-            }
-        } else {
-            Vec::new()
-        };
-        let needs_read_permission = if write {
-            !context.sandbox_policy.is_path_readable(&actual)
-        } else {
-            file_io::read_requires_permission(&actual, &context.sandbox_policy)?
-        };
-        Ok(ToolPermissionRequest {
-            operation_details: serde_json::Value::Null,
-            readable_roots: if needs_read_permission {
-                vec![actual]
-            } else {
-                Vec::new()
-            },
-            writable_roots,
-        })
-    }
-
-    fn before_tool_call(
-        &self,
-        call: &AgentToolCall,
-        context: &AppToolExecutionContext,
-    ) -> Result<()> {
-        if context
-            .actor_call
-            .as_ref()
-            .is_some_and(|caller| caller.remote_read_only)
-            && matches!(call.name.as_str(), "write_file" | "edit_file" | "copy_file")
-        {
-            return Err(miette!("Authenticated remote authority is read-only"));
-        }
-        if call.name == "copy_file" {
-            let args: CopyFileArgs = serde_json::from_value(call.arguments.clone())
-                .map_err(|_| miette!("invalid copy_file arguments"))?;
-            let source = file_io::resolve_read_file_path(
-                &context.execution_cwd,
-                &context.sandbox_policy,
-                &args.source,
-            )?;
-            let destination =
-                file_io::resolve_file_path(&context.execution_cwd, &args.destination)?;
-            file_io::ensure_authorized_read(&source, &context.sandbox_policy, "copy source")?;
-            context
-                .sandbox_policy
-                .ensure_path_writable(&destination, "copy destination")?;
-            context.sandbox_policy.ensure_path_writable(
-                destination
-                    .parent()
-                    .ok_or_else(|| miette!("copy destination has no parent"))?,
-                "atomic copy directory",
-            )?;
-        }
-        if let Some(path) = call
-            .arguments
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-        {
-            if matches!(call.name.as_str(), "write_file" | "edit_file") {
-                let actual = file_io::resolve_file_path(&context.execution_cwd, path)?;
-                context
-                    .sandbox_policy
-                    .ensure_path_writable(&actual, "file target")?;
-                let parent = actual
-                    .parent()
-                    .ok_or_else(|| miette!("file path has no parent"))?;
-                context
-                    .sandbox_policy
-                    .ensure_path_writable(parent, "atomic write directory")?;
-            } else {
-                let actual = file_io::resolve_read_file_path(
-                    &context.execution_cwd,
-                    &context.sandbox_policy,
-                    path,
-                )?;
-                file_io::ensure_authorized_read(&actual, &context.sandbox_policy, "file target")?;
-            }
-        }
-        Ok(())
-    }
-
     async fn execute_tool(
         &mut self,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
-        self.before_tool_call(call, context)?;
         match call.name.as_str() {
             "copy_file" => {
                 let args: CopyFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid copy_file arguments"))?;
-                let result =
-                    file_io::copy_file(&context.execution_cwd, &context.sandbox_policy, &args)?;
+                let result = context.files().copy_file(&args).await?;
                 Ok(AppToolExecutionResult::new(
                     format!("copied {}", args.destination),
                     serde_json::to_value(result)
@@ -222,11 +79,7 @@ impl App for FilesApp {
             "list_directory" => {
                 let args: ListDirectoryArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid list_directory arguments"))?;
-                let result = file_io::list_directory(
-                    &context.execution_cwd,
-                    &context.sandbox_policy,
-                    &args,
-                )?;
+                let result = context.files().list_directory(&args).await?;
                 Ok(AppToolExecutionResult::new(
                     format!("listed {} entries", result.entries.len()),
                     serde_json::to_value(result)
@@ -237,8 +90,7 @@ impl App for FilesApp {
             "search_text" => {
                 let args: SearchTextArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|error| miette!("invalid search_text arguments: {error}"))?;
-                let result =
-                    file_io::search_text(&context.execution_cwd, &context.sandbox_policy, &args)?;
+                let result = context.files().search_text(&args).await?;
                 Ok(AppToolExecutionResult::new(
                     format!("found {} matching lines", result.matches.len()),
                     serde_json::to_value(result)
@@ -250,8 +102,7 @@ impl App for FilesApp {
                 let mut args: ReadFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid read_file arguments"))?;
                 args.line_count = Some(args.line_count.unwrap_or(80).clamp(1, 2000));
-                let result =
-                    file_io::read_file(&context.execution_cwd, &context.sandbox_policy, &args)?;
+                let result = context.files().read_file(&args).await?;
                 // Struct serialization keeps the freshness and pagination metadata
                 // before the plaintext when the execution loop bounds model output.
                 let content = serde_json::to_string(&result)
@@ -281,8 +132,7 @@ impl App for FilesApp {
             "write_file" => {
                 let args: WriteFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid write_file arguments"))?;
-                let result =
-                    file_io::write_file(&context.execution_cwd, &context.sandbox_policy, &args)?;
+                let result = context.files().write_file(&args).await?;
                 Ok(AppToolExecutionResult::new(
                     format!("wrote {}", args.path),
                     serde_json::to_value(result)
@@ -293,8 +143,7 @@ impl App for FilesApp {
             "edit_file" => {
                 let args: EditFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid edit_file arguments"))?;
-                let result =
-                    file_io::edit_file(&context.execution_cwd, &context.sandbox_policy, &args)?;
+                let result = context.files().edit_file(&args).await?;
                 Ok(AppToolExecutionResult::new(
                     format!("edited {}", args.path),
                     serde_json::to_value(result)
@@ -305,13 +154,10 @@ impl App for FilesApp {
             "view_image" if self.supports_vision => {
                 let args: ViewImageArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid view_image arguments"))?;
-                let viewed = file_io::view_image(
-                    &context.execution_cwd,
-                    &context.sandbox_policy,
-                    &self.image_dir,
-                    self.supports_vision,
-                    &args,
-                )?;
+                let viewed = context
+                    .files()
+                    .view_image(&self.image_dir, self.supports_vision, &args)
+                    .await?;
                 let mut result = AppToolExecutionResult::new(
                     format!("viewed image {}", args.path),
                     json!({ "path": args.path, "media_type": viewed.media_type, "byte_count": viewed.byte_count }),
@@ -381,6 +227,8 @@ mod tests {
             content: BUILTIN_SKILL,
         }];
         let context = AppToolExecutionContext {
+            restart_native: false,
+            access_broker: None,
             execution_cwd: cwd,
             sandbox_policy: policy,
             tool_output_max_tokens: 1000,
@@ -403,12 +251,7 @@ mod tests {
             name: "files__read_file".into(),
             arguments: json!({"path": skill, "start_line": null, "line_count": null}),
         };
-        manager
-            .validate_tool_call_for_approval(&call, &context)
-            .unwrap();
-        let request = manager.permission_request(&call, &context).unwrap();
-        assert!(request.readable_roots.is_empty());
-        assert!(request.writable_roots.is_empty());
+        manager.validate_tool_call(&call, &context).unwrap();
         manager.validate_tool_call(&call, &context).unwrap();
         let output = manager.execute_tool(&call, &context).await.unwrap();
         assert_eq!(
@@ -438,9 +281,6 @@ mod tests {
         let mut modified = BUILTIN_SKILL.to_vec();
         modified[0] = b'X';
         std::fs::write(&skill, modified).unwrap();
-        let request = manager.permission_request(&call, &context).unwrap();
-        assert_eq!(request.readable_roots, vec![skill.clone()]);
-        assert!(manager.validate_tool_call(&call, &context).is_err());
         assert!(manager.execute_tool(&call, &context).await.is_err());
         let catalog = manager.execute_tool(&list, &context).await.unwrap();
         assert!(
@@ -462,10 +302,6 @@ mod tests {
             name: "copy_file".into(),
             arguments: json!({"source": skill, "destination": destination, "expected_sha256": null}),
         };
-        let request = app.permission_request(&copy, &context).unwrap();
-        assert!(request.readable_roots.is_empty());
-        assert!(request.writable_roots.is_empty());
-        app.before_tool_call(&copy, &context).unwrap();
         app.execute_tool(&copy, &context).await.unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), BUILTIN_SKILL);
         assert!(!context.sandbox_policy.is_path_writable(&skill));
@@ -489,18 +325,15 @@ mod tests {
                 name: name.into(),
                 arguments,
             };
-            let request = app.permission_request(&call, &context).unwrap();
-            assert!(!request.writable_roots.is_empty());
-            assert!(app.before_tool_call(&call, &context).is_err());
             assert!(app.execute_tool(&call, &context).await.is_err());
         }
         assert_eq!(std::fs::read(&skill).unwrap(), BUILTIN_SKILL);
     }
 
-    #[test]
-    fn builtin_traversal_and_extra_files_do_not_pass_files_preflight() {
+    #[tokio::test]
+    async fn builtin_traversal_and_extra_files_do_not_pass_files_boundary() {
         let (_workspace, _resources, context, skill) = builtin_context();
-        let app = FilesApp::new(context.execution_cwd.join("images"), false);
+        let mut app = FilesApp::new(context.execution_cwd.join("images"), false);
         // Preserve the actual traversal instead of normalizing a Windows
         // verbatim path while constructing the fixture with Path::join.
         let traversal = format!(
@@ -514,13 +347,8 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({"path": traversal, "start_line": null, "line_count": null}),
         };
-        assert!(
-            !app.permission_request(&call, &context)
-                .unwrap()
-                .readable_roots
-                .is_empty()
-        );
-        assert!(app.before_tool_call(&call, &context).is_err());
+
+        assert!(app.execute_tool(&call, &context).await.is_err());
 
         let mut relative_context = context.clone();
         relative_context.execution_cwd = skill.parent().unwrap().to_path_buf();
@@ -529,14 +357,10 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({"path": "child/../SKILL.md", "start_line": null, "line_count": null}),
         };
+
         assert!(
-            !app.permission_request(&relative_call, &relative_context)
-                .unwrap()
-                .readable_roots
-                .is_empty()
-        );
-        assert!(
-            app.before_tool_call(&relative_call, &relative_context)
+            app.execute_tool(&relative_call, &relative_context)
+                .await
                 .is_err()
         );
 
@@ -547,13 +371,11 @@ mod tests {
             name: "read_file".into(),
             arguments: json!({"path": extra, "start_line": null, "line_count": null}),
         };
-        let request = app.permission_request(&call, &context).unwrap();
-        assert_eq!(request.readable_roots, vec![extra]);
-        assert!(app.before_tool_call(&call, &context).is_err());
+        assert!(app.execute_tool(&call, &context).await.is_err());
     }
 
     #[tokio::test]
-    async fn permission_request_is_effect_free_and_final_context_controls_access() {
+    async fn execution_enforces_current_sandbox_after_schema_validation() {
         let dir = non_temporary_scratch();
         let outside = non_temporary_scratch();
         let target = outside.path().join("new.txt");
@@ -566,6 +388,8 @@ mod tests {
             read_only_subpaths: vec![],
         }];
         let base = AppToolExecutionContext {
+            restart_native: false,
+            access_broker: None,
             execution_cwd: dir.path().into(),
             sandbox_policy: policy,
             tool_output_max_tokens: 1000,
@@ -582,39 +406,27 @@ mod tests {
             name: "files__write_file".into(),
             arguments: json!({"path": target, "content":"approved", "expected_sha256":null}),
         };
-        manager
-            .validate_tool_call_for_approval(&call, &base)
-            .unwrap();
-        let request = manager.permission_request(&call, &base).unwrap();
-        assert_eq!(
-            request.writable_roots,
-            [outside.path().canonicalize().unwrap()]
-        );
-        assert_eq!(
-            request.readable_roots,
-            [outside.path().canonicalize().unwrap().join("new.txt")]
-        );
+        manager.validate_tool_call(&call, &base).unwrap();
+        assert!(manager.execute_tool(&call, &base).await.is_err());
         assert!(!target.exists());
-        assert!(manager.validate_tool_call(&call, &base).is_err());
         let mut effective = base.clone();
         effective
             .sandbox_policy
             .filesystem
             .readable_roots
-            .extend(request.readable_roots);
-        effective.sandbox_policy.filesystem.writable_roots.extend(
-            request
-                .writable_roots
-                .into_iter()
-                .map(|root| crate::sandbox::WritableRoot {
-                    root,
-                    read_only_subpaths: vec![],
-                }),
-        );
+            .push(outside.path().to_owned());
+        effective
+            .sandbox_policy
+            .filesystem
+            .writable_roots
+            .push(crate::sandbox::WritableRoot {
+                root: outside.path().to_owned(),
+                read_only_subpaths: vec![],
+            });
         manager.validate_tool_call(&call, &effective).unwrap();
         manager.execute_tool(&call, &effective).await.unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "approved");
-        assert!(manager.validate_tool_call(&call, &base).is_err());
+        assert!(manager.execute_tool(&call, &base).await.is_err());
     }
 
     #[tokio::test]
@@ -625,6 +437,8 @@ mod tests {
         policy.filesystem.full_disk_write = false;
         policy.filesystem.writable_roots.clear();
         let context = AppToolExecutionContext {
+            restart_native: false,
+            access_broker: None,
             execution_cwd: dir.path().into(),
             sandbox_policy: policy,
             tool_output_max_tokens: 1000,

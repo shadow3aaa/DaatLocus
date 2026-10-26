@@ -55,7 +55,9 @@ mod backpressure_tests {
             .enroll_authenticated_device(&remote.join_request(now()).unwrap())
             .unwrap();
         let ledger = StageLedger::attach(system.store(), host.local);
-        ledger.import_peer(enrollment, vec![], now()).unwrap();
+        ledger
+            .import_peer(enrollment, Default::default(), now())
+            .unwrap();
         let nonce = Uuid::new_v4();
         ledger
             .prepare_connection(remote.profile().stage_id, 1, nonce, now())
@@ -210,13 +212,12 @@ mod backpressure_tests {
         ledger
             .import_peer(
                 enrollment,
-                vec![crate::stage::ledger::ActorGrant {
-                    actor_id: "root".into(),
+                crate::stage::ledger::DeviceAuthority {
                     read: true,
                     converse: false,
                     delegate: false,
                     read_only: true,
-                }],
+                },
                 now(),
             )
             .unwrap();
@@ -1166,7 +1167,7 @@ impl PeerLink {
                 continue;
             }
             let access = StageLedger::attach(self.host.system.store(), self.host.local)
-                .actor_grant(self.channel.peer.stage_id(), &record.actor_id, now());
+                .authorize_actor(self.channel.peer.stage_id(), &record.actor_id, now());
             if access.is_ok_and(|grant| grant.read) {
                 let actor = record.actor_id.clone();
                 self.send(
@@ -1318,13 +1319,11 @@ impl PeerLink {
                             super::protocol::ActorAdminAction::Preferences {
                                 model_present,
                                 model,
-                                approval_mode,
                             } => {
                                 host.system
                                     .patch_owned_preferences(
                                         &actor.actor_id,
                                         if model_present { Some(model) } else { None },
-                                        approval_mode,
                                     )
                                     .await
                             }
@@ -1387,7 +1386,7 @@ impl PeerLink {
             } => {
                 if actor.stage_id != self.host.local
                     || !StageLedger::attach(self.host.system.store(), self.host.local)
-                        .actor_grant(self.channel.peer.stage_id(), &actor.actor_id, now())?
+                        .authorize_actor(self.channel.peer.stage_id(), &actor.actor_id, now())?
                         .converse
                 {
                     return self.reject(frame.message_id, "forbidden");
@@ -1413,7 +1412,7 @@ impl PeerLink {
                         ContentStore::new(host.system.store())
                             .store_source(&actor.actor_id, &bytes)?;
                         if !StageLedger::attach(host.system.store(), host.local)
-                            .actor_grant(peer, &actor.actor_id, now())?
+                            .authorize_actor(peer, &actor.actor_id, now())?
                             .converse
                         {
                             return Err(StageError::Forbidden("Upload authority changed"));

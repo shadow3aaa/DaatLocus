@@ -178,16 +178,6 @@
     "more_files_one": "再显示 {{count}} 个文件",
     "more_files_other": "再显示 {{count}} 个文件"
   },
-
-  "owner_approval_notice": {
-    "actors_awaiting_approval": "等待批准的 Actor",
-    "actions_awaiting_approval": "项操作等待批准",
-    "could_not_load_approvals_click_to_retry": "待批准列表暂时无法加载，点击重试",
-    "value0_conversations_awaiting_approval": "{{value0}} 个对话等待批准",
-    "view_conversations_awaiting_approval": "查看待批准的对话",
-    "open_conversation_to_review": "打开对话，决定这次操作",
-    "more_conversations_awaiting_approval": "更多待批准对话"
-  },
   "search_dialog": {
     "search_failed_try_again": "搜索暂时无法完成，请重试。",
     "could_not_load_earlier_results": "较早的结果暂时无法加载。",
@@ -310,13 +300,10 @@
     "settings_categories": "设置分类",
     "configuration": "账号与设备",
     "appearance": "外观",
-    "permissions": "权限",
     "theme": "主题",
     "system": "系统",
     "light": "浅色",
     "dark": "深色",
-    "action_approval": "操作批准",
-    "approval_mode": "批准模式",
     "loading_configuration": "加载配置…",
     "discard_changes": "放弃未保存的更改？",
     "keep_editing": "继续编辑",
@@ -349,6 +336,7 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "sudo_submitted": "权限申请已交给 Core",
     "image_preview_unavailable": "图片预览暂时不可用。",
     "application_required": "需要申请授权",
     "application_required_reason": "此操作需要新的授权，尚未执行。",
@@ -356,7 +344,6 @@
     "permission_approved_reason": "授权已记住，原操作尚未执行。",
     "permission_status": "权限状态",
     "request_permission": "申请授权",
-    "appeal_permission": "申请重新审议授权",
     "not_approved": "未获批准",
     "deliver_result": "交付结果",
     "could_not_open_the_result": "交付结果暂时无法打开。",
@@ -381,11 +368,6 @@
     "page_action_completed": "页面操作已完成。",
     "partial_document": "当前显示部分页面内容。",
     "action_completed": "操作已完成。",
-    "additional_read_access": "本次额外读取",
-    "additional_write_access": "本次额外写入",
-    "review_criteria": "审查标准",
-    "includes_subdirectories": "包含子目录",
-    "execution_details": "执行细节",
     "elapsed_value": "用时 {{value}}",
     "exit_code_value": "退出代码 {{value}}"
   },
@@ -509,9 +491,12 @@
     "suggestions_failed": "未能读取搜索记录，请重试。"
   },
   "tool_presentation": {
+    "sudo_execute": "无沙箱执行",
+    "sudo_execute_as_admin": "以管理员执行",
     "message_actor": "发送消息",
     "action_not_approved": "{{action}} · 未获批准",
     "archive_actor": "归档 Actor",
+    "stop_actor": "停止 Actor",
     "unarchive_actor": "取消归档 Actor",
     "create_actor": "创建 Actor",
     "view_actor": "查看 Actor",
@@ -567,7 +552,6 @@
     "readable_paths": "允许读取",
     "writable_paths": "允许写入",
     "action": "操作",
-    "action_details": "操作细节",
     "title": "标题",
     "description": "说明",
     "type": "类型",

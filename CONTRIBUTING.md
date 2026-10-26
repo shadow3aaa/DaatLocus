@@ -92,6 +92,21 @@ report prerequisites and failures explicitly. Do not weaken isolation or private
 ACL checks to accommodate a restricted environment. Library checks do not prove
 full product usability or cross-platform isolation.
 
+Sudo protocol, process-tree cleanup and review regressions run in the ordinary
+Windows/Linux/macOS backend suites. Real OS elevation is opt-in: build the
+headless `daat-locus` binary, set `DAAT_LOCUS_TEST_COMPANION` to its absolute path,
+then run `cargo test --no-default-features --lib native_elevation_runs_only_the_helper -- --ignored --nocapture --test-threads=1`.
+An operator must complete the real UAC/polkit/macOS authorization prompt. The
+test verifies the helper's OS identity without changing the service identity;
+protocol fixtures alone do not prove elevation. On Windows with MXC/PSEC and
+registered packaged winget, run
+`cargo test --no-default-features --lib sudo_runs_packaged_winget -- --ignored --nocapture --test-threads=1`.
+This checks `--version` only and never installs software or requests UAC.
+Unix CI additionally runs `root_helper_reads_protected_files_without_elevating_the_service`
+with the runner's passwordless sudo. It exercises the production helper and
+protected files under real root while its calling process stays unprivileged;
+it does not simulate or prove the interactive polkit/macOS authorization dialog.
+
 Limit independent Rust test fixtures to four concurrent cases. Device contract
 cases still run concurrent peer runtimes; this avoids OS I/O and cryptographic
 setup in unrelated fixtures starving the real lease and heartbeat deadlines.

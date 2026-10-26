@@ -22,7 +22,6 @@ fn memory_store() -> ActorStore {
             apps: vec!["actors".into()],
             model: None,
             instructions: String::new(),
-            permissions: ActorPermissions::workspace(".".into()),
         },
         context: AgentContext::default(),
         status: ActorStatus::Running,
@@ -55,7 +54,7 @@ fn input(
         reply_to: ReplyTarget::User,
         kind,
         in_reply_to: parent.map(str::to_owned),
-        delegation_grant: None,
+
         remote_authority: None,
         content: content.into(),
         attachments: vec![],

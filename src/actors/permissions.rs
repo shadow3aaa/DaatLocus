@@ -1,8 +1,6 @@
-//! Filesystem scope, approval-mode inheritance and OS storage protection.
+//! Canonical filesystem targets, Actor configuration and OS storage protection.
 use super::{ActorConfig, ActorError};
-use crate::sandbox::{
-    FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
-};
+use crate::sandbox::RuntimeSandboxPolicy;
 use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
 
@@ -40,99 +38,7 @@ pub fn normalize_config(mut config: ActorConfig) -> Result<ActorConfig> {
     crate::builtin_apps::validate_app_names(&config.apps)
         .map_err(|_| ActorError::Invalid("Invalid or unavailable App configuration".into()))?;
     config.workspace = canonical_path(&config.workspace)?;
-    config.permissions.readable_roots = config
-        .permissions
-        .readable_roots
-        .iter()
-        .map(|p| canonical_path(p))
-        .collect::<Result<_>>()?;
-    config.permissions.writable_roots = config
-        .permissions
-        .writable_roots
-        .iter()
-        .map(|p| canonical_path(p))
-        .collect::<Result<_>>()?;
-    config.permissions.readable_roots.sort();
-    config.permissions.readable_roots.dedup();
-    config.permissions.writable_roots.sort();
-    config.permissions.writable_roots.dedup();
-    if !covered(&config.workspace, &config.permissions.readable_roots) {
-        return Err(ActorError::Invalid("Workspace requires a read grant".into()).into());
-    }
-    for root in &config.permissions.writable_roots {
-        if !covered(root, &config.permissions.readable_roots) {
-            return Err(
-                ActorError::Invalid("Write grants require a matching read grant".into()).into(),
-            );
-        }
-    }
     Ok(config)
-}
-fn covered(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-pub fn check_child(parent: &ActorConfig, child: &ActorConfig) -> Result<()> {
-    let p = &parent.permissions;
-    let c = &child.permissions;
-    if approval_strength(c.approval_mode) < approval_strength(p.approval_mode)
-        || c.readable_roots
-            .iter()
-            .any(|root| !covered(root, &p.readable_roots))
-        || c.writable_roots
-            .iter()
-            .any(|root| !covered(root, &p.writable_roots))
-    {
-        return Err(ActorError::Forbidden(
-            "Creation exceeds the authorized filesystem scope or approval mode".into(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
-pub fn check_recipient(sender: &ActorConfig, recipient: &ActorConfig) -> Result<()> {
-    check_child(sender, recipient)
-}
-pub(crate) fn approval_strength(mode: super::ApprovalMode) -> u8 {
-    match mode {
-        super::ApprovalMode::None => 0,
-        super::ApprovalMode::Auto => 1,
-        super::ApprovalMode::Ask => 2,
-    }
-}
-pub fn policy(config: &ActorConfig, own_delivery: &Path) -> RuntimeSandboxPolicy {
-    let mut readable_roots = config.permissions.readable_roots.clone();
-    readable_roots.push(own_delivery.to_path_buf());
-    RuntimeSandboxPolicy {
-        builtin_resources: Vec::new(),
-        native: crate::sandbox::SandboxPolicy {
-            filesystem: FileSystemSandboxPolicy {
-                full_disk_read: false,
-                full_disk_write: false,
-                readable_roots,
-                bound_roots: config
-                    .permissions
-                    .readable_roots
-                    .iter()
-                    .chain(config.permissions.writable_roots.iter())
-                    .cloned()
-                    .chain(std::iter::once(own_delivery.to_path_buf()))
-                    .collect(),
-                writable_roots: config
-                    .permissions
-                    .writable_roots
-                    .iter()
-                    .map(|root| WritableRoot {
-                        root: root.clone(),
-                        read_only_subpaths: vec![],
-                    })
-                    .collect(),
-                deny_read_paths: Vec::new(),
-                deny_write_paths: Vec::new(),
-            },
-            strong_filesystem: StrongFilesystemSandboxMode::Required,
-        },
-    }
 }
 
 /// Private service state is accessible to the OS owner, never an ambient group.

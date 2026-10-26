@@ -48,13 +48,6 @@ impl Client {
     pub fn can_passivate(&self) -> bool {
         !self.live.load(Ordering::Acquire)
     }
-    pub fn review(&self, system: &ActorSystem) -> Result<Option<AppReview>> {
-        Ok(Some(AppReview::new(
-            "computer_use/macos/v2",
-            "Authorize background operation of macOS applications on this device's virtual display, including window acquisition and relocation, screenshots, launch, native input, return to user displays and window closure. Target apps retain this user's filesystem access. This capability does not change other Apps' sandboxes; read-only remote authority and Daat Locus exclusion remain enforced.",
-            json!({"device":system.store().public_stage_id().map_err(|e|miette!("{e}"))?.to_string(),"desktop":"macos-user-session"}),
-        )))
-    }
     pub(super) fn transport(
         system: &ActorSystem,
     ) -> Result<daat_locus_client_protocol::computer_use::Client> {

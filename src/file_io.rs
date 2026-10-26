@@ -27,7 +27,7 @@ const MAX_SEARCH_DEPTH: usize = 32;
 static FILE_WRITES: Mutex<()> = Mutex::new(());
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFileArgs {
     pub path: String,
@@ -38,7 +38,7 @@ pub struct ReadFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WriteFileArgs {
     pub path: String,
@@ -48,7 +48,7 @@ pub struct WriteFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFileEntry {
     pub old_text: String,
@@ -56,7 +56,7 @@ pub struct EditFileEntry {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFileArgs {
     pub path: String,
@@ -100,7 +100,7 @@ impl EditFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CopyFileArgs {
     pub source: String,
@@ -109,14 +109,14 @@ pub struct CopyFileArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewImageArgs {
     pub path: String,
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListDirectoryArgs {
     pub path: String,
@@ -126,7 +126,7 @@ pub struct ListDirectoryArgs {
 }
 
 #[model_schema]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchTextArgs {
     pub path: String,
@@ -140,33 +140,33 @@ pub struct SearchTextArgs {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryEntry {
     pub name: String,
     pub path: String,
-    pub kind: &'static str,
+    pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryPage {
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchMatch {
     pub path: String,
     pub line_number: usize,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
     pub limited: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadFileResult {
     pub path: String,
     pub start_line: usize,
@@ -178,7 +178,7 @@ pub struct ReadFileResult {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWriteResult {
     pub path: String,
     pub sha256: String,
@@ -187,7 +187,7 @@ pub struct FileWriteResult {
     pub change: Option<FileChange>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     pub before_sha256: Option<String>,
     pub after_sha256: String,
@@ -197,9 +197,9 @@ pub struct FileChange {
     pub patch: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffLine {
-    pub kind: &'static str,
+    pub kind: String,
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     pub text: String,
@@ -253,7 +253,7 @@ fn file_change(before: &[u8], after: &[u8], created: bool) -> Option<FileChange>
                 }
             };
             change.lines.push(DiffLine {
-                kind,
+                kind: kind.into(),
                 old_line: old_number,
                 new_line: new_number,
                 text: text.trim_end_matches(['\r', '\n']).into(),
@@ -384,18 +384,6 @@ pub(crate) fn ensure_authorized_read(
     } else {
         policy.ensure_path_readable(path, label)
     }
-}
-
-pub(crate) fn read_requires_permission(path: &Path, policy: &RuntimeSandboxPolicy) -> Result<bool> {
-    guarded_directory::local_path(path)
-        .map_err(|_| miette!("remote or device file paths are unsupported"))?;
-    if policy.is_path_readable(path) {
-        return Ok(false);
-    }
-    Ok(!matches!(
-        builtin_resource_for_path(path, policy),
-        Ok(Some(resource)) if read_builtin_bytes(resource, resource.content.len() as u64).is_ok()
-    ))
 }
 
 fn builtin_resource_for_path<'a>(
@@ -783,7 +771,7 @@ pub fn list_directory(
             DirectoryEntry {
                 name,
                 path: entry_path.display().to_string(),
-                kind,
+                kind: kind.into(),
             },
         );
         if entries.len() > limit + 1 {
@@ -1315,6 +1303,14 @@ pub fn view_image(
     }
     let path = authorized_path(cwd, policy, &args.path, false)?;
     let bytes = read_bytes(&path, MAX_VIEW_IMAGE_BYTES, policy)?;
+    view_image_bytes(&bytes, image_state_dir, &args.path)
+}
+
+pub(crate) fn view_image_bytes(
+    bytes: &[u8],
+    image_state_dir: &Path,
+    description: &str,
+) -> Result<ViewedImage> {
     let (media_type, extension) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         ("image/png", "png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -1328,10 +1324,10 @@ pub fn view_image(
             "unsupported image type; use PNG, JPEG, GIF or WebP"
         ));
     };
-    let snapshot = image_state_dir.join(format!("{}.{}", sha256(&bytes), extension));
+    let snapshot = image_state_dir.join(format!("{}.{}", sha256(bytes), extension));
     crate::persistence::write_bytes_atomic_sync(
         &snapshot,
-        &bytes,
+        bytes,
         crate::persistence::PersistenceFileMode::Private,
     )
     .map_err(|_| miette!("unable to store image input"))?;
@@ -1341,7 +1337,7 @@ pub fn view_image(
         model_image: AgentContentPart::Image {
             path: snapshot.display().to_string(),
             media_type: media_type.into(),
-            description: Some(args.path.clone()),
+            description: Some(description.into()),
         },
     })
 }
@@ -1386,7 +1382,7 @@ mod tests {
         let (directory, policy, path) = builtin_fixture();
         assert!(!policy.is_path_readable(&path));
         assert!(!policy.is_path_writable(&path));
-        assert!(!read_requires_permission(&path, &policy).unwrap());
+        assert!(ensure_authorized_read(&path, &policy, "filesystem boundary").is_ok());
         ensure_authorized_read(&path, &policy, "built-in skill").unwrap();
         let result = read_file(
             directory.path(),
@@ -1403,7 +1399,7 @@ mod tests {
 
         let extra = path.with_file_name("extra.md");
         fs::write(&extra, BUILTIN_BYTES).unwrap();
-        assert!(read_requires_permission(&extra, &policy).unwrap());
+        assert!(ensure_authorized_read(&extra, &policy, "filesystem boundary").is_err());
         assert!(read_authorized_bytes(&extra, u64::MAX, &policy).is_err());
         assert!(
             list_directory(
@@ -1430,13 +1426,13 @@ mod tests {
             fs::write(&path, &bytes).unwrap();
             assert!(read_authorized_bytes(&path, u64::MAX, &policy).is_err());
             assert!(ensure_authorized_read(&path, &policy, "skill").is_err());
-            assert!(read_requires_permission(&path, &policy).unwrap());
+            assert!(ensure_authorized_read(&path, &policy, "filesystem boundary").is_err());
             assert_eq!(
                 read_authorized_bytes(&path, u64::MAX, &approved).unwrap(),
                 bytes
             );
             ensure_authorized_read(&path, &approved, "ordinary file").unwrap();
-            assert!(!read_requires_permission(&path, &approved).unwrap());
+            assert!(ensure_authorized_read(&path, &approved, "filesystem boundary").is_ok());
             assert!(read_builtin_bytes(&approved.builtin_resources[0], u64::MAX).is_err());
             assert!(!approved.is_path_readable(&directory.path().join("unrequested")));
             assert!(!approved.is_path_writable(&path));
@@ -1462,7 +1458,7 @@ mod tests {
         let requested =
             resolve_read_file_path(directory.path(), &policy, &traversal.to_string_lossy())
                 .unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
         assert!(read_authorized_bytes(&traversal, u64::MAX, &policy).is_err());
         assert!(
             read_file(
@@ -1478,7 +1474,7 @@ mod tests {
         // The caller supplies this relative string directly. In particular,
         // the production cwd join must not erase evidence before validation.
         let requested = resolve_read_file_path(parent, &policy, "child/../SKILL.md").unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
         assert!(
             read_file(
                 parent,
@@ -1638,7 +1634,7 @@ mod tests {
         assert!(read_authorized_bytes(&alias, u64::MAX, &policy).is_err());
         let requested =
             resolve_read_file_path(directory.path(), &policy, &alias.to_string_lossy()).unwrap();
-        assert!(read_requires_permission(&requested, &policy).unwrap());
+        assert!(ensure_authorized_read(&requested, &policy, "filesystem boundary").is_err());
 
         let moved_file = directory.path().join("moved.md");
         fs::rename(&path, &moved_file).unwrap();
@@ -1746,6 +1742,8 @@ mod tests {
             let mut policy = RuntimeSandboxPolicy::disabled();
             policy.filesystem.full_disk_read = false;
             policy.filesystem.readable_roots = vec![root.clone()];
+            let rules = root.parent().unwrap().join("global-ignore");
+            assert!(read_authorized_bytes(&rules, u64::MAX, &policy).is_err());
             let args = SearchTextArgs {
                 path: ".".into(),
                 query: "needle".into(),
@@ -1769,7 +1767,9 @@ mod tests {
             assert_eq!(all.matches.len(), 2);
             return;
         }
-        let temp = tempfile::tempdir().unwrap();
+        // Keep rules outside implicit temporary scopes and Windows short-name
+        // temp paths: ignore expands every '~' in excludesFile as a home path.
+        let temp = crate::sandbox::test_support::scoped_directory();
         let root = temp.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::write(root.join("visible.txt"), "needle visible\n").unwrap();
@@ -2193,8 +2193,8 @@ mod tests {
     #[test]
     #[cfg_attr(windows, ignore = "requires Windows symlink creation privileges")]
     fn symlink_escape_is_denied() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let dir = crate::sandbox::test_support::scoped_directory();
+        let outside = crate::sandbox::test_support::scoped_directory();
         fs::write(outside.path().join("a.txt"), "outside").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();

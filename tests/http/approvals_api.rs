@@ -1,36 +1,40 @@
-//! Approvals HTTP contracts.
+//! Sandbox application history is authenticated, bounded and read-only.
 use crate::support::Fixture;
 use daat_locus::actors::ApprovalDecision;
-use daat_locus::actors::ApprovalMode;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn ask_approvals_are_owner_only_exactly_scoped_and_immutable() {
+async fn application_history_checks_provenance_and_redacts_private_arguments() {
     let fixture = Fixture::new().await;
     let a = fixture.child("alpha").await;
     let b = fixture.child("beta").await;
-    let approval = fixture.approval(&a, ApprovalMode::Ask).await;
-    let cookie = fixture.login_cookie().await;
+    let approval = fixture.approval(&a).await;
     let path = format!("/v1/actors/{a}/approvals/{}", approval.id);
-    let detail = fixture
-        .client
-        .get(format!("{}{path}", fixture.url))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(detail.status(), StatusCode::OK);
-    let text = detail.text().await.unwrap();
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}{path}", fixture.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = fixture.owner(Method::GET, &path).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = response.text().await.unwrap();
     assert!(
         !text.contains("fixture-secret-key")
             && text.contains("[redacted]")
             && text.contains("writable_roots")
     );
+    let data: Value = serde_json::from_str(&text).unwrap();
+    assert!(data.get("actor_id").is_none());
     assert_eq!(
         fixture
             .owner(
-                reqwest::Method::GET,
+                Method::GET,
                 &format!("/v1/actors/{b}/approvals/{}", approval.id)
             )
             .send()
@@ -39,110 +43,79 @@ async fn ask_approvals_are_owner_only_exactly_scoped_and_immutable() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        fixture
-            .owner(reqwest::Method::POST, &path)
-            .json(&json!({"decision": "approve", "requested": {"writable_roots": ["C:/"]}}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let resolved = fixture
-        .owner(reqwest::Method::POST, &path)
-        .json(&json!({"decision": "approve"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resolved.status(), StatusCode::OK);
+    for endpoint in [path, format!("/v1/approvals/{}", approval.id)] {
+        for decision in ["approve", "deny"] {
+            assert_eq!(
+                fixture
+                    .owner(Method::POST, &endpoint)
+                    .json(&json!({"decision":decision}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+        }
+    }
     let stored = fixture.system.store().approval(&approval.id).unwrap();
-    assert_eq!(stored.decision, ApprovalDecision::Approved);
-    assert_eq!(stored.requested, approval.requested);
+    assert_eq!(stored.decision, ApprovalDecision::Pending);
     assert_eq!(stored.call, approval.call);
-    assert_eq!(
-        fixture
-            .owner(reqwest::Method::POST, &path)
-            .json(&json!({"decision": "deny"}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
-    );
+    assert_eq!(stored.requested, approval.requested);
 }
 
 #[tokio::test]
-async fn auto_review_cannot_be_overridden_and_pending_filter_does_not_starve_ask() {
+async fn application_history_paginates_with_event_cursor_and_rejects_retired_owner_filter() {
     let fixture = Fixture::new().await;
-    let a = fixture.child("ask-actor").await;
-    let b = fixture.child("auto-actor").await;
-    let ask = fixture.approval(&a, ApprovalMode::Ask).await;
-    let auto = fixture.approval(&b, ApprovalMode::Auto).await;
-    let mut draft = ask.clone();
-    draft.id = uuid::Uuid::new_v4().to_string();
-    draft.decision = ApprovalDecision::ApplicationRequired;
-    let draft = fixture.system.store().create_approval(draft).unwrap();
-    // Fill newer history with in-flight reviews; the pending query must filter before LIMIT.
-    for _ in 0..110 {
-        let mut record = auto.clone();
+    let actor = fixture.child("worker").await;
+    let original = fixture.approval(&actor).await;
+    for _ in 0..35 {
+        let mut record = original.clone();
         record.seq = 0;
         record.id = uuid::Uuid::new_v4().to_string();
         record.call.id = uuid::Uuid::new_v4().to_string();
         fixture.system.store().create_approval(record).unwrap();
     }
-    let pending = fixture
+    let page: Value = fixture
+        .owner(Method::GET, "/v1/approvals?limit=10")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 10);
+    assert_eq!(
+        page["event_cursor"],
+        fixture.system.store().event_cursor().unwrap()
+    );
+    let cursor = page["next_cursor"].as_i64().unwrap();
+    let next: Value = fixture
         .owner(
-            reqwest::Method::GET,
-            "/v1/approvals?awaiting_owner=true&limit=1",
+            Method::GET,
+            &format!("/v1/approvals?limit=10&before={cursor}"),
         )
         .send()
         .await
         .unwrap()
-        .json::<Value>()
+        .json()
         .await
         .unwrap();
-    assert_eq!(pending["items"].as_array().unwrap().len(), 1);
-    assert_eq!(pending["items"][0]["id"], ask.id);
-    assert_eq!(
-        pending["event_cursor"],
-        fixture.system.store().event_cursor().unwrap()
-    );
-    assert!(pending["next_cursor"].is_null());
-    let unsubmitted = fixture
-        .owner(
-            reqwest::Method::POST,
-            &format!("/v1/approvals/{}", draft.id),
-        )
-        .json(&json!({"decision":"approve"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unsubmitted.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        fixture.system.store().approval(&draft.id).unwrap().decision,
-        ApprovalDecision::ApplicationRequired
-    );
-    let resolved = fixture
-        .owner(reqwest::Method::POST, &format!("/v1/approvals/{}", auto.id))
-        .json(&json!({"decision": "approve"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resolved.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        fixture.system.store().approval(&auto.id).unwrap().decision,
-        ApprovalDecision::Pending
-    );
-    fixture.system.cancel(&a, &ask.message_id).unwrap();
+    for item in next["items"].as_array().unwrap() {
+        assert!(
+            !page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|previous| previous["id"] == item["id"])
+        );
+    }
     assert_eq!(
         fixture
-            .owner(reqwest::Method::POST, &format!("/v1/approvals/{}", ask.id))
-            .json(&json!({"decision": "approve"}))
+            .owner(Method::GET, "/v1/approvals?awaiting_owner=true")
             .send()
             .await
             .unwrap()
             .status(),
-        StatusCode::CONFLICT
+        StatusCode::BAD_REQUEST
     );
 }

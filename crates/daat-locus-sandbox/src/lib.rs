@@ -1,12 +1,16 @@
 //! Scoped filesystem policy and native process isolation, independent of any host application.
 
+mod baseline;
 pub mod capabilities;
+pub use baseline::{RuntimeReadScope, runtime_read_scopes};
 mod denial;
+mod diagnostics;
 #[cfg(windows)]
 pub mod process_spawn;
-pub use denial::{
-    Access, AccessDenied, DenialCoverage, DenialRecord, DenialSource, MAX_CAPTURE_DENIALS,
-    denial_coverage, denials_from_capture_document,
+pub use denial::{Access, AccessDenied, DenialRecord, DenialSource};
+pub use diagnostics::{
+    CaptureFailure, CaptureStatus, DenialReport, MAX_CAPTURE_BYTES, MAX_CAPTURE_DENIALS,
+    NativeBackend, NativeDenial, ProcessFailure, report_from_capture_document,
 };
 
 #[cfg(all(
@@ -106,6 +110,9 @@ fn path_is_system_temporary(path: &Path) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSystemSandboxPolicy {
+    /// Hard execution authority; approvals and temporary-directory baselines
+    /// cannot turn a read-only invocation into a writer.
+    pub deny_all_writes: bool,
     pub full_disk_read: bool,
     pub full_disk_write: bool,
     pub readable_roots: Vec<PathBuf>,
@@ -169,6 +176,7 @@ impl PartialEq for SandboxProcessOptions {
 impl Eq for SandboxProcessOptions {}
 
 pub struct SandboxAsyncChild {
+    policy: SandboxPolicy,
     inner: SandboxAsyncChildInner,
 }
 
@@ -232,6 +240,19 @@ impl SandboxStdio {
 }
 
 impl SandboxAsyncChild {
+    /// Native descendants inherit this snapshot. Granting new device scope
+    /// cannot retroactively update an existing kernel isolation environment.
+    pub fn ensure_policy(&self, current: &SandboxPolicy) -> Result<()> {
+        current.filesystem.ensure_root_bindings()?;
+        self.policy.filesystem.ensure_root_bindings()?;
+        if self.policy != *current {
+            return Err(miette!(
+                "The running process uses an older sandbox scope. Its child processes inherit that scope. Explicitly restart the process to use the current device permissions; no command was replayed."
+            ));
+        }
+        Ok(())
+    }
+
     pub fn spawn_shell(
         policy: &SandboxPolicy,
         program: &str,
@@ -255,6 +276,7 @@ impl SandboxAsyncChild {
                     options,
                 )?;
                 return Ok(Self {
+                    policy: policy.clone(),
                     inner: SandboxAsyncChildInner::Windows(inner),
                 });
             }
@@ -266,6 +288,7 @@ impl SandboxAsyncChild {
         {
             let inner = linux::spawn_restricted_async(policy, Path::new(program), args, options)?;
             return Ok(Self {
+                policy: policy.clone(),
                 inner: SandboxAsyncChildInner::Linux(inner),
             });
         }
@@ -274,6 +297,7 @@ impl SandboxAsyncChild {
             let inner =
                 macos::spawn_restricted_async(policy, PathBuf::from(program), args, options)?;
             return Ok(Self {
+                policy: policy.clone(),
                 inner: SandboxAsyncChildInner::Macos(inner),
             });
         }
@@ -309,6 +333,7 @@ impl SandboxAsyncChild {
         }
         let inner = command.spawn()?;
         Ok(Self {
+            policy: policy.clone(),
             inner: SandboxAsyncChildInner::Tokio(inner),
         })
     }
@@ -367,16 +392,24 @@ impl SandboxAsyncChild {
         }
     }
 
-    /// Native denial records captured for a finished sandboxed child.
-    ///
-    /// Empty unless capture was requested, the backend produced records, and
-    /// the child reached a terminal state. Records are bounded and only name
-    /// filesystem read/write targets that the sandbox actually denied.
-    pub fn take_denials(&mut self) -> Vec<denial::DenialRecord> {
+    /// Bounded native observations and explicit collection status. Pending,
+    /// failed and unavailable collection never imply that access was allowed.
+    /// Unknown resource/access kinds remain evidence without becoming grants.
+    pub fn take_denial_report(&mut self) -> DenialReport {
         match &mut self.inner {
             #[cfg(target_os = "windows")]
-            SandboxAsyncChildInner::Windows(child) => child.take_denials(),
-            _ => Vec::new(),
+            SandboxAsyncChildInner::Windows(child) => child.take_denial_report(),
+            #[cfg(target_os = "linux")]
+            SandboxAsyncChildInner::Linux(_) => {
+                DenialReport::new(NativeBackend::LinuxBubblewrap, CaptureStatus::Unavailable)
+            }
+            #[cfg(target_os = "macos")]
+            SandboxAsyncChildInner::Macos(_) => {
+                DenialReport::new(NativeBackend::MacosSeatbelt, CaptureStatus::Unavailable)
+            }
+            SandboxAsyncChildInner::Tokio(_) => {
+                DenialReport::new(NativeBackend::Unrestricted, CaptureStatus::NotRequested)
+            }
         }
     }
 
@@ -548,7 +581,8 @@ fn apply_tokio_command_options(
 
 #[cfg(target_os = "windows")]
 const fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
-    !(policy.full_disk_read
+    !(!policy.deny_all_writes
+        && policy.full_disk_read
         && policy.full_disk_write
         && policy.readable_roots.is_empty()
         && policy.writable_roots.is_empty()
@@ -738,6 +772,7 @@ impl FileSystemSandboxPolicy {
     pub const fn unrestricted() -> Self {
         Self {
             full_disk_read: true,
+            deny_all_writes: false,
             full_disk_write: true,
             readable_roots: Vec::new(),
             writable_roots: Vec::new(),
@@ -748,7 +783,8 @@ impl FileSystemSandboxPolicy {
     }
 
     pub const fn is_unrestricted(&self) -> bool {
-        self.full_disk_read
+        !self.deny_all_writes
+            && self.full_disk_read
             && self.full_disk_write
             && self.readable_roots.is_empty()
             && self.writable_roots.is_empty()
@@ -781,6 +817,11 @@ impl FileSystemSandboxPolicy {
             if path_is_system_temporary(path) {
                 return true;
             }
+            if runtime_read_scopes()
+                .is_ok_and(|scopes| scopes.iter().any(|scope| scope.covers(path)))
+            {
+                return true;
+            }
             if self.full_disk_read {
                 return true;
             }
@@ -795,6 +836,9 @@ impl FileSystemSandboxPolicy {
     }
 
     pub fn is_path_writable(&self, path: &Path) -> bool {
+        if self.deny_all_writes {
+            return false;
+        }
         with_path_resolution_cache(|| {
             if self.ensure_root_bindings().is_err() {
                 return false;
@@ -1029,6 +1073,7 @@ mod tests {
         let policy = SandboxPolicy {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: true,
+                deny_all_writes: false,
                 full_disk_write: false,
                 readable_roots: Vec::new(),
                 writable_roots: vec![WritableRoot {
@@ -1274,7 +1319,7 @@ exit 42
     fn writable_root_does_not_allow_symlink_escape() {
         use std::os::unix::fs::symlink;
 
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let tempdir = crate::test_support::scoped_directory();
         let workspace_dir = tempdir.path().join("workspace");
         let outside_dir = tempdir.path().join("outside");
         std::fs::create_dir_all(&workspace_dir).expect("create workspace");
@@ -1284,6 +1329,7 @@ exit 42
 
         let policy = super::FileSystemSandboxPolicy {
             full_disk_read: false,
+            deny_all_writes: false,
             full_disk_write: false,
             readable_roots: Vec::new(),
             writable_roots: vec![super::WritableRoot {

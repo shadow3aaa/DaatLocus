@@ -1,6 +1,6 @@
 import { t } from "@/lib/i18n";
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeftIcon, BarChart3Icon, DownloadIcon, GlobeIcon, MonitorIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
+import { ArrowLeftIcon, BarChart3Icon, DownloadIcon, GlobeIcon, MonitorIcon, SearchIcon, SettingsIcon, SlidersHorizontalIcon, SunIcon, UserRoundIcon } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
@@ -9,15 +9,13 @@ import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { UsageSettings } from "@/components/settings/usage-settings";
 import { ImportSettings } from "@/components/settings/import-settings";
 import { getImportCapabilities } from "@/lib/conversation-import";
-import { SettingsSection, SettingsGroup, SettingsRow } from "@/components/settings/structure";
+import { SettingsGroup } from "@/components/settings/structure";
 import { AccountEditor } from "@/components/settings/account-editor";
 import {
-  getActor, getConfig, saveConfig, patchActorPreferences,
-  type ActorDetail, type ApprovalMode, type SetupConfigRequest,
+  getConfig, saveConfig,
+  type SetupConfigRequest,
 } from "@/lib/actor-api";
 import type { Preferences } from "@/lib/preferences";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { modeLabel } from "@/components/composer";
 import { ProvidersSettings } from "@/components/settings/providers-settings";
 import { errorText, Picker, StatusNote } from "@/components/settings/controls";
 import { PhoneUseSettings } from "@/components/settings/phone-use-settings";
@@ -30,9 +28,9 @@ import { MacComputerUseSettings } from "@/components/settings/macos-computer-use
 import { BrowserSettings } from "@/components/settings/browser-settings";
 import { browserSupported } from "@/lib/browser-workspace";
 
-export type SettingsTab = "general" | "personal" | "account" | "permissions" | "usage" | "models" | "import" | "gui" | "browser";
+export type SettingsTab = "general" | "personal" | "account" | "usage" | "models" | "import" | "gui" | "browser";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", permissions: "permissions", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -46,7 +44,6 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   initialTab?: SettingsTab; canManage?: boolean; onTabChange(tab: SettingsTab): void;
 }>(function SettingsPage({open, onOpenChange, onActorChanged, onViewCore, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
-  const [actor, setActor] = useState<ActorDetail | null>(null);
   const [config, setConfig] = useState<SetupConfigRequest | null>(null);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<"mode" | "config" | null>(null);
@@ -87,31 +84,24 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
 
   useEffect(() => {
     if (!open) return;
-    setError(null); setNotice(null);setActor(null);setConfig(null);setDirty(false);setLoading(false);setConfirmClose(false);setQuery("");setMobileDetail(initialTab !== "general");setAccountVisited(initialTab === "account");
+    setError(null); setNotice(null);setConfig(null);setDirty(false);setLoading(false);setConfirmClose(false);setQuery("");setMobileDetail(initialTab !== "general");setAccountVisited(initialTab === "account");
   }, [open]);
   useEffect(() => { setTab(canManage ? initialTab : "personal"); if (initialTab === "account") setAccountVisited(true); }, [initialTab, canManage]);
   useEffect(() => {
-    if (!open || !canManage || tab!=="models"&&tab!=="permissions" || tab==="models"&&config!==null || tab==="permissions"&&actor!==null) return;
+    if (!open || !canManage || tab !== "models" || config !== null) return;
     const controller = new AbortController();
     setLoading(true);
-    void Promise.allSettled([tab==="permissions"?getActor("core", { signal: controller.signal }):Promise.resolve(null), tab==="models"?getConfig({ signal: controller.signal }):Promise.resolve(null)]).then(([actorResult, configResult]) => {
+    void getConfig({ signal: controller.signal }).then(value => {
       if (controller.signal.aborted) return;
-      if (actorResult.status === "fulfilled"&&actorResult.value) setActor(actorResult.value);
-      if (configResult.status === "fulfilled"&&configResult.value) { setConfig(configResult.value); savedConfig.current = JSON.stringify(configResult.value); }
-      if (actorResult.status === "rejected") setError(errorText(actorResult.reason));
-      else if (configResult.status === "rejected") setError(errorText(configResult.reason));
-      setLoading(false);
+      setConfig(value); savedConfig.current = JSON.stringify(value); setLoading(false);
+    }).catch(cause => {
+      if (controller.signal.aborted) return;
+      setError(errorText(cause)); setLoading(false);
     });
     return () => controller.abort();
-  }, [open, canManage, tab, config===null, actor===null, retry]);
+  }, [open, canManage, tab, config===null, retry]);
 
-  async function changeMode(approval_mode: ApprovalMode) {
-    if (!actor || pending) return;
-    setPending("mode");setError(null);setNotice(null);
-    try {const result=await patchActorPreferences("core",{approval_mode});setActor(result);onActorChanged("core");}
-    catch(cause){setError(errorText(cause));}
-    finally{setPending(null);}
-  }
+
   async function submitConfig(): Promise<boolean> {
     if (!config) return false;
     setPending("config"); setError(null); setNotice(null);
@@ -140,7 +130,6 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
       ...(isAndroid() || isMacDesktop() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
-      {id: "permissions" as const, label: t("settings_dialog.permissions"), icon: ShieldCheckIcon, keywords: t("settings_dialog.approval_mode")},
       {id: "usage" as const, label: t("usage_page.title"), icon: BarChart3Icon, keywords: [t("usage_page.history"), t("usage_page.agent_ranking"), t("usage_page.cache_ranking"), t("usage_page.column_used")].join(" ")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),
@@ -159,7 +148,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
       <div className="dl-settings-content">
         <header className="dl-settings-page-heading" data-window-drag-region><Button variant="ghost" size="icon-sm" className="dl-settings-mobile-back" aria-label={t("settings_page.back_to_settings")} onClick={() => setMobileDetail(false)}><ArrowLeftIcon /></Button><h1>{categories.find(category => category.id === tab)?.label}</h1></header>
         <StatusNote text={error} error /><StatusNote text={notice} />
-        {error && !loading && (tab === "models" && !config || tab === "permissions" && !actor) && <Button variant="outline" onClick={() => { setError(null); setRetry(value => value + 1); }}>{t("app.retry")}</Button>}
+        {error && !loading && (tab === "models" && !config) && <Button variant="outline" onClick={() => { setError(null); setRetry(value => value + 1); }}>{t("app.retry")}</Button>}
         <div hidden={tab !== "general"}><SettingsGroup>
           <Picker id="dl-client-language" label={t("common.language")} description={t("settings_page.interface_language")} value={preferences.language} options={[{value: "system", label: t("settings_page.detect_language")}, {value: "zh-CN", label: t("common.chinese")}, {value: "en-US", label: t("common.english")}]} onChange={value=>onPreferencesChanged({...preferences,language:value as Preferences["language"]})} />
         </SettingsGroup></div>
@@ -168,11 +157,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}
         {canManage && (isAndroid() || isMacDesktop() || computerUseSupported) && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && (isAndroid() ? <PhoneUseSettings /> : isMacDesktop() ? <MacComputerUseSettings /> : <ComputerUseSettings />)}</div>}
-        {canManage&&<div hidden={tab !== "permissions"}><SettingsSection title={t("settings_dialog.action_approval")}><SettingsGroup><SettingsRow label={t("settings_dialog.approval_mode")}>
-          <ToggleGroup type="single" aria-label={t("settings_dialog.approval_mode")} value={actor?.config?.permissions.approval_mode||"auto"} disabled={locked||loading||!actor} className="dl-settings-options" onValueChange={mode=>{if(mode)void changeMode(mode as ApprovalMode);}}>
-            {(["none","ask","auto"] as const).map(mode=><ToggleGroupItem key={mode} value={mode}>{modeLabel(mode)}</ToggleGroupItem>)}
-          </ToggleGroup>
-        </SettingsRow></SettingsGroup></SettingsSection></div>}
+
         {canManage && <div hidden={tab !== "usage"}>{tab === "usage" && <UsageSettings />}</div>}
         {canManage ? <div hidden={tab !== "models"}>
           {loading && !config ? <div className="dl-settings-loading" role="status"><Spinner />{t("settings_dialog.loading_configuration")}</div> : config ? <ProvidersSettings config={config} onChange={value => {setConfig(value);setDirty(JSON.stringify(value) !== savedConfig.current);setNotice(null);}} onSave={submitConfig} pending={locked} dirty={dirty} /> : null}

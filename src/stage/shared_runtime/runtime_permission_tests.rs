@@ -12,17 +12,6 @@ impl crate::app::App for ScopeFixture {
             input_schema: crate::schema_utils::model_schema_for::<crate::app::EmptyAppArgs>(),
         }]
     }
-    fn review_requirement(
-        &self,
-        _: &AgentToolCall,
-        _: &AppToolExecutionContext,
-    ) -> miette::Result<Option<crate::actors::AppReview>> {
-        Ok(Some(crate::actors::AppReview::new(
-            "fixture/source-review/v1",
-            "Review the source fixture effect",
-            json!({"effect":"inspect"}),
-        )))
-    }
     async fn execute_tool(
         &mut self,
         _: &AgentToolCall,
@@ -30,12 +19,11 @@ impl crate::app::App for ScopeFixture {
     ) -> miette::Result<AppToolExecutionResult> {
         self.0.fetch_add(1, Ordering::SeqCst);
         if self.1 {
-            return Err(crate::actors::approval::ApprovalDenied(
+            return Err(crate::actors::approval::AutomaticReviewDenied(
                 crate::actors::approval::ApprovalRejection {
                     approval_id: "source-denied-approval".into(),
                     stage_id: "source-stage".into(),
                     reason: "Owner declined the exact scope".into(),
-                    mode: crate::actors::ApprovalMode::Ask,
                 },
             )
             .into());
@@ -84,14 +72,6 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
     .unwrap();
     core.epoch.store(reply.epoch, Ordering::Release);
     core.recovered_epoch.store(reply.epoch, Ordering::Release);
-    system
-        .apply_owned_preferences(
-            shared::ACTOR_ID,
-            None,
-            Some(crate::actors::ApprovalMode::None),
-        )
-        .await
-        .unwrap();
     let actor = system.core_device_actor().unwrap();
     let portable =
         crate::stage::shared_apps::manager(core.clone(), actor.clone(), system.clone()).unwrap();
@@ -237,8 +217,7 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         refused.payload["approval"]["approval_id"],
         "source-denied-approval"
     );
-    // System temp is already readable by native processes. Exercise a real
-    // missing scope instead of requesting an approval for an exempt path.
+    // Reads need no grant. Exercise a missing write scope outside system temp.
     let extra_root = crate::sandbox::test_support::scoped_directory();
     let extra = extra_root.path().join("extra-scope");
     std::fs::create_dir(&extra).unwrap();
@@ -249,12 +228,12 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
             input,
             crate::actors::runtime_permissions::ApplicationSource::ToolResult {
                 tool_result_id: reference.tool_result_id,
-                readable_roots: vec![extra.clone()],
-                writable_roots: vec![],
+                readable_roots: vec![],
+                writable_roots: vec![extra.clone()],
             },
             crate::actors::ReviewApplication {
                 task: "Inspect fixture".into(),
-                reason: "Read the exact additional fixture directory".into(),
+                reason: "Write the exact additional fixture directory".into(),
             },
         )
         .await
@@ -262,14 +241,15 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
     let Response::ApprovalSubmitted { record } = submitted else {
         panic!("source device must approve the result reference")
     };
-    assert_eq!(record.decision, crate::actors::ApprovalDecision::Approved);
+    assert_eq!(record.decision, crate::actors::ApprovalDecision::Denied);
+    assert!(record.appeal.is_some(), "an unavailable reviewer must forward an explicit application to Core");
     assert_eq!(
         count.load(Ordering::SeqCst),
         2,
         "scope review never executes either original App call"
     );
     assert!(
-        system
+        !system
             .execution_context_with_policy(
                 &actor,
                 &system.store().message(input).unwrap(),
@@ -277,27 +257,18 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
             )
             .unwrap()
             .sandbox_policy
-            .is_path_readable(&extra)
+            .is_path_writable(&extra)
     );
-    // Losing source authority while Ask is pending must cancel the record and
-    // leave the effect unstarted, rather than only dropping the RPC future.
-    system
-        .apply_owned_preferences(
-            shared::ACTOR_ID,
-            None,
-            Some(crate::actors::ApprovalMode::Ask),
-        )
-        .await
-        .unwrap();
+    // Losing native execution authority must preserve an uncertain result,
+    // cancel the suspended future and never replay an operation.
     let actor = system.core_device_actor().unwrap();
     let revision = super::super::digest(
         &serde_json::to_vec(&json!({"actor":actor.config,"configuration":system.config()}))
             .unwrap(),
     );
-    *core.device_apps.lock().await = Some((
-        revision.clone(),
-        AppManager::new(vec![Box::new(ScopeFixture(count.clone(), false))]).unwrap(),
-    ));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    *core.device_apps.lock().await = Some((revision.clone(),
+        AppManager::new(vec![Box::new(WaitingScopeFixture(entered.clone()))]).unwrap()));
     let waiting = AgentToolCall {
         id: "wait-before-effect".into(),
         ..call.clone()
@@ -312,41 +283,31 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         false,
     );
     let lose_authority = async {
-        let record = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if let Some(record) = system
-                    .store()
-                    .pending_approvals(Some(shared::ACTOR_ID), None, 10)
-                    .unwrap()
-                    .items
-                    .into_iter()
-                    .find(|record| record.call.id == waiting.id)
-                {
-                    break record;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("source invocation must wait for Ask approval");
+        entered.notified().await;
         *core.fence.lock() = Fence::default();
-        record.id
     };
-    let (result, id) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(invoke, lose_authority)
-    })
-    .await
-    .expect("source review cancellation must finish");
+    }).await.expect("source operation cancellation must finish");
     assert!(result.is_err());
-    assert_eq!(
-        system.store().approval(&id).unwrap().decision,
-        crate::actors::ApprovalDecision::Cancelled
-    );
-    assert_eq!(
-        count.load(Ordering::SeqCst),
-        2,
-        "authority loss must not execute the waiting effect"
-    );
+    let state:String = system.store().stage_transaction(|tx| Ok(tx.query_row(
+        "SELECT state FROM core_app_effects WHERE message=?1 AND call=?2",params![input,waiting.id],|row|row.get(0))?)).unwrap();
+    assert_eq!(state,"unknown");
+    assert_eq!(count.load(Ordering::SeqCst),2,"authority loss cannot execute or replay the suspended effect");
     coordinator.stop().await;
     system.shutdown().await;
+}
+
+struct WaitingScopeFixture(Arc<tokio::sync::Notify>);
+#[async_trait::async_trait]
+impl crate::app::App for WaitingScopeFixture {
+    fn id(&self) -> crate::app::AppId { crate::app::AppId::new("fixture").unwrap() }
+    fn tool_specs(&self) -> Vec<crate::app::AppToolSpec> {
+        vec![crate::app::AppToolSpec { name:"inspect".into(),description:"Suspended fixture".into(),
+            input_schema:crate::schema_utils::model_schema_for::<crate::app::EmptyAppArgs>() }]
+    }
+    async fn execute_tool(&mut self,_:&AgentToolCall,_:&AppToolExecutionContext)->miette::Result<AppToolExecutionResult> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
 }

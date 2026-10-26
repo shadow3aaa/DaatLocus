@@ -17,7 +17,7 @@ const later = [
 ];
 
 test("a live approval rejection keeps its reason after history replaces the event window", () => {
-  const outcome = {approval:{decision:"denied",reason:"The task does not authorize this file",approval_id:"approval",stage_id:"source",mode:"auto"}};
+  const outcome = {approval:{decision:"denied",reason:"The task does not authorize this file",approval_id:"approval",stage_id:"source"}};
   const event = record(2,{type:"tool_finished",message_id:"request",call_id:"denied",name:"files__read_file",result_id:"result-denied",summary:"App operation was not approved",error:null,outcome});
   const live = activityTools([event],message,[])[0];
   const restored = activityTools([],message,[{seq:2,id:"result-denied",message_id:"request",call_id:"denied",name:"files__read_file",summary:"App operation was not approved",error:null,outcome}])[0];
@@ -30,8 +30,8 @@ test("a live approval rejection keeps its reason after history replaces the even
 
 test("permission references and grants survive live events being replaced by history pages", () => {
   for (const decision of ["application_required", "approved"] as const) {
-    const outcome = {approval:{decision,approval_id:"approval",stage_id:"source",mode:"auto"}};
-    const summary = {seq:2,id:"permission-result",message_id:"request",call_id:"permission-call",name:"actors__request_approval",summary:"Permission state",error:null,outcome};
+    const outcome = {approval:{decision,approval_id:"approval",stage_id:"source"}};
+    const summary = {seq:2,id:"permission-result",message_id:"request",call_id:"permission-call",name:"actors__appeal_approval",summary:"Permission state",error:null,outcome};
     const event = record(2,{type:"tool_finished",message_id:summary.message_id,call_id:summary.call_id,name:summary.name,result_id:summary.id,summary:summary.summary,error:null,outcome});
     let state = conversationReducer(initialConversation("worker"),{type:"event",record:event});
     const live = activityTools(state.events,message,state.tools)[0];
