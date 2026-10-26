@@ -17,6 +17,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let (command, arguments) = cli::parse_args();
+    let native_host_bridge = matches!(command, cli::Command::WebHost);
     if matches!(
         command,
         cli::Command::Serve | cli::Command::Start { .. } | cli::Command::Account { .. }
@@ -83,7 +84,16 @@ fn main() {
         .build()
         .into_diagnostic()
         .and_then(|runtime| {
-            runtime.block_on(dispatch(command, arguments, namespace, selected_root))
+            let result = runtime.block_on(dispatch(command, arguments, namespace, selected_root));
+            if native_host_bridge {
+                // Tokio stdin uses an uncancellable blocking read. The native
+                // client keeps that pipe open until this helper closes stdout;
+                // waiting for the read during runtime shutdown deadlocks their
+                // reconnect handshake after a service disconnect or timeout.
+                // This helper owns only transport copies, never App execution.
+                runtime.shutdown_background();
+            }
+            result
         });
     if let Err(error) = result {
         eprintln!("{error:?}");
