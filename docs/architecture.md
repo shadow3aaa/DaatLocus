@@ -692,6 +692,9 @@ Actor 直接关联的 Progress/Result 定位（非完整事件树；排除自身
 
 窗口清空锚点与按模型绑定的 token 校准持久化。每次成功请求使用新鲜的实际
 input usage 保守校准；低观测值不降低估算，缺失 usage 不复用旧观测。
+系统指令保持稳定，普通输入不额外呈现运行时请求 ID 或只读标志；关联和权限由
+运行时维护。历史按追加方式构造，恢复锚点不随当前输入改写。嵌套输入清空窗口后，
+原输入恢复时只在尾部补入其缺失的任务恢复信息，保留既有前缀和独立权限绑定。
 Commentary、仅 reasoning 的继续响应和多工具协议保持完整。请求重试有退避与
 取消检查；连续无内容响应的错误保护不构成正常任务轮数上限。
 
@@ -1457,8 +1460,9 @@ loads bounded history pages, applies model-bound budget calibration, admits the
 model request and resets an oversized window through the existing durable anchor.
 The runner retains execution, interruption and retry scheduling; `AgentContext`
 retains durable anchors/calibration/usage, not another copy of the working window.
-Per-input authority text is rendered once by `SystemPrompt`; dynamic inputs and
-tools are not part of the settings visualization.
+Runtime input IDs and read-only flags stay outside system instructions; input
+authority is enforced by the execution context. Dynamic inputs and tools are not
+part of the settings visualization.
 Owner-only `/v1/system-prompt?role=core|others` lists bounded role-wide static
 file metadata; Actor metadata, Skills catalogs and workspace AGENTS.md stay out
 of this visualization. Indexed file reads return at most 16 KiB at a UTF-8 boundary and require the assembly

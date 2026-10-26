@@ -18,15 +18,12 @@ impl ModelContext {
     pub async fn load(
         system: &ActorSystem,
         actor: &ActorRecord,
-        input: &MessageRecord,
         context: &AppToolExecutionContext,
         tools: Vec<AgentToolSpec>,
     ) -> Result<Self> {
         Ok(Self {
             system: AgentMessage::system(
-                SystemPrompt::load(system, actor, context)
-                    .await?
-                    .render_for_input(&input.id),
+                SystemPrompt::load(system, actor, context).await?.render(),
             ),
             tools,
             history: Vec::new(),
@@ -62,6 +59,22 @@ impl ModelContext {
         let actor = &current.actor_id;
         let start = system.store().context_start(actor)?;
         let anchor = system.store().actor(actor)?.context.anchor;
+        // An interrupted input may have lost its window to a nested reset.
+        // Restore only missing history at the tail; older input stays immutable.
+        if let Some(recovery) = &anchor
+            && recovery.message_id != current.id
+            && system
+                .store()
+                .history_page(actor, start.saturating_sub(1), Some(&current.id), 1)?
+                .is_empty()
+        {
+            let recovery = recovery
+                .for_input(&current.id, system.store().task_handoff(actor, &current.id))
+                .recovery_message();
+            system
+                .store()
+                .append_history(actor, &current.id, &[recovery])?;
+        }
         let mut after = start.saturating_sub(1);
         let mut history = Vec::new();
         self.history = loop {
@@ -74,10 +87,9 @@ impl ModelContext {
                 if seq == start
                     && let Some(recovery) = &anchor
                 {
-                    // Resolve the active input's task, never the task of a nested reset.
-                    row = recovery
-                        .for_input(&current.id, system.store().task_handoff(actor, &current.id))
-                        .recovery_message();
+                    // This is historical input. Retargeting it here changes the
+                    // entire prefix even when no further reset has occurred.
+                    row = recovery.recovery_message();
                 }
                 history.push(row);
             }

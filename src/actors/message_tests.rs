@@ -467,56 +467,91 @@ async fn core_explicitly_selects_task_link_visibility_without_changing_message_d
 
 #[tokio::test]
 async fn messages_interrupt_inference_and_resume_the_original_without_replaying_effects() {
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Calls(vec![AgentToolCall {
-            id: "write-once".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"one effect","expected_sha256":null}),
-        }]),
-        MockReply::Pending,
-        MockReply::Answer("Incoming message handled"),
-        MockReply::Answer("Original request finished"),
-    ]));
-    let (directory, system) = runtime(provider.clone()).await;
-    let original = enqueue_root(&system, "Original work");
-    wait_requests(&provider, 2).await;
-    let mut incoming = original.clone();
-    incoming.id = uuid::Uuid::new_v4().to_string();
-    incoming.source = MessageSource::Actor {
-        actor_id: "core".into(),
-    };
-    incoming.in_reply_to = Some(original.id.clone());
-    incoming.content = "New collaboration evidence".into();
-    let incoming = system.store().enqueue(incoming, None).unwrap();
-    system.wake("root");
-    assert_eq!(
-        wait_completed(&system, &incoming.id).await.reply.as_deref(),
-        Some("Incoming message handled")
-    );
-    assert_eq!(
-        wait_completed(&system, &original.id).await.reply.as_deref(),
-        Some("Original request finished")
-    );
-    assert!(provider.dropped.load(Ordering::Acquire));
-    {
-        let requests = provider.requests.lock();
-        assert!(requests[2].messages.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains("New collaboration evidence") && content.as_text().contains("Source: Actor core"))));
-        assert!(requests[3].messages.iter().any(|row| matches!(row, AgentMessage::Assistant { content, .. } if content == "Incoming message handled")));
+    for reset in [false, true] {
+        let provider = Arc::new(ReplayProvider::new(vec![
+            MockReply::Calls(vec![AgentToolCall {
+                id: "write-once".into(),
+                name: "files__write_file".into(),
+                arguments: json!({"path":"once.txt","content":"one effect","expected_sha256":null}),
+            }]),
+            MockReply::Pending,
+            MockReply::Answer("Incoming message handled"),
+            MockReply::Answer("Original request finished"),
+        ]));
+        let (directory, system) = runtime(provider.clone()).await;
+        let original = enqueue_root(&system, "Investigate original work.");
+        wait_requests(&provider, 2).await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        if reset {
+            *provider.inference_gate.lock() = Some(gate.clone());
+        }
+        let mut incoming = original.clone();
+        incoming.id = uuid::Uuid::new_v4().to_string();
+        incoming.source = MessageSource::Actor {
+            actor_id: "core".into(),
+        };
+        incoming.in_reply_to = Some(original.id.clone());
+        incoming.content = "New collaboration evidence".into();
+        let incoming = system.store().enqueue(incoming, None).unwrap();
+        system.wake("root");
+        if reset {
+            wait_requests(&provider, 3).await;
+            system
+                .store()
+                .reset_model_context("root", &incoming.id)
+                .unwrap();
+            gate.notify_one();
+        }
+        assert_eq!(
+            wait_completed(&system, &incoming.id).await.reply.as_deref(),
+            Some("Incoming message handled")
+        );
+        assert_eq!(
+            wait_completed(&system, &original.id).await.reply.as_deref(),
+            Some("Original request finished")
+        );
+        assert!(provider.dropped.load(Ordering::Acquire));
+        {
+            let requests = provider.requests.lock();
+            assert!(requests[2].messages.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains("New collaboration evidence") && content.as_text().contains("Source: Actor core"))));
+            assert!(requests[3].messages.iter().any(|row| matches!(row, AgentMessage::Assistant { content, .. } if content == "Incoming message handled")));
+            if reset {
+                let recovery = requests[3]
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|row| match row {
+                        AgentMessage::User { content } => Some(content.as_text()),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(
+                    recovery.contains("Investigate original work."),
+                    "{recovery}"
+                );
+                assert!(recovery.contains(&original.id));
+                assert!(!recovery.contains("New collaboration evidence"));
+            } else {
+                for pair in requests.windows(2) {
+                    assert!(pair[1].messages.starts_with(&pair[0].messages));
+                }
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("workspace/once.txt")).unwrap(),
+            "one effect"
+        );
+        assert_eq!(
+            system
+                .store()
+                .tool_summaries("root", &original.id, None, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        system.shutdown().await;
     }
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("workspace/once.txt")).unwrap(),
-        "one effect"
-    );
-    assert_eq!(
-        system
-            .store()
-            .tool_summaries("root", &original.id, None, 10)
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    system.shutdown().await;
 }
 
 #[tokio::test]

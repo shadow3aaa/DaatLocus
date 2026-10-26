@@ -4244,10 +4244,10 @@ async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker(
                 "exactly one execution per input, without replaying interrupted work"
             );
             assert!(
-                matches!(requests[0].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&active.id))
+                matches!(requests[0].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&active.content))
             );
             assert!(
-                matches!(requests[1].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&queued.id))
+                matches!(requests[1].messages.last(), Some(AgentMessage::User { content }) if content.as_text().contains(&queued.content))
             );
         }
         system.shutdown().await;
@@ -4346,6 +4346,110 @@ fn window_preserves_complete_multi_tool_protocol_and_encrypted_reasoning() {
         "ciphertext"
     );
     assert_eq!(window.messages.len(), 6);
+}
+
+#[tokio::test]
+async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
+    let (_directory, system, _) = paused_runtime().await;
+    system
+        .send_user("root", "Inspect the files.".into(), vec![], None)
+        .unwrap();
+    let first = system.store().claim_next("root").unwrap().unwrap();
+    let actor = system.execution_actor(&first).unwrap();
+    let context = system.execution_context(&actor, &first).unwrap();
+    let mut history = vec![AgentMessage::user_content(
+        system.message_content(&actor, &first, &context).unwrap(),
+    )];
+    // Enough settled history to exercise bounded multi-page loading.
+    for index in 0..150 {
+        let id = format!("read-{index}");
+        history.push(protocol(vec![call(&id)]));
+        history.push(AgentMessage::tool(
+            &id,
+            "files__read_file",
+            format!("result-{index}"),
+        ));
+    }
+    system
+        .store()
+        .append_history("root", &first.id, &history)
+        .unwrap();
+    let provider = BudgetProvider { tokens: 1_000_000 };
+    let baseline = TokenEstimateBaseline::default();
+    let mut window = ModelContext::load(&system, &actor, &context, vec![])
+        .await
+        .unwrap();
+    window
+        .reload(&system, &first, &provider, &baseline)
+        .unwrap();
+    let before = window
+        .request(&system, &first, &provider, &baseline)
+        .unwrap();
+    assert!(before.messages[1..] == history);
+
+    let pending = protocol(vec![call("pending")]);
+    system
+        .store()
+        .append_history("root", &first.id, std::slice::from_ref(&pending))
+        .unwrap();
+    window
+        .reload(&system, &first, &provider, &baseline)
+        .unwrap();
+    let unsettled = window
+        .request(&system, &first, &provider, &baseline)
+        .unwrap();
+    assert!(
+        unsettled.messages == before.messages,
+        "an incomplete group must not disturb the settled prefix"
+    );
+
+    let result = AgentMessage::tool("pending", "files__read_file", "pending result");
+    system
+        .store()
+        .append_history(
+            "root",
+            &first.id,
+            &[
+                result.clone(),
+                AgentMessage::assistant("Inspection complete."),
+            ],
+        )
+        .unwrap();
+    system
+        .store()
+        .finish_message(
+            &first.id,
+            MessageStatus::Completed,
+            Some("Inspection complete."),
+            None,
+        )
+        .unwrap();
+    system
+        .send_user("root", "Inspect the next file.".into(), vec![], None)
+        .unwrap();
+    let second = system.store().claim_next("root").unwrap().unwrap();
+    let context = system.execution_context(&actor, &second).unwrap();
+    system
+        .store()
+        .append_history(
+            "root",
+            &second.id,
+            &[AgentMessage::user_content(
+                system.message_content(&actor, &second, &context).unwrap(),
+            )],
+        )
+        .unwrap();
+    let mut next = ModelContext::load(&system, &actor, &context, vec![])
+        .await
+        .unwrap();
+    next.reload(&system, &second, &provider, &baseline).unwrap();
+    let after = next
+        .request(&system, &second, &provider, &baseline)
+        .unwrap();
+    assert!(after.messages.starts_with(&before.messages));
+    assert!(after.messages[before.messages.len()] == pending);
+    assert!(after.messages[before.messages.len() + 1] == result);
+    system.shutdown().await;
 }
 
 #[test]
@@ -5759,7 +5863,7 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
 }
 
 #[tokio::test]
-async fn runner_prompt_retains_identity_instructions_and_current_request_read_only() {
+async fn runner_prompt_keeps_identity_stable_across_request_authority() {
     let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
     let mut actor = system.actor("root").unwrap();
     actor.config.instructions = "Keep the assigned project context.".into();
@@ -5769,6 +5873,7 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
     )
     .unwrap();
     let context = system.owner_app_context().unwrap();
+    let mut previous_prompt = None;
     for read_only in [false, true] {
         actor.remote_read_only = read_only;
         let prompt = SystemPrompt::load(&system, &actor, &context)
@@ -5776,13 +5881,16 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
             .unwrap()
             .render();
         let expected = format!(
-            "Actor name: {}\nActor ID: {}\nWorkspace: {}\nCurrent request read-only: {}\n",
+            "Actor name: {}\nActor ID: {}\nWorkspace: {}\n",
             actor.config.name,
             actor.id,
             actor.config.workspace.display(),
-            read_only
         );
         assert!(prompt.starts_with(&expected));
+        if let Some(previous) = &previous_prompt {
+            assert_eq!(&prompt, previous);
+        }
+        previous_prompt = Some(prompt.clone());
         assert_shared_actor_instructions(&prompt);
         assert!(!prompt.contains("You are DaatLocus,"));
         assert!(!prompt.contains("{{account_name}}"));
@@ -5810,6 +5918,57 @@ async fn runner_prompt_retains_identity_instructions_and_current_request_read_on
 }
 
 #[tokio::test]
+async fn runner_preserves_cached_prefix_across_input_boundaries() {
+    for actor_id in [crate::stage::shared::ACTOR_ID, "root"] {
+        for reset in [false, true] {
+            let provider = Arc::new(ReplayProvider::new(vec![
+                MockReply::Answer("First response."),
+                MockReply::Answer("Second response."),
+                MockReply::Answer("Third response."),
+            ]));
+            let (_directory, system) = runtime(provider.clone()).await;
+            let host = crate::stage::host::Host::load(system.clone()).unwrap();
+            host.initialize(true).unwrap();
+            system.install_local_core().unwrap();
+            for (index, content) in ["First input.", "Second input.", "Third input."]
+                .into_iter()
+                .enumerate()
+            {
+                let input = system
+                    .send_user(actor_id, content.into(), vec![], None)
+                    .unwrap();
+                let result = wait_completed(&system, &input.id).await;
+                assert_eq!(
+                    result.status,
+                    MessageStatus::Completed,
+                    "{:?}",
+                    result.error
+                );
+                if reset && index == 0 {
+                    system
+                        .store()
+                        .reset_model_context(actor_id, &input.id)
+                        .unwrap();
+                }
+            }
+            let requests = provider.requests.lock().clone();
+            assert_eq!(requests.len(), 3);
+            for pair in requests[usize::from(reset)..].windows(2) {
+                assert!(
+                    pair[1].messages.starts_with(&pair[0].messages),
+                    "{actor_id}, reset={reset}: new inputs must preserve the previous request as a cacheable prefix"
+                );
+                assert_eq!(
+                    serde_json::to_value(&pair[0].tools).unwrap(),
+                    serde_json::to_value(&pair[1].tools).unwrap()
+                );
+            }
+            system.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn runner_prompt_keeps_current_request_authority_and_task_material_guidance() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Answer("Done.")]));
     let (_directory, system) = runtime(provider.clone()).await;
@@ -5829,8 +5988,13 @@ async fn runner_prompt_keeps_current_request_authority_and_task_material_guidanc
                 _ => None,
             })
             .unwrap();
-        let request_id = format!("Current request ID: {}.", input.id);
-        assert_eq!(prompt.matches(&request_id).count(), 1);
+        assert!(
+            !serde_json::to_string(&requests[0].messages)
+                .unwrap()
+                .contains(&input.id),
+            "ordinary inputs must not expose their runtime correlation ID"
+        );
+        assert!(requests[0].messages.iter().any(|message| matches!(message, AgentMessage::User {content} if content.as_text().ends_with("Answer from this context."))));
         assert!(
             prompt.contains("Act within the current request's authority and the device sandbox.")
         );
