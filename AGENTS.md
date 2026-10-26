@@ -114,7 +114,10 @@ client are connected.
 - Project, investigation and general Actors use the same core and device Apps.
   Every Actor on a device uses the account's shared sandbox scopes. Workspace is
   an execution directory, never a permission boundary. Files, Terminal and MCP
-  use the same resolved filesystem authority. Descendant/background processes
+  default to full-disk reads under OS permissions; writes require the shared device
+  writable scopes. Explicit denials, remote authority and resource ownership still
+  apply. Do not replace this default with runtime/PATH read allowlists.
+  Descendant/background processes
   inherit that authority without dropping grants or gaining host-service access.
   Keep native isolation, process cleanup and authenticated remote restrictions.
 - Guest conversation sharing, PIN sessions and quick-tunnel publication are removed.

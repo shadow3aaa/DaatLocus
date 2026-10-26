@@ -1,5 +1,6 @@
 //! Shared operating-system runtime reads for host I/O and native processes.
-//! Private user and application data directories require ordinary scope grants.
+//! These minimum roots also support explicitly read-restricted low-level policies;
+//! the account's default full-disk reads do not depend on this baseline.
 use std::{
     io,
     path::{Path, PathBuf},

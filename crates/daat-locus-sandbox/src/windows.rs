@@ -800,7 +800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_is_preserved_but_command_discovery_requires_tool_directory_access() {
+    async fn path_discovery_and_execution_support_full_disk_reads_without_granting_writes() {
         if !crate::test_support::native_sandbox_available() {
             return;
         }
@@ -819,13 +819,14 @@ mod tests {
             .remove(0)
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let path = format!("{};{}", tools.display(), shell.parent().unwrap().display());
-        for allow_tools in [false, true] {
+        for (allow_tools, full_disk_read) in [(false, false), (true, false), (false, true)] {
             let mut policy = policy(&root);
+            policy.filesystem.full_disk_read = full_disk_read;
             if allow_tools {
                 policy.filesystem.readable_roots.push(tools.clone());
             }
             let script = format!(
-                "$ErrorActionPreference='Stop'; if ($env:PATH -cne {}) {{ exit 10 }}; if (Get-Command dl-path-fixture.cmd -ErrorAction SilentlyContinue) {{ [Console]::WriteLine('resolved') }} else {{ [Console]::WriteLine('unresolved') }}",
+                "$ErrorActionPreference='Stop'; if ($env:PATH -cne {}) {{ exit 10 }}; if (Get-Command dl-path-fixture.cmd -ErrorAction SilentlyContinue) {{ dl-path-fixture.cmd; if ($LASTEXITCODE -ne 0) {{ exit 11 }} }} else {{ [Console]::WriteLine('unresolved') }}",
                 quote(Path::new(&path)),
             );
             let child = spawn_restricted_async(
@@ -851,8 +852,8 @@ mod tests {
             assert!(status.success(), "{status}; stdout={out}; stderr={err}");
             assert_eq!(
                 out.trim(),
-                if allow_tools {
-                    "resolved"
+                if allow_tools || full_disk_read {
+                    "fixture-ran"
                 } else {
                     "unresolved"
                 }

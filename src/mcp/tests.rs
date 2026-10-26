@@ -449,7 +449,7 @@ async fn stdio_uses_native_sandbox_explicit_environment_and_reaps_processes() {
         .unwrap();
     assert_eq!(
         outside.model_content.as_deref(),
-        Some("explicit|ambient-fixture|denied|write-denied")
+        Some("explicit|ambient-fixture|private|write-denied")
     );
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private");
     let running_pid: u32 = std::fs::read_to_string(workspace.join("server.pid"))

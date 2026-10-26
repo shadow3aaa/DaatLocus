@@ -307,9 +307,14 @@ async fn core_creation_initial_authorization_is_shared_persistent_and_never_revi
             .is_path_writable(&output.join("future/file.txt"))
     );
     assert!(
-        !fresh
+        fresh
             .sandbox_policy
             .is_path_readable(&directory.path().join("unrequested"))
+    );
+    assert!(
+        !fresh
+            .sandbox_policy
+            .is_path_writable(&directory.path().join("unrequested"))
     );
     assert!(
         !fresh
@@ -489,7 +494,7 @@ async fn concurrent_applications_share_one_source_record_and_one_automatic_revie
             &message,
             &control,
             &base,
-            scope_request(&result, &outside, false),
+            scope_request(&result, &outside, true),
             application(),
         )
     };
@@ -538,7 +543,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
             &message,
             &control,
             &base,
-            scope_request(&result, &outside, false),
+            scope_request(&result, &outside, true),
             application(),
         )
     };
@@ -551,7 +556,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
             .execution_context(&actor, &message)
             .unwrap()
             .sandbox_policy
-            .is_path_readable(&outside)
+            .is_path_writable(&outside)
     );
     let again = submit().await.unwrap();
     assert_eq!(again.id, record.id);
@@ -563,7 +568,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
         &message,
         &control,
         &base,
-        scope_request(&result, &nested, false),
+        scope_request(&result, &nested, true),
         application(),
     )
     .await
@@ -571,7 +576,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
     assert_ne!(narrowed.id, record.id);
     assert_eq!(narrowed.previous_denials, vec![record.id.clone()]);
     assert_eq!(
-        narrowed.requested.readable_roots,
+        narrowed.requested.writable_roots,
         vec![crate::actors::permissions::canonical_path(&nested).unwrap()]
     );
     assert!(narrowed.appeal.is_some());
@@ -581,20 +586,20 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
         &message,
         &control,
         &base,
-        scope_request(&result, &nested, false),
+        scope_request(&result, &nested, true),
         application(),
     )
     .await
     .unwrap();
     assert_eq!(narrowed_again.id, narrowed.id);
-    for (path, write) in [(outside.as_path(), true), (directory.path(), false)] {
+    {
         let expanded = runtime::submit(
             &system,
             &actor,
             &message,
             &control,
             &base,
-            scope_request(&result, path, write),
+            scope_request(&result, directory.path(), true),
             application(),
         )
         .await
@@ -625,8 +630,9 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
         .unwrap()
         .sandbox_policy;
     assert!(policy.is_path_readable(&nested.join("future.txt")));
-    assert!(!policy.is_path_readable(&outside.join("sibling.txt")));
-    assert!(!policy.is_path_writable(&nested.join("future.txt")));
+    assert!(policy.is_path_readable(&outside.join("sibling.txt")));
+    assert!(!policy.is_path_writable(&outside.join("sibling.txt")));
+    assert!(policy.is_path_writable(&nested.join("future.txt")));
     assert_eq!(reviewer.requests.lock().len(), 1);
     // An independent scope still receives automatic review and can be granted
     // without adding another Core input.
@@ -664,7 +670,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
     .unwrap();
     assert_eq!(from_approval.id, record.id);
     assert_eq!(reviewer.requests.lock().len(), 2);
-    assert_eq!(core_inputs(&system).len(), 4);
+    assert_eq!(core_inputs(&system).len(), 3);
     system.shutdown().await;
 }
 
@@ -713,7 +719,7 @@ async fn atomic_write_reviews_the_first_missing_directory_before_creating_its_hi
 }
 
 #[tokio::test]
-async fn suspended_read_refusal_stays_local_until_explicit_application_and_is_reviewed_once() {
+async fn suspended_write_refusal_stays_local_until_explicit_application_and_is_reviewed_once() {
     let reviewer = Arc::new(Reviewer::new(ReviewReply::Json(
         json!({"decision":"deny","reason":"Owner authorization is needed"}),
     )));
@@ -725,10 +731,19 @@ async fn suspended_read_refusal_stays_local_until_explicit_application_and_is_re
     let mut context = system.execution_context(&actor, &message).unwrap();
     runtime::bind_access_broker(&mut context, &system, &actor, &message, &call, &control);
     let filesystem = crate::sandbox::access::FileSystem::new(&context);
-    let first = filesystem.read_bytes(&secret, 1024).await.unwrap_err();
+    let args = crate::file_io::WriteFileArgs {
+        path: directory
+            .path()
+            .join("unapproved-write.txt")
+            .to_string_lossy()
+            .into_owned(),
+        content: "forbidden".into(),
+        expected_sha256: None,
+    };
+    let first = filesystem.write_file(&args).await.unwrap_err();
     let refusal = rejection(&first).expect("sandbox review must return an immutable refusal");
     assert!(core_inputs(&system).is_empty());
-    let repeated = filesystem.read_bytes(&secret, 1024).await.unwrap_err();
+    let repeated = filesystem.write_file(&args).await.unwrap_err();
     assert_eq!(
         rejection(&repeated).unwrap().approval_id,
         refusal.approval_id
@@ -756,8 +771,13 @@ async fn suspended_read_refusal_stays_local_until_explicit_application_and_is_re
             .execution_context(&actor, &message)
             .unwrap()
             .sandbox_policy
-            .is_path_readable(&secret)
+            .is_path_writable(&secret)
     );
+    assert_eq!(
+        filesystem.read_bytes(&secret, 1024).await.unwrap(),
+        b"private source"
+    );
+    assert!(!directory.path().join("unapproved-write.txt").exists());
     system.shutdown().await;
 }
 
@@ -882,7 +902,7 @@ async fn readonly_execution_provenance_and_another_inputs_result_cannot_obtain_s
             &other_input,
             &ActorControl::default(),
             &other_base,
-            scope_request(&result, &outside, false),
+            scope_request(&result, &outside, true),
             application()
         )
         .await

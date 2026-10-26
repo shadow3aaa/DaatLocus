@@ -314,7 +314,18 @@ mod tests {
             png
         );
         let outside_call = call("path", &outside.to_string_lossy());
-        assert!(app.execute_tool(&outside_call, &context).await.is_err());
+        assert!(app.execute_tool(&outside_call, &context).await.is_ok());
+        let mut denied_context = context.clone();
+        denied_context
+            .sandbox_policy
+            .filesystem
+            .deny_read_paths
+            .push(outside.clone());
+        assert!(
+            app.execute_tool(&outside_call, &denied_context)
+                .await
+                .is_err()
+        );
         for reference in [
             foreign.id.clone(),
             foreign.uri("other-worker"),

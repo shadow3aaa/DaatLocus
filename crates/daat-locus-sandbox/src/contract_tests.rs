@@ -281,17 +281,22 @@ async fn native_children_and_grandchildren_inherit_granted_and_denied_scopes() {
     if !native_sandbox_available() {
         return;
     }
-    let temp = scoped_directory();
-    let root = temp.path().join("work");
-    let outside = temp.path().join("outside");
-    std::fs::create_dir(&root).unwrap();
-    std::fs::create_dir(&outside).unwrap();
-    #[cfg(windows)]
-    let (name, body) = (
-        "descendant.ps1",
-        r#"
-param([string]$root, [string]$outside, [int]$depth)
+    for full_disk_read in [false, true] {
+        let temp = scoped_directory();
+        let root = temp.path().join("work");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("input.txt"), "outside source").unwrap();
+        #[cfg(windows)]
+        let (name, body) = (
+            "descendant.ps1",
+            r#"
+param([string]$root, [string]$outside, [int]$depth, [int]$readable)
 $ErrorActionPreference = 'Stop'
+$read = $false
+try { $read = [IO.File]::ReadAllText((Join-Path $outside 'input.txt')) -ceq 'outside source' } catch [UnauthorizedAccessException] {} catch { if (($_.Exception.HResult -band 0xffff) -ne 5 -and ($_.Exception.InnerException.HResult -band 0xffff) -ne 5) { throw } }
+if ($read -ne ($readable -eq 1)) { throw 'descendant lost read policy' }
 [IO.File]::WriteAllText((Join-Path $root "$depth.txt"), 'allowed')
 $blocked = $false
 try { [IO.File]::WriteAllText((Join-Path $outside "$depth.txt"), 'forbidden') }
@@ -299,50 +304,58 @@ catch [UnauthorizedAccessException] { $blocked = $true }
 catch { if (($_.Exception.HResult -band 0xffff) -eq 5 -or ($_.Exception.InnerException.HResult -band 0xffff) -eq 5) { $blocked = $true } else { throw } }
 if (-not $blocked) { throw 'descendant escaped write isolation' }
 if ($depth -lt 2) {
-    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $root $outside ($depth + 1)
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $root $outside ($depth + 1) $readable
     if ($LASTEXITCODE -ne 0) { throw 'descendant failed' }
 }
 "#,
-    );
-    #[cfg(unix)]
-    let (name, body) = (
-        "descendant.sh",
-        r#"
+        );
+        #[cfg(unix)]
+        let (name, body) = (
+            "descendant.sh",
+            r#"
 set -eu
 root="$1"; outside="$2"; depth="$3"
+if [ "$4" = 1 ]; then
+    [ "$(cat "$outside/input.txt")" = 'outside source' ]
+elif cat "$outside/input.txt" >/dev/null 2>&1; then exit 42; fi
 printf allowed > "$root/$depth.txt"
 if (printf forbidden > "$outside/$depth.txt") 2>/dev/null; then exit 41; fi
-if [ "$depth" -lt 2 ]; then /bin/sh "$0" "$root" "$outside" "$((depth + 1))"; fi
+if [ "$depth" -lt 2 ]; then /bin/sh "$0" "$root" "$outside" "$((depth + 1))" "$4"; fi
 "#,
-    );
-    std::fs::write(root.join(name), body).unwrap();
-    #[cfg(windows)]
-    let script = script_with_root(
-        &root,
-        &format!(
-            "& (Join-Path $root '{name}') $root '{}' 0; if (-not $?) {{ exit 1 }}",
-            outside.to_str().unwrap().replace('\'', "''")
-        ),
-    );
-    #[cfg(unix)]
-    let script = script_with_root(
-        &root,
-        &format!(
-            "/bin/sh \"$root/{name}\" \"$root\" '{}' 0",
-            outside.to_str().unwrap().replace('\'', "'\\''")
-        ),
-    );
-    let (status, out, err) = collect(launch(&policy(&root), &root, script)).await;
-    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
-    for depth in 0..=2 {
-        assert_eq!(
-            std::fs::read_to_string(root.join(format!("{depth}.txt"))).unwrap(),
-            "allowed"
         );
-        assert!(
-            !outside.join(format!("{depth}.txt")).exists(),
-            "descendant {depth} escaped sandbox"
+        std::fs::write(root.join(name), body).unwrap();
+        #[cfg(windows)]
+        let script = script_with_root(
+            &root,
+            &format!(
+                "& (Join-Path $root '{name}') $root '{}' 0 {}; if (-not $?) {{ exit 1 }}",
+                outside.to_str().unwrap().replace('\'', "''"),
+                u8::from(full_disk_read)
+            ),
         );
+        #[cfg(unix)]
+        let script = script_with_root(
+            &root,
+            &format!(
+                "/bin/sh \"$root/{name}\" \"$root\" '{}' 0 {}",
+                outside.to_str().unwrap().replace('\'', "'\\''"),
+                u8::from(full_disk_read)
+            ),
+        );
+        let mut sandbox = policy(&root);
+        sandbox.filesystem.full_disk_read = full_disk_read;
+        let (status, out, err) = collect(launch(&sandbox, &root, script)).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        for depth in 0..=2 {
+            assert_eq!(
+                std::fs::read_to_string(root.join(format!("{depth}.txt"))).unwrap(),
+                "allowed"
+            );
+            assert!(
+                !outside.join(format!("{depth}.txt")).exists(),
+                "descendant {depth} escaped sandbox"
+            );
+        }
     }
 }
 

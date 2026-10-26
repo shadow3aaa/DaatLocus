@@ -199,7 +199,7 @@ pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<()> {
 
 pub(crate) fn policy(scopes: &[SandboxScope], read_only: bool) -> super::RuntimeSandboxPolicy {
     let mut filesystem = super::FileSystemSandboxPolicy {
-        full_disk_read: false,
+        full_disk_read: true,
         deny_all_writes: read_only,
         full_disk_write: false,
         readable_roots: vec![],
@@ -255,6 +255,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_full_disk_reads_preserve_write_boundaries_and_explicit_denials() {
+        let directory = crate::sandbox::test_support::scoped_directory();
+        let source = directory.path().join("source.txt");
+        std::fs::write(&source, "host-readable bytes").unwrap();
+        let mut sandbox = policy(&[], false);
+        assert!(sandbox.filesystem.full_disk_read);
+        assert!(!sandbox.filesystem.full_disk_write);
+        assert_eq!(
+            crate::file_io::read_bytes(&source, 1024, &sandbox).unwrap(),
+            b"host-readable bytes"
+        );
+        assert!(!sandbox.is_path_writable(&source));
+        sandbox.filesystem.deny_read_paths.push(source.clone());
+        assert!(crate::file_io::read_bytes(&source, 1024, &sandbox).is_err());
+        let readonly = policy(
+            &[SandboxScope::filesystem(directory.path(), true).unwrap()],
+            true,
+        );
+        assert!(readonly.is_path_readable(&source));
+        assert!(!readonly.is_path_writable(&source));
+    }
+
+    #[test]
     fn newly_created_file_keeps_its_remembered_write_scope() {
         let directory = crate::sandbox::test_support::scoped_directory();
         let file = directory.path().join("new-file.txt");
@@ -285,7 +308,8 @@ mod tests {
         .expect("creation must not revoke the scope just approved for this file");
         assert_eq!(read.content, "remember this file");
         assert!(after.is_path_writable(&file));
-        assert!(!after.is_path_readable(&directory.path().join("unapproved-sibling.txt")));
+        assert!(after.is_path_readable(&directory.path().join("unapproved-sibling.txt")));
+        assert!(!after.is_path_writable(&directory.path().join("unapproved-sibling.txt")));
     }
 
     #[cfg(windows)]

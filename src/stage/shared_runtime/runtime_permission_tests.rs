@@ -217,8 +217,7 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         refused.payload["approval"]["approval_id"],
         "source-denied-approval"
     );
-    // System temp is already readable by native processes. Exercise a real
-    // missing scope instead of requesting an approval for an exempt path.
+    // Reads need no grant. Exercise a missing write scope outside system temp.
     let extra_root = crate::sandbox::test_support::scoped_directory();
     let extra = extra_root.path().join("extra-scope");
     std::fs::create_dir(&extra).unwrap();
@@ -229,12 +228,12 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
             input,
             crate::actors::runtime_permissions::ApplicationSource::ToolResult {
                 tool_result_id: reference.tool_result_id,
-                readable_roots: vec![extra.clone()],
-                writable_roots: vec![],
+                readable_roots: vec![],
+                writable_roots: vec![extra.clone()],
             },
             crate::actors::ReviewApplication {
                 task: "Inspect fixture".into(),
-                reason: "Read the exact additional fixture directory".into(),
+                reason: "Write the exact additional fixture directory".into(),
             },
         )
         .await
@@ -258,7 +257,7 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
             )
             .unwrap()
             .sandbox_policy
-            .is_path_readable(&extra)
+            .is_path_writable(&extra)
     );
     // Losing native execution authority must preserve an uncertain result,
     // cancel the suspended future and never replay an operation.

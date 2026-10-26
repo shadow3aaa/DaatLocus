@@ -27,7 +27,7 @@ async fn actors_with_different_workspaces_execute_files_against_the_same_device_
     let shared = workspace.join("shared.txt");
     let outside = ungranted.join("outside.txt");
     std::fs::write(&shared, "shared device content\n").unwrap();
-    std::fs::write(&outside, "not authorized by choosing a workspace\n").unwrap();
+    std::fs::write(&outside, "readable without a workspace grant\n").unwrap();
     let system = ActorSystem::open(
         root.path().join("data"),
         workspace.clone(),
@@ -84,18 +84,27 @@ async fn actors_with_different_workspaces_execute_files_against_the_same_device_
         };
         let result = files.execute_tool(&read(&shared), context).await.unwrap();
         assert_eq!(result.payload["content"], "shared device content\n");
+        let read_outside = files.execute_tool(&read(&outside), context).await.unwrap();
+        assert_eq!(
+            read_outside.payload["content"],
+            "readable without a workspace grant\n"
+        );
         let error = files
-            .execute_tool(&read(&outside), context)
+            .execute_tool(&AgentToolCall {
+                id: "ungranted-write".into(), name: "write_file".into(),
+                arguments: json!({"path":ungranted.join("new.txt"),"content":"forbidden","expected_sha256":null}),
+            }, context)
             .await
             .unwrap_err();
         let denial = error
             .downcast_ref::<daat_locus::sandbox::AccessDenied>()
             .expect("actual typed sandbox denial");
-        assert_eq!(denial.record.access, daat_locus::sandbox::Access::Read);
+        assert_eq!(denial.record.access, daat_locus::sandbox::Access::Write);
         assert_eq!(
             std::fs::canonicalize(&denial.record.path).unwrap(),
-            std::fs::canonicalize(&outside).unwrap()
+            std::fs::canonicalize(&ungranted).unwrap()
         );
+        assert!(!ungranted.join("new.txt").exists());
     }
     system.shutdown().await;
 }

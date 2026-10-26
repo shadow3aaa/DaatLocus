@@ -5879,7 +5879,7 @@ impl crate::app::App for RuntimeScopeFixture {
         if let Some(target) = &self.denied_target {
             context
                 .sandbox_policy
-                .ensure_path_readable(target, "fixture input")?;
+                .ensure_path_writable(target, "fixture output")?;
         }
         Ok(crate::app::AppToolExecutionResult::new(
             "Synthetic output",
@@ -5959,7 +5959,7 @@ async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app(
     let request = AgentToolCall {
         id: "scope-application".into(),
         name: "appeal_approval".into(),
-        arguments: json!({"stage_id":metadata["stage_id"],"approval_id":null,"tool_result_id":metadata["tool_result_id"],"readable_roots":[root],"writable_roots":[],"explanation":"Read the exact requested additional fixture"}),
+        arguments: json!({"stage_id":metadata["stage_id"],"approval_id":null,"tool_result_id":metadata["tool_result_id"],"readable_roots":[],"writable_roots":[root],"explanation":"Write the exact requested additional fixture"}),
     };
     let approved = crate::app::App::execute_tool(&mut actors, &request, &context)
         .await
@@ -6086,7 +6086,7 @@ async fn runtime_scope_typed_app_denial_and_bounded_output_keep_consumable_refer
         super::super::ApprovalDecision::ApplicationRequired
     );
     assert_eq!(
-        approval.requested.readable_roots,
+        approval.requested.writable_roots,
         vec![target.canonicalize().unwrap()]
     );
     assert_eq!(counter.load(Ordering::SeqCst), 1);
