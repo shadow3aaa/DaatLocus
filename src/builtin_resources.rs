@@ -33,6 +33,10 @@ const FILES: &[(&str, &[u8])] = &[
         "skills/android-gui-use/SKILL.md",
         include_bytes!("builtin_skills/android-gui-use/SKILL.md"),
     ),
+    (
+        "skills/mcp-server-install/SKILL.md",
+        include_bytes!("builtin_skills/mcp-server-install/SKILL.md"),
+    ),
 ];
 
 pub(crate) fn publish(temporary: &RuntimeTemp) -> Result<Vec<BuiltinResource>> {
