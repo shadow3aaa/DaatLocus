@@ -62,6 +62,7 @@ struct Inner {
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
+    instructions: crate::instruction_layers::InstructionStore,
     #[cfg(windows)]
     computer_workspace: Mutex<Option<Arc<crate::computer_use_app::Workspace>>>,
     workspace: PathBuf,
@@ -405,6 +406,12 @@ impl ActorSystem {
                 #[cfg(windows)]
                 computer_workspace: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
+                instructions: crate::instruction_layers::InstructionStore::open(
+                    &data_dir.join("account"),
+                    store
+                        .public_stage_id()
+                        .map_err(|error| miette::miette!("{error}"))?,
+                )?,
                 workspace,
                 store,
                 config: RwLock::new(config),
@@ -564,6 +571,9 @@ impl ActorSystem {
     }
     pub fn account_credentials_dir(&self) -> PathBuf {
         self.inner.data_dir.join("account")
+    }
+    pub fn instructions(&self) -> &crate::instruction_layers::InstructionStore {
+        &self.inner.instructions
     }
     pub(crate) async fn sudo_administrator(&self) -> Result<Arc<crate::sudo_host::Client>> {
         let mut host = self.inner.sudo_host.lock().await;

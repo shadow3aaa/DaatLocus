@@ -33,6 +33,105 @@ mod backpressure_tests {
         },
     };
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn account_instruction_files_sync_in_chunks_and_live_edits_flow_both_ways() {
+        use crate::instruction_layers::Role;
+        let directory = tempfile::tempdir().unwrap();
+        async fn host(path: std::path::PathBuf) -> Arc<Host> {
+            Host::load(
+                ActorSystem::open_account_gated(
+                    path.join("data"),
+                    path.join("workspace"),
+                    Config::default(),
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap()
+        }
+        let a = host(directory.path().join("a")).await;
+        let b = host(directory.path().join("b")).await;
+        a.initialize(true).unwrap();
+        let membership = a
+            .enroll_authenticated_device(&b.initialize(false).unwrap())
+            .unwrap();
+        b.join(membership, &a.account_id().unwrap()).unwrap();
+        for (local, remote) in [(&a, &b), (&b, &a)] {
+            let ledger = StageLedger::attach(local.system.store(), local.local);
+            let nonce = Uuid::new_v4();
+            ledger
+                .prepare_connection(remote.local, 1, nonce, now())
+                .unwrap();
+            ledger
+                .commit_generation(remote.local, 0, 1, nonce, now())
+                .unwrap();
+        }
+        let file = a
+            .system
+            .instructions()
+            .save(
+                None,
+                None,
+                "shared",
+                "Large instructions 中文\n".repeat(7000),
+            )
+            .unwrap();
+        a.system
+            .instructions()
+            .replace(Role::Core, vec![file.id.clone()], |_| Ok(()))
+            .unwrap();
+        let (left, right) = tokio::io::duplex(4096);
+        let left = PeerChannel::stream(
+            transport::tls::VerifiedPeer::test_peer(&b.profile().unwrap()),
+            left,
+            |_, _| Ok(()),
+        );
+        let right = PeerChannel::stream(
+            transport::tls::VerifiedPeer::test_peer(&a.profile().unwrap()),
+            right,
+            |_, _| Ok(()),
+        );
+        let (left, _) = PeerLink::new(a.clone(), left, 1);
+        let (right, _) = PeerLink::new(b.clone(), right, 1);
+        let tasks = [tokio::spawn(left.run()), tokio::spawn(right.run())];
+        let wait_for = |target: Arc<Host>, expected: crate::instruction_layers::Library| async move {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while target.system.instructions().snapshot() != expected {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("signed instruction replication did not converge");
+        };
+        wait_for(b.clone(), a.system.instructions().snapshot()).await;
+        let edited = b
+            .system
+            .instructions()
+            .save(
+                Some(&file.id),
+                Some(&file.revision()),
+                "shared",
+                "An edit from the second device".into(),
+            )
+            .unwrap();
+        b.system
+            .instructions()
+            .replace(Role::Others, vec![edited.id], |_| Ok(()))
+            .unwrap();
+        wait_for(a.clone(), b.system.instructions().snapshot()).await;
+        assert!(
+            tasks.iter().all(|task| !task.is_finished()),
+            "replication closed the peer channel"
+        );
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+        for host in [a, b] {
+            host.system.shutdown().await;
+        }
+    }
+
     #[tokio::test]
     async fn content_window_fetches_ahead_accepts_reordering_and_resumes_verified_parts() {
         use crate::stage::{
@@ -441,6 +540,7 @@ enum Pending {
     Directory,
     AccountCredentials,
     AccountConfiguration,
+    AccountInstructions,
     Members,
     Revocations,
     Snapshot { actor: ActorAddress },
@@ -449,6 +549,7 @@ enum Waiter {
     Input(Box<Envelope>),
     Replica(ActorAddress),
     Fetch(oneshot::Sender<Result<Vec<u8>>>),
+    Instructions(crate::accounts::configuration::Record),
 }
 struct Download {
     deadline: i64,
@@ -473,6 +574,7 @@ pub struct PeerLink {
     sent_device_name: Option<String>,
     sent_account_binding: Option<String>,
     sent_configuration_binding: Option<String>,
+    sent_instruction_binding: Option<String>,
     sent_recovery_status: Option<super::recovery::Status>,
     notice_cursor: i64,
     sent_revocations: std::collections::HashSet<super::StageId>,
@@ -511,6 +613,7 @@ impl PeerLink {
                 sent_device_name: None,
                 sent_account_binding: None,
                 sent_configuration_binding: None,
+                sent_instruction_binding: None,
                 sent_recovery_status: None,
                 notice_cursor: 0,
                 sent_revocations: std::collections::HashSet::new(),
@@ -708,6 +811,13 @@ impl PeerLink {
                 Pending::AccountConfiguration,
                 Class::Control,
             )?;
+            self.request(
+                Body::AccountInstructionsQuery {
+                    known_binding: self.host.system.instructions().sync_binding(),
+                },
+                Pending::AccountInstructions,
+                Class::Control,
+            )?;
         }
         self.request(
             Body::DirectoryQuery {
@@ -737,6 +847,7 @@ impl PeerLink {
         self.flush()?;
         let account_store = self.host.accounts.clone();
         let configuration_store = self.host.configurations.clone();
+        let instruction_system = self.host.system.clone();
         let changes = self.host.system.store().changed();
         let write_ready = self.channel.sender.write_notification();
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -763,6 +874,9 @@ impl PeerLink {
             let configuration_changed = configuration_store.changed().notified();
             tokio::pin!(configuration_changed);
             configuration_changed.as_mut().enable();
+            let instructions_changed = instruction_system.instructions().changed().notified();
+            tokio::pin!(instructions_changed);
+            instructions_changed.as_mut().enable();
             tokio::pin!(changed);
             changed.as_mut().enable();
             tokio::select! {
@@ -773,6 +887,7 @@ impl PeerLink {
                 _=changed=>{if let Err(error)=self.publish().and_then(|_|self.flush()){break Err(error);}},
                 _=account_changed=>{if let Err(error)=self.publish_accounts(){break Err(error);}},
                 _=configuration_changed=>{if let Err(error)=self.publish_configuration(){break Err(error);}},
+                _=instructions_changed=>{if let Err(error)=self.publish_instructions(){break Err(error);}},
                 _=heartbeat.tick()=>{
                     if StageLedger::attach(self.host.system.store(),self.host.local).peer(self.channel.peer.stage_id(),now()).is_err(){break Err(StageError::Forbidden("Peer authorization expired"));}
                     let expired_downloads=self.downloads.iter().filter(|(_,d)|d.deadline<=now()).map(|(hash,_)|hash.clone()).collect::<Vec<_>>();
@@ -1013,6 +1128,52 @@ impl PeerLink {
         }));
         Ok(())
     }
+    fn publish_instructions(&mut self) -> Result<()> {
+        if self.deferred.len() >= 8 || self.account_credential_authority().is_err() {
+            return Ok(());
+        }
+        let binding = self.host.system.instructions().sync_binding();
+        if binding != self.sent_instruction_binding {
+            let offer = self
+                .host
+                .system
+                .instructions()
+                .offer(&self.host, self.channel.peer.stage_id())
+                .map_err(|_| StageError::Unavailable("Cannot publish account instructions"))?;
+            self.send(
+                self.frame(Body::AccountInstructions { offer }),
+                Class::Control,
+                SendScope::Connection,
+            )?;
+            self.sent_instruction_binding = binding;
+        }
+        Ok(())
+    }
+    fn install_instructions(
+        &mut self,
+        offer: Option<crate::instruction_layers::Offer>,
+    ) -> Result<()> {
+        self.account_credential_authority()?;
+        let Some(offer) = offer else {
+            return Ok(());
+        };
+        let content = self
+            .host
+            .system
+            .instructions()
+            .offered_content(&self.host, &offer)
+            .map_err(|_| StageError::Forbidden("Invalid account instructions"))?;
+        if let Some(content) = content {
+            self.download(
+                BlobAccess::Invocation {
+                    invocation: offer.export,
+                },
+                content,
+                Waiter::Instructions(offer.record),
+            )?;
+        }
+        Ok(())
+    }
     fn install_account_credentials(
         &mut self,
         record: Option<crate::accounts::CredentialBundle>,
@@ -1072,6 +1233,7 @@ impl PeerLink {
         }
         self.publish_accounts()?;
         self.publish_configuration()?;
+        self.publish_instructions()?;
         let core = self
             .host
             .core
@@ -1270,6 +1432,22 @@ impl PeerLink {
                 self.send(reply, Class::Control, SendScope::Connection)
             }
             Body::AccountConfiguration { record } => self.install_configuration(record.clone()),
+            Body::AccountInstructionsQuery { known_binding } => {
+                self.account_credential_authority()?;
+                let offer = if known_binding == &self.host.system.instructions().sync_binding() {
+                    None
+                } else {
+                    self.host
+                        .system
+                        .instructions()
+                        .offer(&self.host, self.channel.peer.stage_id())
+                        .map_err(|_| StageError::Unavailable("Cannot load account instructions"))?
+                };
+                let mut reply = self.frame(Body::AccountInstructions { offer });
+                reply.in_reply_to = Some(frame.message_id);
+                self.send(reply, Class::Control, SendScope::Connection)
+            }
+            Body::AccountInstructions { offer } => self.install_instructions(offer.clone()),
             Body::AccountCredentialsQuery { known_binding } => {
                 let group = self.account_credential_authority()?;
                 let record = self
@@ -1825,6 +2003,14 @@ impl PeerLink {
                 };
                 self.install_configuration(record)
             }
+            Pending::AccountInstructions => {
+                let Body::AccountInstructions { offer } = frame.body else {
+                    return Err(StageError::Invalid(
+                        "Expected account instructions response",
+                    ));
+                };
+                self.install_instructions(offer)
+            }
             Pending::Rpc(response) => {
                 let _ = response.send(Ok(frame.body));
                 Ok(())
@@ -2123,6 +2309,15 @@ impl PeerLink {
     }
     fn complete(&mut self, waiter: Waiter, bytes: Vec<u8>) -> Result<()> {
         match waiter {
+            Waiter::Instructions(record) => {
+                self.account_credential_authority()?;
+                self.host
+                    .system
+                    .instructions()
+                    .import(&self.host, record, &bytes)
+                    .map_err(|_| StageError::Forbidden("Account instruction import rejected"))?;
+                Ok(())
+            }
             Waiter::Input(frame) => self.accept(*frame),
             Waiter::Fetch(response) => {
                 let _ = response.send(Ok(bytes));

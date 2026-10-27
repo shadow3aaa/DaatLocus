@@ -338,6 +338,7 @@ async fn execute_message(
             return Ok(Some(String::new()));
         }
         Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+        window.refresh_instructions(system, actor, &context).await?;
         let baseline = ModelContext::baseline(system, &actor.id, &binding)?;
         window.reload(system, message, provider.as_ref(), &baseline)?;
         check_interruption(system, control, message)?;

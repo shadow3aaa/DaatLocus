@@ -31,6 +31,64 @@ impl std::fmt::Debug for Record {
         f.write_str("AccountConfiguration([private])")
     }
 }
+/// Shared signature and account authority checks for private replicated records.
+pub(crate) fn verify_account_payload<T: serde::de::DeserializeOwned>(
+    host: &Host,
+    record: &Record,
+    domain: &str,
+    fresh: bool,
+    issued_at: impl FnOnce(&T) -> i64,
+) -> Result<(T, StageId)> {
+    use base64::Engine;
+    if record.enrollment.chain.len() > 16
+        || host.account_id().as_deref() != Some(&record.enrollment.root.group_id)
+    {
+        return Err(miette!("Configuration does not belong to this account"));
+    }
+    let leaf = record
+        .enrollment
+        .chain
+        .last()
+        .ok_or_else(|| miette!("Configuration signer is missing"))?;
+    if leaf.payload.len() > 65536 {
+        return Err(miette!("Configuration certificate exceeds its budget"));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&leaf.payload)
+        .map_err(|_| miette!("Invalid configuration certificate"))?;
+    let leaf: crate::stage::identity::Membership =
+        serde_json::from_slice(&bytes).map_err(|_| miette!("Invalid configuration certificate"))?;
+    let data: T = record
+        .proof
+        .verify(domain, &leaf.device.public_key)
+        .map_err(|_| miette!("Invalid signed account configuration"))?;
+    let issued_at_ms = issued_at(&data);
+    let now = chrono::Utc::now().timestamp_millis();
+    if issued_at_ms < 0 || issued_at_ms > now + 60000 {
+        return Err(miette!("Invalid configuration issue time"));
+    }
+    let removed = if fresh {
+        crate::stage::revocation::removed(host.system.store())
+            .map_err(|_| miette!("Cannot verify configuration authority"))?
+    } else {
+        Default::default()
+    };
+    let member = verify_enrollment(
+        &record.enrollment.root,
+        &record.enrollment.chain,
+        if fresh { now } else { issued_at_ms },
+        &removed,
+    )
+    .map_err(|_| miette!("Invalid configuration authority"))?;
+    let own_account = host
+        .account_id()
+        .ok_or_else(|| miette!("Account identity unavailable"))?;
+    if record.enrollment.root.group_id != own_account || !member.can_enroll {
+        return Err(miette!("Record does not belong to this account"));
+    }
+    Ok((data, member.device.stage_id))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definitions {
@@ -134,56 +192,18 @@ impl ConfigurationStore {
         })?))
     }
     fn verify(host: &Host, record: &Record, fresh: bool) -> Result<Definitions> {
-        use base64::Engine;
-        if record.enrollment.chain.len() > 16
-            || host.account_id().as_deref() != Some(&record.enrollment.root.group_id)
-        {
-            return Err(miette!("Configuration does not belong to this account"));
-        }
-        let leaf = record
-            .enrollment
-            .chain
-            .last()
-            .ok_or_else(|| miette!("Configuration signer is missing"))?;
-        if leaf.payload.len() > 65536 {
-            return Err(miette!("Configuration certificate exceeds its budget"));
-        }
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&leaf.payload)
-            .map_err(|_| miette!("Invalid configuration certificate"))?;
-        let leaf: crate::stage::identity::Membership = serde_json::from_slice(&bytes)
-            .map_err(|_| miette!("Invalid configuration certificate"))?;
-        let data: Definitions = record
-            .proof
-            .verify("account-models", &leaf.device.public_key)
-            .map_err(|_| miette!("Invalid signed account configuration"))?;
-        let now = chrono::Utc::now().timestamp_millis();
-        if data.issued_at_ms < 0 || data.issued_at_ms > now + 60000 {
-            return Err(miette!("Invalid configuration issue time"));
-        }
-        let removed = if fresh {
-            crate::stage::revocation::removed(host.system.store())
-                .map_err(|_| miette!("Cannot verify configuration authority"))?
-        } else {
-            Default::default()
-        };
-        let member = verify_enrollment(
-            &record.enrollment.root,
-            &record.enrollment.chain,
-            if fresh { now } else { data.issued_at_ms },
-            &removed,
-        )
-        .map_err(|_| miette!("Invalid configuration authority"))?;
-        let own_account = host
-            .account_id()
-            .ok_or_else(|| miette!("Account identity unavailable"))?;
-        if record.enrollment.root.group_id != own_account
-            || !member.can_enroll
-            || data.version != 1
+        let (data, writer) = verify_account_payload(
+            host,
+            record,
+            "account-models",
+            fresh,
+            |data: &Definitions| data.issued_at_ms,
+        )?;
+        if data.version != 1
             || data.revision == 0
             || data.revision == u64::MAX
-            || data.account != own_account
-            || data.writer != member.device.stage_id
+            || host.account_id().as_deref() != Some(&data.account)
+            || data.writer != writer
         {
             return Err(miette!("Configuration does not belong to this account"));
         }

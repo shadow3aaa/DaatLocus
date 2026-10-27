@@ -23,6 +23,7 @@ pub mod files_app;
 pub(crate) mod host_process;
 pub mod http_client;
 pub mod i18n;
+pub mod instruction_layers;
 pub mod logging;
 pub mod mcp;
 #[cfg(any(target_os = "android", test))]

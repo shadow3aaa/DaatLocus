@@ -95,6 +95,15 @@ fn make_room(tx: &Transaction<'_>, additional: u64) -> Result<()> {
     Ok(())
 }
 pub(crate) fn put(tx: &Transaction<'_>, actor: &str, bytes: &[u8]) -> Result<Manifest> {
+    let manifest = put_control(tx, bytes)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO stage_blob_actors(actor,hash) VALUES(?1,?2)",
+        params![actor, manifest.content.hash],
+    )?;
+    Ok(manifest)
+}
+/// Private control payloads have explicit export grants, never Actor associations.
+pub(crate) fn put_control(tx: &Transaction<'_>, bytes: &[u8]) -> Result<Manifest> {
     let manifest = Manifest::from_bytes(bytes)?;
     let existing: Option<(i64, i64)> = tx
         .query_row(
@@ -122,10 +131,6 @@ pub(crate) fn put(tx: &Transaction<'_>, actor: &str, bytes: &[u8]) -> Result<Man
         return Err(StageError::Conflict("Immutable content changed"));
     }
     touch(tx, &manifest.content.hash)?;
-    tx.execute(
-        "INSERT OR IGNORE INTO stage_blob_actors(actor,hash) VALUES(?1,?2)",
-        params![actor, manifest.content.hash],
-    )?;
     Ok(manifest)
 }
 fn manifest(tx: &Transaction<'_>, hash: &str) -> Result<Manifest> {

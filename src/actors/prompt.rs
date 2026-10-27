@@ -6,6 +6,7 @@ use miette::{Result, miette};
 pub(crate) struct PromptFile {
     pub name: String,
     pub content: String,
+    pub layer_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -19,6 +20,7 @@ macro_rules! prompt {
         SystemPrompt {
             files: vec![$(PromptFile {
                 name: $path.into(),
+                layer_id: None,
                 content: {
                     let content = include_str!(concat!("../prompts/", $path)).to_owned();
                     $($(let content = content.replace(
@@ -36,6 +38,7 @@ impl SystemPrompt {
         self.files.push(PromptFile {
             name: name.into(),
             content: content.into(),
+            layer_id: None,
         });
     }
 
@@ -49,6 +52,14 @@ impl SystemPrompt {
 
     /// Role-wide source files, independent of the current Actor/input.
     pub fn for_role(system: &ActorSystem, core: bool) -> Result<Self> {
+        Self::for_role_with_layers(system, core, &system.instructions().snapshot())
+    }
+
+    pub(crate) fn for_role_with_layers(
+        system: &ActorSystem,
+        core: bool,
+        layers: &crate::instruction_layers::Library,
+    ) -> Result<Self> {
         let mut prompt = Self::default();
         if core {
             let account_name =
@@ -63,7 +74,32 @@ impl SystemPrompt {
                 .files
                 .extend(Self::platform(std::env::consts::OS).files);
         }
+        let role = if core {
+            crate::instruction_layers::Role::Core
+        } else {
+            crate::instruction_layers::Role::Others
+        };
+        prompt
+            .files
+            .extend(layers.enabled(role).into_iter().map(|layer| PromptFile {
+                name: layer.name.clone(),
+                content: layer.content.clone(),
+                layer_id: Some(layer.id.clone()),
+            }));
         Ok(prompt)
+    }
+
+    pub(crate) fn revision(&self) -> String {
+        crate::stage::digest(
+            &serde_json::to_vec(
+                &self
+                    .files
+                    .iter()
+                    .map(|file| (&file.name, &file.content, &file.layer_id))
+                    .collect::<Vec<_>>(),
+            )
+            .expect("instruction strings serialize"),
+        )
     }
 
     fn platform(os: &str) -> Self {

@@ -26,6 +26,84 @@ enum MockReply {
 }
 
 #[tokio::test]
+async fn instruction_edits_do_not_interrupt_inference_and_apply_to_the_next_model_turn() {
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "inspect".into(),
+            name: "files__read_file".into(),
+            arguments: json!({"path":"check.txt","start_line":null,"line_count":null}),
+        }]),
+        MockReply::Answer("Finished without replay"),
+    ]));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *provider.inference_gate.lock() = Some(gate.clone());
+    let (_directory, system) = runtime(provider.clone()).await;
+    let old = system.actor("root").unwrap();
+    std::fs::write(old.config.workspace.join("check.txt"), "An existing file").unwrap();
+    let input = system
+        .send_user("root", "Inspect the workspace".into(), vec![], None)
+        .unwrap();
+    provider.started.notified().await;
+    let file = system
+        .instructions()
+        .save(None, None, "hot", "UNIQUE HOT INSTRUCTIONS".into())
+        .unwrap();
+    system
+        .instructions()
+        .replace(
+            crate::instruction_layers::Role::Others,
+            vec![file.id],
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        provider.requests.lock().len(),
+        1,
+        "editing cannot cancel or restart in-flight inference"
+    );
+    assert_eq!(
+        system.store().message(&input.id).unwrap().status,
+        MessageStatus::Running
+    );
+    gate.notify_one();
+    let finished = wait_completed(&system, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    {
+        let requests = provider.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !serde_json::to_string(&requests[0].messages[0])
+                .unwrap()
+                .contains("UNIQUE HOT INSTRUCTIONS")
+        );
+        assert!(
+            serde_json::to_string(&requests[1].messages[0])
+                .unwrap()
+                .contains("UNIQUE HOT INSTRUCTIONS")
+        );
+    }
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &input.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        system.actor("root").unwrap().created_at_ms,
+        old.created_at_ms
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn approval_rejection_is_not_a_tool_or_input_failure() {
     let outside = crate::sandbox::test_support::scoped_directory();
     let target = outside.path().join("not-authorized.txt");
@@ -4316,6 +4394,7 @@ fn protocol(calls: Vec<AgentToolCall>) -> AgentMessage {
 
 fn test_window(prompt: &str, history: &[AgentMessage], tools: &[AgentToolSpec]) -> ModelContext {
     ModelContext {
+        instruction_binding: (0, crate::stage::StageId::new()),
         system: AgentMessage::system(prompt),
         history: history.to_vec(),
         tools: tools.to_vec(),

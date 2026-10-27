@@ -1502,3 +1502,76 @@ file metadata; Actor metadata, Skills catalogs and workspace AGENTS.md stay out
 of this visualization. Indexed file reads return at most 16 KiB at a UTF-8 boundary and require the assembly
 revision. Inspection reads the compiled role/platform sources without constructing
 Apps, starting workers, invoking a model or persisting another context snapshot.
+
+### Insertable instruction layers
+
+Owner-managed Markdown files and unordered enabled file sets for `core` and `others`
+live in the profile's private account directory. The real assembly and its inspection
+both append these files through `SystemPrompt::for_role`. Inspection advertises
+`editable_layers`; there is no Actor-update progress/status interface.
+
+Owner endpoints reuse the authenticated request/Origin contract:
+
+| Endpoint | Data |
+| --- | --- |
+| `GET /v1/instruction-layers?q=&after=&limit=` | Bounded, size-sorted file metadata and revision, without bodies. |
+| `GET /v1/instruction-layers/{id}` | Selected file metadata and Markdown content. |
+| `POST /v1/instruction-layers` | Create a private file from `name` and `content`. |
+| `PATCH /v1/instruction-layers/{id}` | Update against its file `revision`. |
+| `PUT /v1/system-prompt/layers?role=core\|others` | Replace the `layer_ids` set against the inspected composition `revision`. |
+
+There are no ordering/placement parameters. Built-in sources retain code order,
+remain enabled and uneditable. User layers are arranged by size; new files are
+appended to membership. Browsing rotates the selected file to the top without
+changing the assembled instruction order. Display positions never define inference semantics.
+Duplicate or unknown file IDs fail validation. Removing a role reference preserves
+the library file. Editing a reused file changes each referencing assembly revision;
+stale writes never overwrite newer content.
+
+`instruction_layers::InstructionStore` atomically persists the library, role membership
+and optional signature in private `account/instructions.json`. Opaque file IDs are
+stable across renames; client names never select a path. File revisions reject stale
+edits, and assembly revisions guard membership writes under the same store lock.
+Local and replicated changes never stop workers or restart Apps.
+
+Private account peers exchange signed `account-instructions` offers. Signatures bind
+the account, writer, logical revision and content hash/size; file bodies use the existing
+resumable chunk transfer with short-lived peer-bound control export grants, without
+an Actor content association. The control frame contains no file bodies. Import
+verifies the current account membership and revocations both before download and
+before atomic publication. Forwarding preserves the original signature. Reconnection
+exchanges change identities, and concurrent snapshots converge by `(revision, writer)`;
+an equal revision with different content is rejected. A subsequent local edit advances
+the imported revision and is signed by its actual writer.
+
+These files modify instructions, never Actor configuration or execution authority.
+Idle Actors use the latest assembly before inference; running Actors adopt it at
+the next model turn after the current tool group settles, preserving current work,
+identity and history, without cancelling inference or replaying effects.
+
+The UI presents two Three.js stacks side by side. On narrow screens, selecting a
+stack smoothly enlarges it toward the center and shrinks the other at the edge;
+both stay reachable. Both stacks support vertical pointer swipes and wheel input
+without moving the independently scrolling content panel. The library shows at most four real layers with animated
+entering/leaving layers, circular wheel/keyboard/swipe paging, bounded incremental
+fetching and search with highlighted matches. Scrolling or clicking a lower plate
+brings that file to the top and updates the shared content panel. Only the focused
+stack shows its floating category/filename caption (Current instructions or Library).
+Search reuses the conversation's floating search component, opened by its button
+or Ctrl/Cmd+F and closed with Escape; closing clears the filter.
+All real and virtual plates share the same
+dimensions; built-in layers have no badges or lock markers.
+The current stack connects from its right edge to the shared content panel below;
+the library connects from its lower/front edge, mirroring the two compositions.
+Composition content is read-only. Library content can be edited with the packaged
+Atomic Editor React component; integration owns theme variables and save actions,
+not the editor implementation. A permanently rendered dashed virtual layer below
+the library connects from its
+right edge midpoint to the plus button. Creation/editing opens an Atomic Editor
+dialog on wide screens and a full-screen secondary page on narrow screens; saving
+a new file adds it to the library and current composition. A second elbow from a
+selected user layer's lower/front edge midpoint leads to a removal button on the
+left. Connectors preserve the projection of the attachment face's 3D normal and
+approach the content panel vertically. They prefer one rounded bend, otherwise
+two, avoiding projected plates and visible controls. No file chips, order controls or
+Actor-update counters remain.

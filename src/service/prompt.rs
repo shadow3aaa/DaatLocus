@@ -1,11 +1,15 @@
-//! Owner inspection of static instructions; no worker, model or App is started.
-use super::{ApiError, ApiResult, ServiceState, bounded, owner, redact};
-use crate::{actors::prompt::SystemPrompt, context_budget::approx_token_count};
+//! Owner-managed instruction files and inspection of the actual static assembly.
+use super::{ApiError, ApiResult, ServiceState, bounded, manage, owner, redact};
+use crate::{
+    actors::prompt::SystemPrompt,
+    context_budget::approx_token_count,
+    instruction_layers::{Layer, Library, Role},
+};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::HeaderMap,
-    routing::get,
+    http::{HeaderMap, StatusCode},
+    routing::{get, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,28 +18,12 @@ pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/v1/system-prompt", get(files))
         .route("/v1/system-prompt/{index}", get(file))
-}
-
-fn revision(prompt: &SystemPrompt) -> String {
-    // Names and ordered bytes both identify the inspected assembly.
-    crate::stage::digest(
-        &serde_json::to_vec(
-            &prompt
-                .files
-                .iter()
-                .map(|file| (&file.name, &file.content))
-                .collect::<Vec<_>>(),
+        .route("/v1/system-prompt/layers", put(replace_layers))
+        .route("/v1/instruction-layers", get(layers).post(create_layer))
+        .route(
+            "/v1/instruction-layers/{id}",
+            get(layer).patch(update_layer),
         )
-        .expect("strings serialize"),
-    )
-}
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum Role {
-    #[default]
-    Core,
-    Others,
 }
 
 #[derive(Deserialize)]
@@ -58,9 +46,10 @@ async fn files(
         .map_err(ApiError::from_report)?;
     let start = query.after.unwrap_or(0);
     let mut value = json!({
-        "revision": revision(&prompt),
+        "revision": prompt.revision(),
+        "editable_layers": true,
         "total_tokens": approx_token_count(&prompt.render()),
-        "items": prompt.files.iter().enumerate().skip(start).take(limit).map(|(index, file)| json!({"index":index,"name":file.name,"bytes":file.content.len(),"tokens":approx_token_count(&file.content)})).collect::<Vec<_>>(),
+        "items": prompt.files.iter().enumerate().skip(start).take(limit).map(|(index, file)| json!({"index":index,"name":file.name,"bytes":file.content.len(),"tokens":approx_token_count(&file.content),"layer_id":file.layer_id})).collect::<Vec<_>>(),
         "next_cursor": (start.saturating_add(limit) < prompt.files.len()).then(|| start.saturating_add(limit))
     });
     redact(&mut value, &state.system.config());
@@ -85,7 +74,7 @@ async fn file(
     owner(&state, &headers).await?;
     let prompt = SystemPrompt::for_role(&state.system, matches!(query.role, Role::Core))
         .map_err(ApiError::from_report)?;
-    if revision(&prompt) != query.revision {
+    if prompt.revision() != query.revision {
         return Err(ApiError {
             status: axum::http::StatusCode::CONFLICT,
             code: "conflict",
@@ -108,4 +97,153 @@ async fn file(
     let mut value = json!({"content": &content[start..end], "next_offset": (end < content.len()).then_some(end)});
     redact(&mut value, &state.system.config());
     Ok(Json(value))
+}
+
+fn metadata(file: &Layer, library: &Library) -> Value {
+    let roles: Vec<_> = [Role::Core, Role::Others]
+        .into_iter()
+        .filter(|role| library.ids(*role).contains(&file.id))
+        .collect();
+    json!({"id":file.id,"name":file.name,"bytes":file.content.len(),"tokens":approx_token_count(&file.content),"revision":file.revision(),"roles":roles})
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerQuery {
+    #[serde(default)]
+    q: String,
+    after: Option<usize>,
+    limit: Option<usize>,
+}
+async fn layers(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Query(query): Query<LayerQuery>,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    let limit = bounded(query.limit, 50)?;
+    let library = state.system.instructions().snapshot();
+    let search = query.q.trim().to_lowercase();
+    let mut files: Vec<_> = library
+        .layers
+        .iter()
+        .filter(|file| {
+            file.name.to_lowercase().contains(&search)
+                || file.content.to_lowercase().contains(&search)
+        })
+        .collect();
+    files.sort_by(|a, b| {
+        b.content
+            .len()
+            .cmp(&a.content.len())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let start = query.after.unwrap_or(0);
+    let mut value = json!({"items":files.iter().skip(start).take(limit).map(|file|metadata(file,&library)).collect::<Vec<_>>(),"next_cursor":(start.saturating_add(limit)<files.len()).then(||start.saturating_add(limit))});
+    redact(&mut value, &state.system.config());
+    Ok(Json(value))
+}
+async fn layer(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    let library = state.system.instructions().snapshot();
+    let file = library
+        .layers
+        .iter()
+        .find(|file| file.id == id)
+        .ok_or_else(ApiError::not_found)?;
+    let mut value = metadata(file, &library);
+    value["content"] = file.content.clone().into();
+    redact(&mut value, &state.system.config());
+    Ok(Json(value))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteLayer {
+    name: String,
+    content: String,
+    revision: Option<String>,
+}
+async fn write_layer(
+    state: &ServiceState,
+    headers: &HeaderMap,
+    id: Option<&str>,
+    request: WriteLayer,
+) -> ApiResult<Json<Value>> {
+    manage(state, headers).await?;
+    if id.is_none() && request.revision.is_some() {
+        return Err(ApiError::invalid());
+    }
+    let file = state
+        .system
+        .instructions()
+        .save(
+            id,
+            request.revision.as_deref(),
+            &request.name,
+            request.content,
+        )
+        .map_err(ApiError::from_report)?;
+    let mut value = metadata(&file, &state.system.instructions().snapshot());
+    value["content"] = file.content.into();
+    redact(&mut value, &state.system.config());
+    Ok(Json(value))
+}
+async fn create_layer(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(request): Json<WriteLayer>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    Ok((
+        StatusCode::CREATED,
+        write_layer(&state, &headers, None, request).await?,
+    ))
+}
+async fn update_layer(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<WriteLayer>,
+) -> ApiResult<Json<Value>> {
+    write_layer(&state, &headers, Some(&id), request).await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleQuery {
+    #[serde(default)]
+    role: Role,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceLayers {
+    revision: String,
+    layer_ids: Vec<String>,
+}
+async fn replace_layers(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Query(query): Query<RoleQuery>,
+    Json(request): Json<ReplaceLayers>,
+) -> ApiResult<Json<Value>> {
+    manage(&state, &headers).await?;
+    let core = query.role == Role::Core;
+    state
+        .system
+        .instructions()
+        .replace(query.role, request.layer_ids, |library| {
+            if SystemPrompt::for_role_with_layers(&state.system, core, library)?.revision()
+                != request.revision
+            {
+                return Err(crate::actors::ActorError::Conflict(
+                    "System instructions changed".into(),
+                )
+                .into());
+            }
+            Ok(())
+        })
+        .map_err(ApiError::from_report)?;
+    let prompt = SystemPrompt::for_role(&state.system, core).map_err(ApiError::from_report)?;
+    Ok(Json(json!({"revision":prompt.revision()})))
 }

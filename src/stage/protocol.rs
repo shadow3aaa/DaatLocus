@@ -188,6 +188,12 @@ pub enum Body {
     AccountConfiguration {
         record: Option<crate::accounts::configuration::Record>,
     },
+    AccountInstructionsQuery {
+        known_binding: Option<String>,
+    },
+    AccountInstructions {
+        offer: Option<crate::instruction_layers::Offer>,
+    },
     CoordinationResponse {
         response: Box<super::coordination::Response>,
     },

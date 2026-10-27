@@ -9,6 +9,7 @@ use crate::{
 use miette::{Result, miette};
 
 pub(super) struct ModelContext {
+    pub(super) instruction_binding: (u64, crate::stage::StageId),
     pub system: AgentMessage,
     pub tools: Vec<AgentToolSpec>,
     pub history: Vec<AgentMessage>,
@@ -23,6 +24,7 @@ impl ModelContext {
         tools: Vec<AgentToolSpec>,
     ) -> Result<Self> {
         Ok(Self {
+            instruction_binding: system.instructions().binding(),
             system: AgentMessage::system(
                 SystemPrompt::load(system, actor, context).await?.render(),
             ),
@@ -30,6 +32,21 @@ impl ModelContext {
             history: Vec::new(),
             history_complete: false,
         })
+    }
+
+    pub async fn refresh_instructions(
+        &mut self,
+        system: &ActorSystem,
+        actor: &ActorRecord,
+        context: &AppToolExecutionContext,
+    ) -> Result<()> {
+        let binding = system.instructions().binding();
+        if binding != self.instruction_binding {
+            self.system =
+                AgentMessage::system(SystemPrompt::load(system, actor, context).await?.render());
+            self.instruction_binding = binding;
+        }
+        Ok(())
     }
 
     pub fn baseline(
