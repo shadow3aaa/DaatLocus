@@ -17,6 +17,88 @@ async fn composition(fixture: &Fixture, role: &str) -> Value {
 }
 
 #[tokio::test]
+async fn instruction_stream_resumes_local_and_remote_changes_and_rechecks_access() {
+    let fixture = Fixture::new().await;
+    let path = "/v1/system-prompt/event-stream";
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}{path}", fixture.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    async fn frame(response: &mut reqwest::Response) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            let mut text = String::new();
+            while !text.contains("\n\n") {
+                text.push_str(&String::from_utf8_lossy(
+                    &response.chunk().await.unwrap().unwrap(),
+                ));
+            }
+            text
+        })
+        .await
+        .unwrap()
+    }
+    fn cursor(frame: &str) -> u64 {
+        frame
+            .lines()
+            .find_map(|line| line.strip_prefix("id: "))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+    let mut stream = fixture.owner(Method::GET, path).send().await.unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    let first = cursor(&frame(&mut stream).await);
+    let file = fixture
+        .system
+        .instructions()
+        .save(None, None, "live", "PRIVATE INSTRUCTION BODY".into())
+        .unwrap();
+    let changed = frame(&mut stream).await;
+    let second = cursor(&changed);
+    assert!(second > first);
+    assert!(!changed.contains("PRIVATE INSTRUCTION BODY"));
+    drop(stream);
+    fixture
+        .system
+        .instructions()
+        .save(
+            Some(&file.id),
+            Some(&file.revision()),
+            "live",
+            "New content while disconnected".into(),
+        )
+        .unwrap();
+    let mut resumed = fixture
+        .owner(Method::GET, path)
+        .header("last-event-id", second.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(cursor(&frame(&mut resumed).await) > second);
+    fixture
+        .owner(Method::DELETE, "/v1/account/session")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    fixture
+        .system
+        .instructions()
+        .save(None, None, "after-logout", "Must stay private".into())
+        .unwrap();
+    let revoked = frame(&mut resumed).await;
+    assert!(revoked.contains("access_revoked"));
+    assert!(!revoked.contains("id:"));
+}
+
+#[tokio::test]
 async fn instruction_library_edits_membership_and_source_reads_share_one_assembly() {
     let fixture = Fixture::new().await;
     let before = composition(&fixture, "core").await;

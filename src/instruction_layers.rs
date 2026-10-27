@@ -38,6 +38,14 @@ struct SignedLibrary {
 struct Stored {
     library: Library,
     signed: Option<Record>,
+    #[serde(default)]
+    sequence: u64,
+}
+fn next_sequence(sequence: u64) -> Result<u64> {
+    sequence
+        .checked_add(1)
+        .filter(|value| *value < (1u64 << 53) - 1)
+        .ok_or_else(|| ActorError::Invalid("Instruction cursor exhausted".into()).into())
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -161,10 +169,12 @@ impl InstructionStore {
                     others: BTreeSet::new(),
                 },
                 signed: None,
+                sequence: 0,
             },
             Err(error) => return Err(error).into_diagnostic(),
         };
         data.library.validate()?;
+        next_sequence(data.sequence)?;
         Ok(Self {
             path,
             writer,
@@ -181,6 +191,10 @@ impl InstructionStore {
     }
     pub fn changed(&self) -> &Notify {
         &self.changed
+    }
+    /// Device-local monotonic invalidation cursor, independent of replicated writer clocks.
+    pub fn event_cursor(&self) -> u64 {
+        self.data.read().sequence + 1
     }
     fn persist(&self, next: &Stored) -> Result<()> {
         write_bytes_atomic_sync(
@@ -204,6 +218,7 @@ impl InstructionStore {
             let next = Stored {
                 library: next,
                 signed: None,
+                sequence: next_sequence(current.sequence)?,
             };
             self.persist(&next)?;
             *current = next;
@@ -281,6 +296,7 @@ impl InstructionStore {
             let next = Stored {
                 library: current.library.clone(),
                 signed: Some(record.clone()),
+                sequence: current.sequence,
             };
             self.persist(&next)?;
             *current = next;
@@ -336,6 +352,7 @@ impl InstructionStore {
         let next = Stored {
             library,
             signed: Some(record),
+            sequence: next_sequence(current.sequence)?,
         };
         self.persist(&next)?;
         *current = next;
@@ -676,6 +693,11 @@ mod tests {
             .replace(Role::Core, vec![small.id.clone()], |_| Ok(()))
             .unwrap();
         let loaded = InstructionStore::open(directory.path(), writer).unwrap();
+        assert_eq!(
+            loaded.event_cursor(),
+            store.event_cursor(),
+            "restarting must preserve stream continuation"
+        );
         assert_eq!(loaded.snapshot().layers.len(), 2);
         assert_eq!(
             loaded.snapshot().ids(Role::Core),

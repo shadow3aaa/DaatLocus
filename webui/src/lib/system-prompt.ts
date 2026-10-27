@@ -1,5 +1,6 @@
 import { ActorApiError, request, type FetchOptions, type Page } from "./actor-api";
 import { t } from "./i18n";
+import { subscribe, type StreamOptions } from "./event-stream";
 
 export type PromptFile = { index: number; name: string; bytes: number; tokens: number; layer_id?: string };
 export type PromptFiles = Page<PromptFile> & { revision: string; total_tokens: number; editable_layers?: boolean };
@@ -7,22 +8,39 @@ export type InstructionLayer = { id: string; name: string; bytes: number; tokens
 export type InstructionLayerDetail = InstructionLayer & { content: string };
 export const formatPromptTokens = (value: number) => new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value).replace("K", "k");
 export type PromptRole = "core" | "others";
-export const promptFiles = (role: PromptRole, after?: number, options?: FetchOptions) => request<PromptFiles>(
+async function readPrompt<T>(path: string, options?: FetchOptions): Promise<T> {
+  for (;;) {
+    options?.signal?.throwIfAborted();
+    try { return await request<T>(path, options); }
+    catch (error) {
+      if (!options?.signal || options.signal.aborted || !(error instanceof ActorApiError) || (error.status !== 0 && error.status < 500)) throw error;
+      const signal = options.signal;
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); };
+        const timer = setTimeout(done, 1000);
+        signal.addEventListener("abort", done, { once: true });
+        if (signal.aborted) done();
+      });
+    }
+  }
+}
+export const promptFiles = (role: PromptRole, after?: number, options?: FetchOptions) => readPrompt<PromptFiles>(
   `/v1/system-prompt?role=${role}&limit=100${after === undefined ? "" : `&after=${after}`}`, options);
-export const promptContent = (role: PromptRole, index: number, revision: string, offset: number, options?: FetchOptions) => request<{ content: string; next_offset: number | null }>(
+export const promptContent = (role: PromptRole, index: number, revision: string, offset: number, options?: FetchOptions) => readPrompt<{ content: string; next_offset: number | null }>(
   `/v1/system-prompt/${index}?role=${role}&revision=${encodeURIComponent(revision)}&offset=${offset}`, options);
 
 export async function allPromptFiles(role: PromptRole, options?: FetchOptions) {
   let result = await promptFiles(role, undefined, options);
   while (result.next_cursor !== null) {
     const page = await promptFiles(role, result.next_cursor, options);
-    if (page.revision !== result.revision) throw new Error("changed");
+    if (page.revision !== result.revision) throw new ActorApiError("Instructions changed", 409, "conflict");
     result = { ...page, items: [...result.items, ...page.items] };
   }
   return result;
 }
+export const subscribePromptChanges = (options: Omit<StreamOptions, "onEvent">) => subscribe("/v1/system-prompt/event-stream", { ...options, onEvent: () => {} });
 
-export const instructionLayers = (search: string, after = 0, options?: FetchOptions) => request<Page<InstructionLayer>>(
+export const instructionLayers = (search: string, after = 0, options?: FetchOptions) => readPrompt<Page<InstructionLayer>>(
   `/v1/instruction-layers?q=${encodeURIComponent(search)}&after=${after}&limit=50`, options);
 /** Read remaining metadata only when revealing a new file or wrapping to the end. */
 export async function allInstructionLayers(search: string, options?: FetchOptions) {
@@ -33,7 +51,7 @@ export async function allInstructionLayers(search: string, options?: FetchOption
   }
   return result;
 }
-export const instructionLayer = (id: string, options?: FetchOptions) => request<InstructionLayerDetail>(`/v1/instruction-layers/${encodeURIComponent(id)}`, options);
+export const instructionLayer = (id: string, options?: FetchOptions) => readPrompt<InstructionLayerDetail>(`/v1/instruction-layers/${encodeURIComponent(id)}`, options);
 export const saveInstructionLayer = (draft: { name: string; content: string }, current?: InstructionLayerDetail) => request<InstructionLayerDetail>(
   `/v1/instruction-layers${current ? `/${encodeURIComponent(current.id)}` : ""}`,
   { method: current ? "PATCH" : "POST", body: { ...draft, ...(current ? { revision: current.revision } : {}) } });

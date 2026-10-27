@@ -22,9 +22,13 @@ const examples = [
 ];
 let layers = examples.map(file => ({ ...file }));
 let enabled: Record<PromptRole, string[]>;
+let sequence = 1;
+const listeners = new Set<() => void>();
+function changed() { sequence++; for (const listener of listeners) listener(); }
 export function resetInstructionLayers() {
   layers = examples.map(file => ({ ...file }));
   enabled = { core: ["concise"], others: ["verify"] };
+  changed();
 }
 resetInstructionLayers();
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
@@ -49,6 +53,21 @@ const page = <T>(url: URL, items: T[]) => {
 /** In-memory implementation of the Owner instruction API for standalone previews. */
 export async function systemPromptRoute(req: Request, url: URL): Promise<Response | null> {
   if (!url.pathname.startsWith("/v1/system-prompt") && !url.pathname.startsWith("/v1/instruction-layers")) return null;
+  if (url.pathname === "/v1/system-prompt/event-stream" && req.method === "GET") {
+    let cursor = Number(req.headers.get("last-event-id") || 0), cleanup = () => {};
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = () => { if (sequence > cursor) { cursor = sequence; controller.enqueue(encoder.encode(`id: ${cursor}\nevent: cursor\ndata: {}\n\n`)); } };
+        const timer = setInterval(() => controller.enqueue(encoder.encode(": keepalive\n\n")), 5000);
+        const abort = () => { cleanup(); controller.close(); };
+        cleanup = () => { clearInterval(timer); listeners.delete(send); req.signal.removeEventListener("abort", abort); };
+        listeners.add(send); req.signal.addEventListener("abort", abort, { once: true }); send();
+      },
+      cancel() { cleanup(); },
+    });
+    return new Response(body, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" } });
+  }
   if (url.pathname === "/v1/instruction-layers" && req.method === "GET") {
     const search = (url.searchParams.get("q") || "").toLowerCase();
     const result = page(url, layers.filter(layer => `${layer.name}\n${layer.content}`.toLowerCase().includes(search)).sort((a, b) => bytes(b.content) - bytes(a.content) || a.id.localeCompare(b.id)).map(layerMeta));
@@ -67,6 +86,7 @@ export async function systemPromptRoute(req: Request, url: URL): Promise<Respons
     const saved = layer ?? { id: crypto.randomUUID(), name, content: body.content };
     Object.assign(saved, { name, content: body.content });
     if (!layer) layers.push(saved);
+    changed();
     return json({ ...layerMeta(saved), content: saved.content }, layer ? 200 : 201);
   }
   const role = url.searchParams.get("role") || "core";
@@ -77,6 +97,7 @@ export async function systemPromptRoute(req: Request, url: URL): Promise<Respons
     if (!body || !Array.isArray(body.layer_ids) || body.layer_ids.some((id: unknown) => typeof id !== "string" || !layers.some(layer => layer.id === id)) || new Set(body.layer_ids).size !== body.layer_ids.length) return error(422, "invalid_request");
     if (body.revision !== revision) return error(409, "conflict");
     enabled[role] = [...body.layer_ids];
+    changed();
     return json({ revision: assembly(role).revision });
   }
   if (req.method !== "GET") return error(405, "method_not_allowed");

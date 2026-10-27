@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 import { systemPromptRoute, resetInstructionLayers } from "../mock/system-prompt";
-import { allInstructionLayers, displayPromptFiles, promptLayerWindow, type InstructionLayerDetail, type PromptFiles } from "../src/lib/system-prompt";
+import { allInstructionLayers, displayPromptFiles, promptLayerWindow, subscribePromptChanges, type InstructionLayerDetail, type PromptFiles } from "../src/lib/system-prompt";
 
 beforeEach(resetInstructionLayers);
 const call = async (path: string, method = "GET", body?: unknown) => {
@@ -8,6 +8,27 @@ const call = async (path: string, method = "GET", body?: unknown) => {
   return (await systemPromptRoute(new Request(url, { method, ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }) }), url))!;
 };
 const composition = async (role = "core") => (await (await call(`/v1/system-prompt?role=${role}`)).json()) as PromptFiles;
+
+test("live invalidation reloads metadata after another client's edit without polling", async () => {
+  const original = globalThis.fetch, controller = new AbortController();
+  const cursors: number[] = [], paths: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input), "http://127.0.0.1"); paths.push(url.pathname);
+    return (await systemPromptRoute(new Request(url, init), url))!;
+  }) as typeof fetch;
+  try {
+    await subscribePromptChanges({ signal: controller.signal, onCursor: async cursor => {
+      cursors.push(cursor);
+      if (cursors.length === 1) await call("/v1/instruction-layers", "POST", { name: "from-another-client", content: "Live instructions" });
+      else controller.abort();
+    } });
+    expect(cursors).toHaveLength(2);
+    expect(cursors[1]).toBeGreaterThan(cursors[0]);
+    expect(paths).toEqual(["/v1/system-prompt/event-stream"]);
+    const result = await allInstructionLayers("");
+    expect(result.items.some(file => file.name === "from-another-client.md")).toBe(true);
+  } finally { controller.abort(); globalThis.fetch = original; }
+});
 
 test("role membership is unordered and cannot disable built-in sources; removing a layer retains its library file", async () => {
   const initial = await composition();

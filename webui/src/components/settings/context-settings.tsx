@@ -1,7 +1,8 @@
 import { lazy, Suspense, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CheckIcon, PencilIcon, PlusIcon, RotateCwIcon, SearchIcon, Trash2Icon } from "lucide-react";
-import { allInstructionLayers, allPromptFiles, displayPromptFiles, formatPromptTokens, instructionLayer, instructionLayers, layerColor, layerError, promptLayerWindow, LIBRARY_VISIBLE_LAYERS as VISIBLE_LAYERS, promptContent, promptFileKey, replacePromptLayers, saveInstructionLayer, type InstructionLayer, type InstructionLayerDetail, type PromptFile, type PromptRole, type PromptFiles } from "@/lib/system-prompt";
+import { CheckIcon, PencilIcon, PlusIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import { allInstructionLayers, allPromptFiles, displayPromptFiles, formatPromptTokens, instructionLayer, instructionLayers, layerColor, layerError, promptLayerWindow, LIBRARY_VISIBLE_LAYERS as VISIBLE_LAYERS, promptContent, promptFileKey, replacePromptLayers, saveInstructionLayer, subscribePromptChanges, type InstructionLayer, type InstructionLayerDetail, type PromptFile, type PromptRole, type PromptFiles } from "@/lib/system-prompt";
+import { ActorApiError } from "@/lib/actor-api";
 import { t } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { FloatingSearchBar } from "@/components/floating-search";
@@ -50,15 +51,20 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
   const pendingInsert = useRef(false);
   const revealLibrary = useRef<string | undefined>(undefined);
   useEffect(() => {
-    const controller = new AbortController(); setError("");
-    void allPromptFiles(role, { signal: controller.signal }).then(setData).catch(error => { if (!controller.signal.aborted) setError(layerError(error)); });
+    const controller = new AbortController();
+    void subscribePromptChanges({ signal: controller.signal, onCursor: () => { setReload(value => value + 1); setLibraryReload(value => value + 1); } });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void allPromptFiles(role, { signal: controller.signal }).then(setData).catch(error => { if (!controller.signal.aborted) { if (error instanceof ActorApiError && error.status === 409) setReload(value => value + 1); else setError(layerError(error)); } });
     return () => controller.abort();
   }, [role, reload]);
   useEffect(() => {
     if (!data?.editable_layers) return;
     const controller = new AbortController(); setLibraryLoading(true);
-    const request = revealLibrary.current ? allInstructionLayers(search, { signal: controller.signal }) : instructionLayers(search, 0, { signal: controller.signal });
-    void request.then(page => { const index = revealLibrary.current ? Math.max(0, page.items.findIndex(file => file.id === revealLibrary.current)) : 0; setLibrary(page.items); setNext(page.next_cursor); setStart(index); setLibraryKey(page.items[index]?.id); revealLibrary.current = undefined; if (search.trim()) setSource("library"); })
+    const request = revealLibrary.current || library.length > 50 ? allInstructionLayers(search, { signal: controller.signal }) : instructionLayers(search, 0, { signal: controller.signal });
+    void request.then(page => { const selected = revealLibrary.current ?? libraryKey; const index = Math.max(0, page.items.findIndex(file => file.id === selected)); setLibrary(page.items); setNext(page.next_cursor); setStart(index); setLibraryKey(page.items[index]?.id); revealLibrary.current = undefined; })
       .catch(error => { if (!controller.signal.aborted) setError(layerError(error)); })
       .finally(() => { if (!controller.signal.aborted) setLibraryLoading(false); });
     return () => controller.abort();
@@ -79,7 +85,7 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
           if (!controller.signal.aborted) setContent({ key: fileKey, text });
         }
       }
-    })().catch(error => { if (!controller.signal.aborted) setError(layerError(error)); })
+    })().catch(error => { if (!controller.signal.aborted) { if (error instanceof ActorApiError && error.status === 409) setReload(value => value + 1); else setError(layerError(error)); } })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [source, fileKey, data?.revision, library, editing, role]);
@@ -105,7 +111,13 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
   async function enable(id: string, enabled: boolean) {
     if (!data) return;
     const ids = data.items.flatMap(file => file.layer_id ? [file.layer_id] : []);
-    await replacePromptLayers(role, data.revision, enabled ? [...ids.filter(value => value !== id), id] : ids.filter(value => value !== id));
+    try { await replacePromptLayers(role, data.revision, enabled ? [...ids.filter(value => value !== id), id] : ids.filter(value => value !== id)); }
+    catch (error) {
+      if (!(error instanceof ActorApiError) || error.status !== 409) throw error;
+      const latest = await allPromptFiles(role); setData(latest);
+      const ids = latest.items.flatMap(file => file.layer_id ? [file.layer_id] : []);
+      await replacePromptLayers(role, latest.revision, enabled ? [...ids.filter(value => value !== id), id] : ids.filter(value => value !== id));
+    }
     if (enabled) { setInserted(id); setAssemblyKey(id); }
     else setAssemblyKey(undefined);
     await refresh();
@@ -132,7 +144,12 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
       setQuery(""); setLibrary(result.items); setNext(result.next_cursor);
       setLibraryKey(saved.id); setStart(Math.max(0, result.items.findIndex(file => file.id === saved.id)));
       setEditing(false);
-    } catch (error) { setError(layerError(error)); }
+    } catch (error) {
+      if (error instanceof ActorApiError && error.status === 409 && editingFile) {
+        try { setEditingFile(await instructionLayer(editingFile.id)); } catch { /* Preserve the draft if the connection is unavailable. */ }
+      }
+      setError(layerError(error));
+    }
     finally { setBusy(false); }
   }
   const pageBusy = useRef(false);
@@ -173,7 +190,7 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
     <style>{"::highlight(dl-prompt-search) { background: color-mix(in srgb,var(--primary) 22%,var(--background)); color: var(--foreground); }"}</style>
     <FloatingSearchBar open={searchOpen && !editing} query={query} onQueryChange={setQuery} onClose={closeSearch} busy={libraryLoading} controls={libraryId} label={t("context_composition.search_layers")} />
     <div className="dl-prompt-toolbar"><ToggleGroup type="single" value={role} className="dl-usage-range" disabled={editing} aria-label={t("context_composition.role")} onValueChange={value => { if (value) onRoleChange(value as PromptRole); }}><ToggleGroupItem value="core">core</ToggleGroupItem><ToggleGroupItem value="others">others</ToggleGroupItem></ToggleGroup>
-      <div className="dl-prompt-toolbar-actions">{data && <span className="dl-prompt-total">{t("context_composition.total")} {formatPromptTokens(data.total_tokens)}</span>}{data?.editable_layers && <Button variant="ghost" size="icon-sm" disabled={editing} aria-label={t("context_composition.search_layers")} aria-keyshortcuts="Control+f Meta+f" onClick={openSearch}><SearchIcon /></Button>}<Button variant="ghost" size="icon-sm" disabled={busy || editing} aria-label={t("context_composition.refresh")} onClick={() => { setInserted(undefined); setReload(value => value + 1); setLibraryReload(value => value + 1); }}><RotateCwIcon /></Button></div>
+      <div className="dl-prompt-toolbar-actions">{data && <span className="dl-prompt-total">{t("context_composition.total")} {formatPromptTokens(data.total_tokens)}</span>}{data?.editable_layers && <Button variant="ghost" size="icon-sm" disabled={editing} aria-label={t("context_composition.search_layers")} aria-keyshortcuts="Control+f Meta+f" onClick={openSearch}><SearchIcon /></Button>}</div>
     </div>
     {error && !editing && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     {!data ? <div className="dl-settings-loading" role="status"><Spinner /></div> : <div className="dl-context-studio" data-focus={source}>

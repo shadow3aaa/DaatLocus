@@ -1519,6 +1519,15 @@ Owner endpoints reuse the authenticated request/Origin contract:
 | `POST /v1/instruction-layers` | Create a private file from `name` and `content`. |
 | `PATCH /v1/instruction-layers/{id}` | Update against its file `revision`. |
 | `PUT /v1/system-prompt/layers?role=core\|others` | Replace the `layer_ids` set against the inspected composition `revision`. |
+| `GET /v1/system-prompt/event-stream` | Resumable invalidation cursors for local and replicated instruction changes; no file bodies. |
+
+The client subscribes while the context page is mounted, then reloads bounded metadata
+and the selected content on change. It preserves the selected layer and active editor
+draft; stale membership changes rebase their exact toggle on the latest composition.
+The device-local monotonic cursor is persisted with the library, independently of the
+replicated writer clock. Reconnection catches up to the latest cursor; authorization
+is checked before each cursor or heartbeat. The page has no manual refresh control
+or refresh instructions, and does not poll unchanged compositions.
 
 There are no ordering/placement parameters. Built-in sources retain code order,
 remain enabled and uneditable. User layers are arranged by size; new files are

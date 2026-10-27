@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{Sse, sse::Event},
     routing::{get, put},
 };
 use serde::Deserialize;
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/v1/system-prompt", get(files))
+        .route("/v1/system-prompt/event-stream", get(changes))
         .route("/v1/system-prompt/{index}", get(file))
         .route("/v1/system-prompt/layers", put(replace_layers))
         .route("/v1/instruction-layers", get(layers).post(create_layer))
@@ -24,6 +26,75 @@ pub(super) fn routes() -> Router<ServiceState> {
             "/v1/instruction-layers/{id}",
             get(layer).patch(update_layer),
         )
+}
+
+/// Invalidation only: clients fetch bounded metadata and the selected body after a change.
+async fn changes(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+) -> ApiResult<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>> {
+    owner(&state, &headers).await?;
+    let after = headers
+        .get("last-event-id")
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(ApiError::invalid)
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if after > state.system.instructions().event_cursor() {
+        return Err(ApiError::invalid());
+    }
+    Ok(Sse::new(futures_util::stream::unfold(
+        (state, headers, after, false),
+        |(state, headers, mut after, ended)| async move {
+            if ended {
+                return None;
+            }
+            let system = state.system.clone();
+            loop {
+                let changed = system.instructions().changed().notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if state.system.is_stopping() {
+                    return None;
+                }
+                if owner(&state, &headers).await.is_err() {
+                    return Some((
+                        Ok(Event::default().event("access_revoked").data("{}")),
+                        (state, headers, after, true),
+                    ));
+                }
+                let current = state.system.instructions().event_cursor();
+                if current > after {
+                    after = current;
+                    return Some((
+                        Ok(Event::default()
+                            .event("cursor")
+                            .id(current.to_string())
+                            .data("{}")),
+                        (state, headers, after, false),
+                    ));
+                }
+                if tokio::time::timeout(std::time::Duration::from_secs(5), changed)
+                    .await
+                    .is_err()
+                {
+                    // Re-check access after every wait, including heartbeat emission.
+                    if owner(&state, &headers).await.is_err() {
+                        continue;
+                    }
+                    return Some((
+                        Ok(Event::default().comment("keepalive")),
+                        (state, headers, after, false),
+                    ));
+                }
+            }
+        },
+    )))
 }
 
 #[derive(Deserialize)]
@@ -78,7 +149,7 @@ async fn file(
         return Err(ApiError {
             status: axum::http::StatusCode::CONFLICT,
             code: "conflict",
-            message: "System instructions changed; refresh the file list",
+            message: "System instructions changed",
         });
     }
     let file = prompt.files.get(index).ok_or_else(ApiError::not_found)?;
