@@ -105,8 +105,9 @@
   }
   state.badge.style.left=`${Math.max(4,Math.min(innerWidth-30,x+22))}px`;
   state.badge.style.top=`${Math.max(4,Math.min(innerHeight-30,y+26))}px`;
-  state.x=x;state.y=y;state.kind=event.kind;state.active=true;state.suspended=false;state.until=now()+1800;
+  const idleTimeout=30_000;
+  state.x=x;state.y=y;state.kind=event.kind;state.active=true;state.suspended=false;state.until=now()+idleTimeout;
   state.layer.style.visibility=visible() ? 'visible' : 'hidden';
-  clearTimeout(state.timer);state.timer=setTimeout(()=>{state.active=false;state.layer.style.visibility='hidden';},1800);
+  clearTimeout(state.timer);state.timer=setTimeout(()=>{state.active=false;state.layer.style.visibility='hidden';},idleTimeout);
   return {visible:visible(),kind:state.kind,x,y};
 }
