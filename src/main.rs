@@ -51,7 +51,7 @@ fn main() -> std::process::ExitCode {
             eprintln!("{error:?}");
             std::process::exit(1);
         }
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     let profile_base = std::env::var_os("DAAT_LOCUS_HOME")
         .map(PathBuf::from)

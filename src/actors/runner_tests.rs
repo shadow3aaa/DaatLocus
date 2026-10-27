@@ -231,7 +231,7 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
         MockReply::Calls(vec![AgentToolCall {
             id: "install-app".into(),
             name: "apps_manager__install".into(),
-            arguments: json!({"name":"Example","description":null,"transport":"http","url":server.url,"command":null,"arguments":[],"environment":[]}),
+            arguments: json!({"name":"Example","description":null,"transport":"http","url":server.url,"command":null,"arguments":[],"environment":[],"timeouts":null}),
         }]),
         MockReply::Answer("Ready"),
     ]));

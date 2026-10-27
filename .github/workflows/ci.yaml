@@ -45,6 +45,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Build service with embedded Bash entry
         run: cargo build --locked -p daat-locus --no-default-features --bin daat-locus
+      - name: Check Bash and portable command libraries
+        run: cargo test --locked -p daat-locus-bash -p daat-locus-uutils -- --test-threads=4
+      - name: Check Bash reexec and external PATH commands
+        run: cargo test --locked -p daat-locus --test bash_subprocess -- --test-threads=4
+      - name: Check terminal PATH and native command authority
+        run: cargo test --locked -p daat-locus --lib terminal_app::command_tests:: -- --test-threads=4
       - name: Check native sandbox filesystem contracts
         run: cargo test --locked -p daat-locus-sandbox -- --test-threads=4
       - name: Diagnose macOS sandbox startup failures
@@ -53,7 +59,7 @@ jobs:
           python3 scripts/macos-sandbox-diagnostics.py
           sudo /usr/bin/log show --last 5m --style compact --predicate 'process == "sandboxd" OR subsystem == "com.apple.sandbox"' | tail -n 120
       - run: cargo clippy --locked -p daat-locus -p daat-locus-sandbox -p daat-locus-bash -p daat-locus-uutils -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p daat-locus-workspace-hook -p xtask --all-targets -- -D warnings
-      - run: cargo test --locked -p daat-locus --lib --bins --test bash_subprocess --test http_api --test sandbox_authority --test web_host_recovery -- --test-threads=4 --skip actors::runner::tests::three_device_core_preserves_resources_context_and_effects_across_sequential_takeover
+      - run: cargo test --locked -p daat-locus --lib --bins --test http_api --test sandbox_authority --test web_host_recovery -- --test-threads=4 --skip actors::runner::tests::three_device_core_preserves_resources_context_and_effects_across_sequential_takeover --skip terminal_app::command_tests::
       - name: Check sequential device takeover
         env:
           DAAT_LOCUS_TEST_STAGE_TRACE: '1'
@@ -69,7 +75,7 @@ jobs:
       - name: Check Windows symlink escape protection
         if: runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib file_io::tests::symlink_escape_is_denied -- --ignored --exact
-      - run: cargo test --locked -p daat-locus-bash -p daat-locus-uutils -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask -- --test-threads=4
+      - run: cargo test --locked -p daat-locus-auth -p daat-locus-client-protocol -p daat-locus-computer-use -p daat-locus-macros -p daat-locus-virtual-workspace -p xtask -- --test-threads=4
       - name: Install WiX for Windows upgrade transaction tests
         if: runner.os == 'Windows'
         shell: pwsh
