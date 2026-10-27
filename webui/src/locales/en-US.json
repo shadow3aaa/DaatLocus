@@ -185,9 +185,7 @@
     "copy_changes": "Copy changes",
     "changes_to_value0": "Changes to {{value0}}",
     "no_text_changes": "No text changes.",
-    "lines": "lines",
-    "more_lines_one": "Show {{count}} more line",
-    "more_lines_other": "Show {{count}} more lines"
+    "lines": "lines"
   },
   "markdown": {
     "code": "Code",
@@ -207,9 +205,7 @@
     "updated_files_one": "Updated {{count}} file",
     "updated_files_other": "Updated {{count}} files",
     "change_count_one": "{{count}} change",
-    "change_count_other": "{{count}} changes",
-    "more_files_one": "Show {{count}} more file",
-    "more_files_other": "Show {{count}} more files"
+    "change_count_other": "{{count}} changes"
   },
   "search_dialog": {
     "search_failed_try_again": "Search failed. Try again.",

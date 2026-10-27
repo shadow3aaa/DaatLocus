@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolDetail } from "../src/components/tool-details";
 import { ToolParameters } from "../src/components/tool-parameters";
+import { MessageOutcomes } from "../src/components/message-outcomes";
 import { readableSummary, activityLabel, approvalNotice } from "../src/lib/tool-presentation";
 import { Activities } from "../src/components/conversation-content";
 import type { ToolResult } from "../src/lib/actor-api";
@@ -10,6 +11,25 @@ import type { ToolResult } from "../src/lib/actor-api";
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("long diffs retain source lines and expose a scroll boundary rather than a more-lines button", () => {
+    const lines = Array.from({length:90},(_,index)=>({kind:index%2?"remove":"add",old_line:1000+index,new_line:1000+index,text:index===0?"":`SOURCE_${index}  <literal>\t${"Long text ".repeat(30)}`}));
+    const html = renderToStaticMarkup(<ToolDetail result={result({name:"files__edit_file",payload:{path:"notes.md",change:{added_lines:45,removed_lines:45,lines}}})}/>);
+    expect(html.match(/<tr\b/g)).toHaveLength(60);
+    const text = html.replace(/<[^>]*>/g, "");
+    expect(text).toContain("SOURCE_59");
+    expect(text).not.toContain("SOURCE_60");
+    expect(html).toContain("&lt;literal&gt;");
+    expect(html).toContain("data-lazy-page");
+    expect(html.match(/<button\b/g)).toHaveLength(1); // Copy is the only action inside the diff.
+  });
+  test("changed-file results reveal subsequent files through scrolling without an extra action", () => {
+    const tools = Array.from({length:7},(_,index)=>({id:`change-${index}`,call_id:`call-${index}`,message_id:"message",name:"files__edit_file",summary:"",error:null,status:"completed" as const,outcome:{path:`file-${index}.ts`,added_lines:1,removed_lines:0}}));
+    const html=renderToStaticMarkup(<MessageOutcomes actorId="root" tools={tools} onActor={()=>{}}/>);
+    expect(html).toContain("file-2.ts");
+    expect(html).not.toContain("file-3.ts");
+    expect(html).toContain("data-lazy-page");
+    expect(html.match(/<button\b/g)).toHaveLength(4); // View changes and the first three file links.
+  });
   test("Sudo preserves target command output and keeps submitted applications separate from effects", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({ name:"sudo__execute", arguments:{tool:"terminal__terminal_exec",arguments_json:JSON.stringify({command:"winget --version"})},payload:{output:"v1.12.350",session:{exit_code:0},sudo:{tool:"terminal__terminal_exec",administrator:false,approval_id:"PRIVATE_APPROVAL"}}})}/>);
     expect(html).toContain("winget --version");

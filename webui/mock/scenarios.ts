@@ -37,6 +37,7 @@ export const scenarios = [
   {id:"queue", label:"处理中收到新消息", actor:"research"},
   {id:"attachments", label:"图片与文件附件", actor:ROOT_ACTOR_ID},
   {id:"long-content", label:"长历史、代码、表格与差异", actor:"research"},
+  {id:"diff-overflow", label:"文件差异 · 超长行、空行与滚动补载", actor:"research"},
   {id:"history", label:"历史刻度与悬停预览", actor:"research"},
   {id:"many-approvals", label:"范围申请历史分页", actor:ROOT_ACTOR_ID},
   {id:"connecting", label:"正在连接", actor:ROOT_ACTOR_ID},
@@ -176,6 +177,24 @@ export function activateScenario(id: string): boolean {
     const toolId=newId(), callId=newId();
     addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"调整对话区的底部留白",error:null,started_at_ms:now()-6000,finished_at_ms:now()-3000,arguments:{path:"webui/src/index.css"},model_content:"已更新对话区域留白。",outcome:{path:"webui/src/index.css"},payload:{path:"webui/src/index.css",change:{added_lines:24,removed_lines:24,lines:Array.from({length:48},(_,i)=>({kind:i%2?"add":"remove",old_line:i%2?null:i+1,new_line:i%2?i+1:null,text:i%2?"padding-bottom: calc(var(--dl-footer-space) + 24px);":"padding-bottom: 24px;"}))}}});
     emitEvent(work.summary.id,{type:"tool_finished",message_id:record.id,call_id:callId,name:"files__edit_file",result_id:toolId,summary:"调整对话区的底部留白",error:null});
+  }
+  if(id==="diff-overflow") {
+    clear(work);
+    const record=message(work,"检查长 Markdown 行和多文件差异。" );
+    touchMessage(record,{reply:"已更新变更记录和相关文件。"});
+    const path="C:\\Users\\Example\\project\\docs\\LONG_ALIGNMENT_CHANGELOG.local.md";
+    for (let version=0;version<7;version++) {
+      const filename=version<2?path:`src/components/layout-${version}.tsx`;
+      const lines=Array.from({length:version===0?185:12},(_,index)=>{
+        const kind=index%6===2?"remove":index%6===3||index%6===0?"add":"context";
+        const text=index%6===1?"":index===0?"# Long Markdown verification — "+"保留完整行背景、行号和原始间距。 ".repeat(32):index%6===2?"const result = previousLayout({ padding: 24, selected: false });":index%6===3?"const result = currentLayout({ padding: 32, selected: true });":`Line ${index+1}: preserve source whitespace and <literal> text.\t${"Long source content without wrapping. ".repeat(index%8===4?25:1)}`;
+        return {kind,text,old_line:kind==="add"?null:99000+index,new_line:kind==="remove"?null:99000+index};
+      });
+      const added=lines.filter(line=>line.kind==="add").length, removed=lines.filter(line=>line.kind==="remove").length;
+      const toolId=newId(),callId=newId();
+      addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"更新文件",error:null,started_at_ms:now()-6000,finished_at_ms:now()-3000,arguments:{path:filename},model_content:"文件已更新。",outcome:{path:filename,added_lines:added,removed_lines:removed},payload:{path:filename,change:{added_lines:added,removed_lines:removed,lines}}});
+      emitEvent(work.summary.id,{type:"tool_finished",message_id:record.id,call_id:callId,name:"files__edit_file",result_id:toolId,summary:"更新文件",error:null});
+    }
   }
   if(id==="attachments") {
     const bytes=new TextEncoder().encode("# 布局检查\n\n消息区铺满容器，输入框悬浮在底部。\n");

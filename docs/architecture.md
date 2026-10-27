@@ -1429,6 +1429,13 @@ macOS 使用透明覆盖标题栏与原生红黄绿按钮。
 原生窗口命令只操作调用者的主窗口，权限绑定确切对话 origin/路径，不开放任意窗口
 定位、文件或进程控制。浏览器入口不渲染窗口控制，关窗仍只隐藏，不停止 Actor。
 
+Diff rows share an intrinsic table width, preserving source whitespace and full-row
+addition/removal backgrounds while scrolling. The opaque line-number gutter stays
+fixed during horizontal scrolling. Diff lines and changed-file outcomes use the shared
+intersection-based `LazyPage` boundary rather than more-content buttons; nested diff
+viewports supply their own scroll root and keep the boundary reachable horizontally.
+Repeated edits to one file retain distinct numbered entries in the change picker.
+
 ### Conversation import
 
 Local Codex sessions and archived sessions are discovered through a private filesystem

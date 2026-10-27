@@ -185,9 +185,7 @@
     "copy_changes": "复制变更",
     "changes_to_value0": "{{value0}} 的实际变更",
     "no_text_changes": "没有文本行差异。",
-    "lines": "行",
-    "more_lines_one": "再显示 {{count}} 行",
-    "more_lines_other": "再显示 {{count}} 行"
+    "lines": "行"
   },
   "markdown": {
     "code": "代码",
@@ -207,9 +205,7 @@
     "updated_files_one": "已更新 {{count}} 个文件",
     "updated_files_other": "已更新 {{count}} 个文件",
     "change_count_one": "{{count}} 次变更",
-    "change_count_other": "{{count}} 次变更",
-    "more_files_one": "再显示 {{count}} 个文件",
-    "more_files_other": "再显示 {{count}} 个文件"
+    "change_count_other": "{{count}} 次变更"
   },
   "search_dialog": {
     "search_failed_try_again": "搜索暂时无法完成，请重试。",
