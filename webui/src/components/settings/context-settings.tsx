@@ -48,7 +48,6 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
   const [noWebGL, setNoWebGL] = useState(false);
   const [editing, setEditing] = useState(false), [editingFile, setEditingFile] = useState<InstructionLayerDetail | null>(null);
   const [draft, setDraft] = useState({ name: "", content: "" });
-  const pendingInsert = useRef(false);
   const revealLibrary = useRef<string | undefined>(undefined);
   useEffect(() => {
     const controller = new AbortController();
@@ -129,7 +128,7 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
     finally { setBusy(false); }
   }
   function create() {
-    pendingInsert.current = true; setEditingFile(null); setDraft({ name: "", content: "" }); setSource("library"); setEditing(true); setError("");
+    setEditingFile(null); setDraft({ name: "", content: "" }); setSource("library"); setEditing(true); setError("");
   }
   async function save(value: { name: string; content: string }) {
     if (busy || !value.name.trim() || !value.content.trim() || /[/\\]/.test(value.name)) return;
@@ -137,8 +136,7 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
     try {
       const saved = await saveInstructionLayer(value, editingFile ?? undefined);
       setEditingFile(saved);
-      if (pendingInsert.current) { await enable(saved.id, true); pendingInsert.current = false; }
-      else await refresh();
+      await refresh();
       const result = await allInstructionLayers("");
       revealLibrary.current = search ? saved.id : undefined;
       setQuery(""); setLibrary(result.items); setNext(result.next_cursor);
@@ -216,7 +214,7 @@ function PromptWorkspace({ role, onRoleChange }: { role: PromptRole; onRoleChang
         <header className="dl-prompt-detail-heading">
           {file && <span className="dl-prompt-file-swatch" aria-hidden="true" style={{ background: layerColor(file.tokens, lockedSource ? assemblyFiles : libraryFiles) }} />}
           <h3>{file?.name ?? t("context_composition.select_layer")}</h3>{file && <span className="dl-prompt-count">{formatPromptTokens(file.tokens)}</span>}
-          {!lockedSource && detail && <><Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("context_composition.edit_layer")} onClick={() => { setDraft({ name: detail.name, content: detail.content }); setEditingFile(detail); pendingInsert.current = false; setEditing(true); }}><PencilIcon /></Button><Button variant="outline" disabled={busy || !!included} onClick={() => void changeMembership(detail.id, true)}>{included ? <CheckIcon data-icon="inline-start" /> : <PlusIcon data-icon="inline-start" />}{t(included ? "context_composition.inserted" : "context_composition.insert")}</Button></>}
+          {!lockedSource && detail && <><Button variant="ghost" size="icon-sm" disabled={busy} aria-label={t("context_composition.edit_layer")} onClick={() => { setDraft({ name: detail.name, content: detail.content }); setEditingFile(detail); setEditing(true); }}><PencilIcon /></Button><Button variant="outline" disabled={busy || !!included} onClick={() => void changeMembership(detail.id, true)}>{included ? <CheckIcon data-icon="inline-start" /> : <PlusIcon data-icon="inline-start" />}{t(included ? "context_composition.inserted" : "context_composition.insert")}</Button></>}
         </header>
         <aside className="dl-prompt-content" tabIndex={0} aria-label={file?.name ?? t("context_composition.select_layer")} aria-busy={loading}>{loading ? <Spinner /> : content?.key === fileKey && content ? <Markdown className="dl-prompt-text" content={content.text} /> : null}</aside>
       </div>

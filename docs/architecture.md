@@ -1530,8 +1530,8 @@ is checked before each cursor or heartbeat. The page has no manual refresh contr
 or refresh instructions, and does not poll unchanged compositions.
 
 There are no ordering/placement parameters. Built-in sources retain code order,
-remain enabled and uneditable. User layers are arranged by size; new files are
-appended to membership. Browsing rotates the selected file to the top without
+remain enabled and uneditable. User layers are arranged by size; newly enabled
+files are initially shown at the bottom. Browsing rotates the selected file to the top without
 changing the assembled instruction order. Display positions never define inference semantics.
 Duplicate or unknown file IDs fail validation. Removing a role reference preserves
 the library file. Editing a reused file changes each referencing assembly revision;
@@ -1578,7 +1578,8 @@ not the editor implementation. A permanently rendered dashed virtual layer below
 the library connects from its
 right edge midpoint to the plus button. Creation/editing opens an Atomic Editor
 dialog on wide screens and a full-screen secondary page on narrow screens; saving
-a new file adds it to the library and current composition. A second elbow from a
+a new file adds it only to the library; enabling it requires the explicit Add to
+composition action. A second elbow from a
 selected user layer's lower/front edge midpoint leads to a removal button on the
 left. Connectors preserve the projection of the attachment face's 3D normal and
 approach the content panel vertically. They prefer one rounded bend, otherwise
