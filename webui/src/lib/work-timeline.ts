@@ -105,6 +105,45 @@ export function elapsedLabel(start?: number | null, end?: number | null, now = D
   if (seconds < 60) return t("work_timeline.value0_s", {value0: seconds});
   return t("work_timeline.value0_m_value1", {value0: Math.floor(seconds/60), value1: seconds%60 ? ` ${t("work_timeline.value0_s", {value0: seconds%60})}` : ""});
 }
+function workFinishedAt(message: MessageRecord, events: EventRecord[]) {
+  const finished = events.filter(record => record.actor_id === message.actor_id && record.event.type === "message_updated" && record.event.message_id === message.id && !["running", "queued"].includes(record.event.status)).at(-1);
+  return message.finished_at_ms ?? finished?.created_at_ms ?? message.updated_at_ms;
+}
+export type WorkRoundSpan = { start: number; end: number | null; running: boolean };
+export type WorkTranscriptPart = { message: MessageRecord } & ({ kind: "input" | "outcome" } | { kind: "activity"; span: WorkRoundSpan });
+
+/** Split serial execution around nested inputs, rather than placing resumed work at its original input. */
+export function workTranscriptParts(messages: MessageRecord[], allMessages: MessageRecord[], events: EventRecord[] = []): WorkTranscriptPart[] {
+  const actor = messages[0]?.actor_id;
+  const known = [...new Map([...allMessages, ...messages].filter(message => message.actor_id === actor).map(message => [message.id, message])).values()];
+  const lifetimes = known.filter(message => message.kind !== "delivery" && message.status !== "queued" && !(message.started_at_ms == null && ["cancelled", "interrupted"].includes(message.status))).map(message => ({
+    message, start: message.started_at_ms ?? message.created_at_ms,
+    end: message.status === "running" && message.finished_at_ms == null ? Infinity : workFinishedAt(message, events),
+  }));
+  const boundaries = [...new Set(lifetimes.flatMap(item => [item.start, item.end]).filter(Number.isFinite))].sort((a,b) => a-b);
+  const spans: { message: MessageRecord; span: WorkRoundSpan }[] = [];
+  for (const [index, start] of boundaries.entries()) {
+    const owner = lifetimes.filter(item => item.start <= start && item.end > start).sort((a,b) => b.message.seq-a.message.seq)[0];
+    if (!owner) continue;
+    const end = boundaries[index+1] ?? null;
+    const previous = spans.at(-1);
+    if (previous?.message.id === owner.message.id && previous.span.end === start) {
+      previous.span.end = end;
+      previous.span.running = end === null;
+    } else spans.push({message: owner.message, span: {start, end, running: end === null}});
+  }
+  // Instant terminal records still retain their disclosure and outcome.
+  for (const item of lifetimes) if (item.end <= item.start) spans.push({message:item.message,span:{start:item.start,end:item.start,running:false}});
+  const visible = new Set(messages.map(message => message.id));
+  const parts: { at: number; order: number; part: WorkTranscriptPart }[] = [];
+  for (const message of messages) {
+    parts.push({at:Math.min(message.created_at_ms, message.started_at_ms ?? message.created_at_ms),order:0,part:{kind:"input",message}});
+    const last = spans.filter(item => item.message.id === message.id).at(-1);
+    parts.push({at:last?.span.running ? Infinity : message.finished_at_ms ?? last?.span.end ?? message.updated_at_ms,order:last?.span.running ? 4 : 2,part:{kind:"outcome",message}});
+  }
+  for (const {message,span} of spans) if (visible.has(message.id)) parts.push({at:span.running ? Infinity : span.start,order:span.end===span.start ? 1 : 3,part:{kind:"activity",message,span}});
+  return parts.sort((a,b) => a.at-b.at || a.order-b.order || a.part.message.seq-b.part.message.seq).map(item => item.part);
+}
 let primaryActor = "core";
 export function configurePrimaryActor(actorId: string): void { primaryActor = actorId; }
 export const isPrimaryActor = (actorId: string) => actorId === primaryActor || (primaryActor === "core" && actorId.endsWith("~core"));

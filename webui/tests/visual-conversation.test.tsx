@@ -1,7 +1,7 @@
 import i18n from "../src/lib/i18n";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PrimaryTranscript, PrimaryTurn, WorkTurn } from "../src/components/conversation-turns";
+import { PrimaryTranscript, PrimaryTurn, WorkTranscript } from "../src/components/conversation-turns";
 import { WorkRound } from "../src/components/work-round";
 import { Activities } from "../src/components/conversation-content";
 import { Composer } from "../src/components/composer";
@@ -78,8 +78,8 @@ describe("fixed presentation and chronological source", () => {
   test("search filters individual conversation sides and work presentation hides intermediate disclosures", () => {
     const record = {...message, content:"UNMATCHED_USER_INPUT", reply:"MATCHED_FINAL_REPLY",status:"completed" as const};
     const chat = {messages:[],tools:[],approvals:[],events:[],toolNext:{}} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
-    for (const Component of [PrimaryTurn, WorkTurn]) {
-      const html = renderToStaticMarkup(<Component message={record} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} searchQuery="matched_final" />);
+    for (const element of [<PrimaryTurn message={record} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} searchQuery="matched_final" />, <WorkTranscript messages={[record]} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} searchQuery="matched_final" />]) {
+      const html = renderToStaticMarkup(element);
       expect(html).toContain("MATCHED_FINAL_REPLY");
       expect(html).not.toContain("UNMATCHED_USER_INPUT");
       expect(html).not.toContain(" aria-expanded=");
@@ -100,7 +100,7 @@ describe("fixed presentation and chronological source", () => {
     const delivery:MessageRecord = {...message,id:"delivery",source:{kind:"actor",actor_id:"core"},kind:"delivery",in_reply_to:"m",content:"",status:"completed",reply:"任务已交给项目 Actor"};
     const primary=renderToStaticMarkup(<PrimaryTurn message={delivery} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}}/>);
     expect(primary).toContain(delivery.reply!);
-    const work=renderToStaticMarkup(<WorkTurn message={delivery} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}}/>);
+    const work=renderToStaticMarkup(<WorkTranscript messages={[delivery]} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}}/>);
     expect(work).toContain(delivery.reply!);
   });
   test("primary omits empty deliveries but retains deliveries containing only a file outcome", () => {
@@ -163,7 +163,7 @@ describe("fixed presentation and chronological source", () => {
   });
   test("completed activity renders collapsed with intermediate prose hidden", () => {
     const completed = {...message,status:"completed" as const,started_at_ms:10_000,finished_at_ms:72_000,reply:"结果",final_generation:2};
-    const html = renderToStaticMarkup(<WorkRound message={completed} events={[event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"INTERMEDIATE_TEXT"})]} tools={[]} onActor={()=>{}}/>);
+    const html = renderToStaticMarkup(<WorkRound message={completed} span={{start:0,end:1,running:false}} events={[event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"INTERMEDIATE_TEXT"})]} tools={[]} onActor={()=>{}}/>);
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("INTERMEDIATE_TEXT");
   });

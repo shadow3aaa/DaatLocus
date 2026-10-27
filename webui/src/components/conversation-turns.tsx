@@ -3,7 +3,8 @@ import { importedConversation, messageDisplayText } from "@/lib/conversation-imp
 import { ImportConversationBubble } from "@/components/import-conversation";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { Access, MessageRecord } from "@/lib/actor-api";
-import { isUserDelivery, isUserSource } from "@/lib/work-timeline";
+import { isUserDelivery, isUserSource, workTranscriptParts, type WorkTranscriptPart } from "@/lib/work-timeline";
+import { Fragment } from "react";
 import { asText, asObject, domainToolName } from "@/lib/tool-presentation";
 import { actorIdFromUrl } from "@/lib/conversation-links";
 import type { useActorConversation } from "@/hooks/use-actor-conversation";
@@ -60,18 +61,45 @@ export function PrimaryTurn({ message, chat, onActor, receiptMessageId, searchQu
 function MessageReceipt({ message }: { message: MessageRecord }) {
   return <small className="dl-message-receipt">{t("conversation_turns.delivered_time", {time:new Date(message.created_at_ms).toLocaleTimeString(getCurrentWebUiLanguage(), { hour: "numeric", minute: "2-digit" })})}</small>;
 }
-export function WorkTurn({ message, chat, onActor, searchQuery }: Props) {
+export function WorkTranscript({ messages, ...props }: Omit<Props, "message"> & { messages: MessageRecord[] }) {
+  const parts = workTranscriptParts(messages, props.chat.messages, props.chat.events).filter(part => {
+    const message = part.message;
+    if (part.kind === "input") return !isInternalNotification(message) && Boolean(message.content || message.attachments.length) && (!props.searchQuery || matchesConversationText(messageDisplayText(message), props.searchQuery));
+    if (part.kind === "activity") return props.searchQuery === undefined;
+    if (props.searchQuery !== undefined) return Boolean(message.reply) && matchesConversationText(message.reply!, props.searchQuery);
+    const outcomes = messageOutcomeTools(props.chat.tools.filter(tool => tool.message_id === message.id));
+    return Boolean(message.reply || outcomes.artifacts.length || outcomes.changes.length || ["failed", "cancelled", "interrupted"].includes(message.status));
+  });
+  const turns: { message: MessageRecord; parts: WorkTranscriptPart[] }[] = [];
+  for (const part of parts) {
+    const previous = turns.at(-1);
+    if (previous?.message.id === part.message.id) previous.parts.push(part);
+    else turns.push({message:part.message,parts:[part]});
+  }
+  const anchored = new Set<string>();
+  return <>{turns.map(turn => {
+    const first = !anchored.has(turn.message.id);
+    anchored.add(turn.message.id);
+    const key = `${turn.message.id}:${turn.parts[0].kind}:${turn.parts[0].kind === "activity" ? turn.parts[0].span.start : ""}`;
+    return <WorkTurn key={key} {...props} {...turn} anchor={first} />;
+  })}</>;
+}
+function WorkTurn({ message, parts, anchor, chat, onActor, searchQuery }: Props & { parts: WorkTranscriptPart[]; anchor: boolean }) {
   const user = isUserSource(message);
   const internal = isInternalNotification(message);
   const searchMode = searchQuery !== undefined;
   const inputMatches = !searchQuery || matchesConversationText(messageDisplayText(message), searchQuery);
   const replyMatches = !searchQuery || matchesConversationText(message.reply || "", searchQuery);
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
-  return <article className="dl-message-turn dl-work-turn" id={`message-${message.actor_id}-${message.id}`}>
-    {inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={user ? messageDisplayText(message) : ""}><div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
-    {!searchMode && (internal || message.kind !== "delivery") && <WorkRound message={message} events={chat.events} tools={tools} onActor={onActor} />}
-    {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div></MessageContextMenu>}
-    {!searchMode && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
-    {!searchMode && <OutcomeStatus message={message} />}
+  return <article className="dl-message-turn dl-work-turn" id={anchor ? `message-${message.actor_id}-${message.id}` : undefined}>
+    {parts.map(part => <Fragment key={`${part.kind}:${part.kind === "activity" ? part.span.start : ""}`}>
+    {part.kind === "input" && inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={user ? messageDisplayText(message) : ""}><div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><div className={cn(user && "dl-work-prompt")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</div>{user && message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
+    {part.kind === "activity" && !searchMode && <WorkRound message={message} span={part.span} events={chat.events} tools={tools} onActor={onActor} />}
+    {part.kind === "outcome" && <>
+      {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div className="dl-work-final"><Markdown content={message.reply} onActor={onActor} /><CopyMessage content={message.reply} /></div></MessageContextMenu>}
+      {!searchMode && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
+      {!searchMode && <OutcomeStatus message={message} />}
+    </>}
+    </Fragment>)}
   </article>;
 }

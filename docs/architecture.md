@@ -1436,6 +1436,17 @@ intersection-based `LazyPage` boundary rather than more-content buttons; nested 
 viewports supply their own scroll root and keep the boundary reachable horizontally.
 Repeated edits to one file retain distinct numbered entries in the change picker.
 
+Work activity distinguishes unfinished input lifetime from serial execution ownership.
+Only the latest running input shows a working heading and a live clock. Suspended
+inputs freeze at the next claimed input's start; completed inputs use their finish
+timestamp (or the terminal event while detail is loading), never the current wall clock.
+An older input can own the clock again after nested inputs finish, without changing
+its durable status or hiding its history. Work presentation splits activity at
+execution handoffs and resumes it after the intervening inputs' outcomes. Each
+disclosure covers only its own execution interval, with its own fixed or live
+duration; original inputs stay anchored at their original position. There is no
+whole-input activity wrapper that moves resumed work ahead of completed inputs.
+
 ### Conversation import
 
 Local Codex sessions and archived sessions are discovered through a private filesystem

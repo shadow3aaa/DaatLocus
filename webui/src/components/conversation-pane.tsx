@@ -8,7 +8,7 @@ import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/u
 import { Composer, type ComposerModel } from "@/components/composer";
 import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
-import { PrimaryTranscript, WorkTurn } from "@/components/conversation-turns";
+import { PrimaryTranscript, WorkTranscript } from "@/components/conversation-turns";
 import { partitionConversationMessages } from "@/lib/conversation-messages";
 import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
@@ -237,7 +237,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
-          {primaryView ? <PrimaryTranscript messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : visibleMessages.map(message => <WorkTurn key={message.id} message={message} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />)}
+          {primaryView ? <PrimaryTranscript messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
           <div className="dl-conversation-bottom" />
         </div>
       </div>

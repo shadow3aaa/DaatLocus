@@ -25,6 +25,8 @@ export const scenarios = [
   {id:"activity-guidance", label:"工作活动 · 执行中收到新消息", actor:"research"},
   {id:"activity-prose", label:"工作活动 · 正文与思考交错增量", actor:"research"},
   {id:"activity-thinking", label:"工作活动 · 思考中的连续工具组", actor:"research"},
+  {id:"activity-timers", label:"工作活动 · 暂挂输入与独立计时", actor:"research"},
+  {id:"activity-resumed", label:"工作活动 · 插入任务完成后恢复原任务", actor:"research"},
   {id:"activity-tools", label:"工作活动 · 工具执行中", actor:"research"},
   {id:"activity-complete", label:"工作活动 · 完成与正文交错", actor:"research"},
   {id:"activity-pagination", label:"工作活动 · 长记录滚动加载", actor:"research"},
@@ -85,6 +87,25 @@ export function activateScenario(id: string): boolean {
     else if (id === "activity-overflow") seedOverflowActivityPreview(work);
     else if (id === "activity-guidance") seedGuidanceActivityPreview(work);
     else if (id === "activity-prose") seedProseActivityPreview(work);
+    else if (id === "activity-resumed") {
+      const clock = now();
+      const original = message(work,"检查并修复浏览器布局。",true);
+      touchMessage(original,{created_at_ms:clock-300000,started_at_ms:clock-300000});
+      const incoming = message(work,"补充检查窄屏和下载菜单。");
+      touchMessage(incoming,{created_at_ms:clock-180000,started_at_ms:clock-180000,finished_at_ms:clock-60000,reply:"窄屏和下载菜单检查完成，继续原来的布局修复。"});
+      for (const record of work.events) if ("message_id" in record.event) record.created_at_ms = (record.event.message_id === original.id ? clock-300000 : clock-180000)+1000;
+      const resumed = emitEvent(work.summary.id,{type:"generation_delta",message_id:original.id,generation:3,channel:"assistant",text:"已收到补充检查结果，现在继续修复浏览器布局。"});
+      if (resumed) resumed.created_at_ms = clock-30000;
+      setActorStatus(work,"running");
+    }
+    else if (id === "activity-timers") {
+      const clock = now();
+      for (let index=0;index<3;index++) {
+        const input=message(work,["检查已有实现。","补充检查窄屏布局。","继续处理最新反馈。"][index],true);
+        touchMessage(input,{started_at_ms:clock-(5-index*2)*60000});
+      }
+      setActorStatus(work,"running");
+    }
     else seedActivityPreview(work, id === "thinking-only");
     if (id === "activity-tools") advanceActivityPreview();
     if (id === "activity-complete") while (advanceActivityPreview()) { /* Seed all settled phases. */ }
