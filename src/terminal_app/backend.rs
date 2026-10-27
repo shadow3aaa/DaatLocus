@@ -6,11 +6,13 @@ use daat_locus_bash::{Child, Input, Output, ProcessPolicy};
 pub struct TerminalChild {
     child: SandboxAsyncChild,
     executable: std::path::PathBuf,
+    commands: daat_locus_uutils::CommandPath,
 }
 
 fn with_shell_runtime(
     policy: &RuntimeSandboxPolicy,
     executable: &std::path::Path,
+    commands: &std::path::Path,
 ) -> RuntimeSandboxPolicy {
     let mut effective = policy.clone();
     // An embedded runtime is an exact read dependency, never a grant for its
@@ -26,6 +28,10 @@ fn with_shell_runtime(
             .readable_roots
             .push(executable.to_owned());
     }
+    effective
+        .filesystem
+        .readable_roots
+        .push(commands.to_owned());
     effective
 }
 
@@ -52,7 +58,7 @@ impl ProcessPolicy for RuntimeSandboxPolicy {
         &self,
         program: &str,
         args: Vec<String>,
-        options: SandboxProcessOptions,
+        mut options: SandboxProcessOptions,
     ) -> std::io::Result<Self::Child> {
         let executable = self.shell_executable()?;
         if std::path::Path::new(program) != executable {
@@ -61,20 +67,37 @@ impl ProcessPolicy for RuntimeSandboxPolicy {
                 "Terminal backend requires its current embedded Bash host",
             ));
         }
+        let commands = daat_locus_uutils::CommandPath::new(&executable)?;
+        let inherited = std::env::var_os("PATH");
+        let path = commands.prepend_to(inherited.as_deref())?;
+        let path = path.into_string().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Command PATH is not Unicode",
+            )
+        })?;
+        options.environment.push(("PATH".into(), path));
         let child = SandboxAsyncChild::spawn_shell(
-            &with_shell_runtime(self, &executable),
+            &with_shell_runtime(self, &executable, commands.path()),
             program,
             args,
             options,
         )?;
-        Ok(TerminalChild { child, executable })
+        Ok(TerminalChild {
+            child,
+            executable,
+            commands,
+        })
     }
 }
 impl Child for TerminalChild {
     type Policy = RuntimeSandboxPolicy;
     fn ensure_policy(&self, policy: &Self::Policy) -> miette::Result<()> {
-        self.child
-            .ensure_policy(&with_shell_runtime(policy, &self.executable))
+        self.child.ensure_policy(&with_shell_runtime(
+            policy,
+            &self.executable,
+            self.commands.path(),
+        ))
     }
     fn id(&self) -> Option<u32> {
         self.child.id()

@@ -1,5 +1,5 @@
 use miette::{IntoDiagnostic, Result, miette};
-#[cfg(not(target_os = "android"))]
+#[cfg(any(windows, target_os = "macos"))]
 use std::time::Duration;
 
 #[cfg(windows)]

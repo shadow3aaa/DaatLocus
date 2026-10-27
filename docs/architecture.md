@@ -1467,7 +1467,14 @@ coproc 和内部管道操作重新启动相同
 继续使用 stdin/stdout/stderr 管道，每次 exec 创建新的 shell；复用 session ID 不保留
 上一条 exec 的 shell 变量或函数。stdin 仅发送给仍在运行的进程。会话终止、App 关闭或
 丢弃都会终止进程树并释放输出读取任务；输出保留与原接口相同的容量、游标和丢弃计数。
-Android 继续保持现有 App 可用性边界。外部工具仍按平台安装情况解析。
+Android 继续保持现有 App 可用性边界。
+
+独立的 daat-locus-uutils lib crate 链接固定版本的 uutils 可移植命令集，并将
+ripgrep CLI 封装为库。宿主在进程入口按可执行文件名分发，先于 shell、维护 CLI 和
+Agent 初始化。每个终端进程持有独立工具目录，提供真实的可执行入口并前置到 PATH；
+外部程序及其后代使用相同 PATH，其他命令继续按宿主 PATH 解析。grep 是 rg 的同义入口，
+使用 ripgrep 参数和匹配语义。工具继承终端既有沙箱与进程树回收，目录在进程回收后释放；
+不安装全局命令，不引入新 App 工具或模型使用说明。
 
 ### Static system instructions
 

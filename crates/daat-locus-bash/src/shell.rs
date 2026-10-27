@@ -93,6 +93,9 @@ fn run(arguments: Vec<String>) -> i32 {
         }
     };
     let mut executor = Executor::new_process_exit();
+    // Ordinary file utilities resolve through PATH, including the portable
+    // command set. Do not substitute Rubash's in-process file emulations.
+    executor.set_external_file_builtins_enabled(false);
     if let Ok(path) = std::env::current_exe() {
         let display = rubash::executor::shell_pwd_display_path(&path.to_string_lossy());
         executor.export_env("BASH", &display);

@@ -15,6 +15,8 @@ use crate::{
 };
 use daat_locus_bash::{TerminalManager, truncate_terminal_output_tail};
 mod backend;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
+mod command_tests;
 const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
 pub struct TerminalApp {
     terminal: TerminalManager<RuntimeSandboxPolicy>,

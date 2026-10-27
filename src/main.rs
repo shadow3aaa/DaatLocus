@@ -15,7 +15,10 @@ mod terminal_logo;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    if let Some(code) = daat_locus_uutils::try_run() {
+        return code;
+    }
     daat_locus_bash::shell::try_run();
     let (command, arguments) = cli::parse_args();
     let native_host_bridge = matches!(
@@ -48,7 +51,7 @@ fn main() {
             eprintln!("{error:?}");
             std::process::exit(1);
         }
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     let profile_base = std::env::var_os("DAAT_LOCUS_HOME")
         .map(PathBuf::from)
@@ -104,6 +107,7 @@ fn main() {
         eprintln!("{error:?}");
         std::process::exit(1);
     }
+    std::process::ExitCode::SUCCESS
 }
 
 async fn dispatch(
