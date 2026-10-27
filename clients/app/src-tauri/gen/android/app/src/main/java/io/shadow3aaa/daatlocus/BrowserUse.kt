@@ -579,7 +579,7 @@ internal object BrowserUse {
                       mouse(page.view,MotionEvent.ACTION_UP,x,y,0,actionButton=button)
                     }
                   }
-                  "scroll"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_SCROLL,x,y,0,(-input.getDouble("delta_x")/48).toFloat(),(-input.getDouble("delta_y")/48).toFloat())}
+                  "scroll"->{val(x,y)=point();mouse(page.view,MotionEvent.ACTION_HOVER_MOVE,x,y,0);mouse(page.view,MotionEvent.ACTION_SCROLL,x,y,0,(-input.getDouble("delta_x")/48).toFloat(),(-input.getDouble("delta_y")/48).toFloat())}
                   "type"->{val connection=page.view.onCreateInputConnection(EditorInfo());if(connection==null||!connection.commitText(input.getString("text"),1))throw IllegalStateException("Focus an editable field before typing")}
                   "key"->{val code=keyCode(input.getString("key"));val modifiers=input.getJSONArray("modifiers");var meta=0;for(i in 0 until modifiers.length())meta=meta or when(modifiers.getString(i)){"control"->KeyEvent.META_CTRL_ON;"alt"->KeyEvent.META_ALT_ON;"shift"->KeyEvent.META_SHIFT_ON;"meta"->KeyEvent.META_META_ON;else->throw IllegalArgumentException("Unsupported modifier")};val now=SystemClock.uptimeMillis();page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_DOWN,code,0,meta));page.view.dispatchKeyEvent(KeyEvent(now,now,KeyEvent.ACTION_UP,code,0,meta))}
                   "navigate"->{val url=input.getString("url");if(!WebHost.allowed(url))throw IllegalArgumentException("Browser URL not allowed");loaded[key]={handler.postDelayed({capture()},180)};navigate(owner,key,page.view,url)}

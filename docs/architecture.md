@@ -1153,6 +1153,8 @@ Windows/Android 的独立站点配置持久保存；macOS 非持久 WKWebsiteDat
 原生宿主串行执行请求；不通过进程级 OS 输入，也不暴露任意 JavaScript、
 CDP 方法或调试端口。Windows 使用原生 WebView2 CDP 接口，macOS 使用
 WKWebView 快照和局部 AppKit 事件，Android 使用 WebView 输入与像素捕获。
+滚轮输入先向同一坐标发送页内原生指针移动，再发送滚轮事件，以同步 Canvas/Wasm
+应用独立维护的光标位置；两步都不移动系统光标或改变 Owner 焦点。
 macOS 对 WebKit 的视图内悬停、原生查找及内容边距 SPI 做运行时可用性检查；
 悬停要求 macOS 13+。合成鼠标按键状态只在客户端当前派发线程内生效，调用结束
 即恢复，不操作实体按键。原生导航代理保留顶层 URL 检查，允许继承嵌入页沙箱的

@@ -63,7 +63,26 @@ impl Fixture {
                 } else if request.starts_with("GET /composition-page ") {
                     r#"<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:rgb(0,200,0)}</style><input aria-label="Native field" style="position:fixed;left:600px;top:100px;width:200px;height:40px"><script>document.onclick=()=>window.nativeControlResult=String(Number(window.nativeControlResult||0)+1)</script>"#
                 } else if request.starts_with("GET /background ") {
-                    r#"<!doctype html><meta charset="utf-8"><title>Background fixture</title><style>html,body{margin:0;background:rgb(0,200,0);height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}</style><input aria-label="Background input">"#
+                    r#"<!doctype html><meta charset="utf-8"><title>Background fixture</title>
+<style>html,body{margin:0;background:rgb(0,200,0);height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}canvas{position:fixed;left:55%;top:30%;width:40%;height:40%}</style>
+<input aria-label="Background input"><canvas></canvas>
+<script>
+// A canvas UI tracks its pointer independently, as native/Wasm UI toolkits do.
+// Wheel coordinates alone do not update that application's pointer state.
+const canvas=document.querySelector('canvas');
+const state=window.nativeControlResult={x:0,y:0,wheels:0,trusted:false};
+let pointer={x:0,y:0};
+document.addEventListener('mousemove',event=>{pointer={x:event.clientX,y:event.clientY}});
+canvas.addEventListener('wheel',event=>{
+  event.preventDefault();state.wheels++;state.trusted=event.isTrusted;
+  const rect=canvas.getBoundingClientRect();
+  if(pointer.x>=rect.left&&pointer.x<rect.right&&pointer.y>=rect.top&&pointer.y<rect.bottom){
+    state.x+=event.deltaX;state.y+=event.deltaY;
+  }
+  const context=canvas.getContext('2d');context.clearRect(0,0,canvas.width,canvas.height);
+  context.fillText(`${state.x},${state.y}`,20,30);
+},{passive:false});
+</script>"#
                 } else {
                     r#"<!doctype html><meta charset="utf-8"><title>Live browser fixture</title>
 <style>body{height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}</style>
@@ -321,6 +340,9 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
             {"action":"observe","tab":b},
             {"action":"observe","tab":a},
             {"action":"observe","tab":b},
+            input(&b,json!({"kind":"scroll","x":0.75,"y":0.5,"delta_x":0,"delta_y":80})),
+            input(&b,json!({"kind":"scroll","x":0.75,"y":0.5,"delta_x":40,"delta_y":0})),
+            input(&b,json!({"kind":"scroll","x":0.1,"y":0.65,"delta_x":0,"delta_y":120})),
             {"action":"close","tab":b}
         ]
     });
@@ -356,7 +378,7 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
     };
     assert!(status.success(), "{:?}", std::fs::read_to_string(&output));
     let steps: Vec<Value> = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
-    assert_eq!(steps.len(), 10);
+    assert_eq!(steps.len(), 13);
     for (index, step) in steps.iter().enumerate() {
         assert!(
             step["reply"]["error"].is_null(),
@@ -392,6 +414,22 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
     assert_eq!(steps[6]["tab_states"][&a]["value"], "UVW");
     assert_eq!(steps[6]["tab_states"][&b]["value"], "Agent");
     assert_eq!(steps[8]["tab_states"][&b]["value"], "Agent");
+    assert_eq!(
+        steps[9]["tab_states"][&b]["native_control"]["y"], 80,
+        "wheel input must move the canvas UI, not merely return an accepted command"
+    );
+    assert_eq!(
+        steps[10]["tab_states"][&b]["native_control"]["x"], 40,
+        "horizontal wheel input must reach the canvas UI"
+    );
+    assert_eq!(
+        steps[10]["tab_states"][&b]["native_control"]["trusted"],
+        true
+    );
+    assert!(
+        steps[11]["tab_states"][&b]["scrollY"].as_f64().unwrap() > 0.0,
+        "native document scrolling must still work outside the canvas"
+    );
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(
             steps[4]["reply"]["browser"]["observation"]["png_base64"]

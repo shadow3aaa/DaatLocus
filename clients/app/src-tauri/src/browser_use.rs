@@ -327,6 +327,12 @@ impl NativeHost {
                     configure(&window, &preferences).await?;
                     navigate(&window, url, &preferences).await?;
                 } else {
+                    // Canvas/native UI engines commonly route wheel input using
+                    // their last pointer-move position, not the wheel's own x/y.
+                    // Match physical input without moving the OS pointer/focus.
+                    if let BrowserInput::Scroll { x, y, .. } = &input {
+                        platform::input(&window, BrowserInput::Move { x: *x, y: *y }).await?;
+                    }
                     platform::input(&window, input).await?;
                 }
                 // Give native input/layout and normal navigation a chance to settle.

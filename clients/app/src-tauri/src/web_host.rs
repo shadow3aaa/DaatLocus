@@ -977,7 +977,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                     if manifest.inspect_tabs {
                         for page in host.pages(&profile) {
                             if let Some(view)=host.app.get_webview(&format!("web-{profile}-{}",page.tab)) {
-                                let state=crate::browser_use::evaluate(&view,"({value:document.querySelector('input')?.value,active:document.activeElement?.tagName,focus:document.hasFocus(),scrollY,width:innerWidth,height:innerHeight})").await.unwrap();
+                                let state=crate::browser_use::evaluate(&view,"({value:document.querySelector('input')?.value,active:document.activeElement?.tagName,focus:document.hasFocus(),scrollY,width:innerWidth,height:innerHeight,native_control:window.nativeControlResult??null})").await.unwrap();
                                 tab_states.insert(page.tab,state);
                             }
                         }
