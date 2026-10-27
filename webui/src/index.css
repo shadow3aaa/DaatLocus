@@ -209,41 +209,94 @@ html[data-desktop-platform] :is(.dl-main-search,.dl-actor-dialog-actions) { disp
 .dl-settings-page[data-category=context]>.dl-settings-scroll { overflow: hidden; display: flex; flex-direction: column; }
 .dl-settings-page[data-category=context] .dl-settings-content { width: 100%; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .dl-settings-page[data-category=context] .dl-settings-page-heading { flex: none; }
-.dl-context-settings { min-width: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.dl-prompt-toolbar { flex: none; display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
-.dl-prompt-studio { position: relative; display: grid; grid-template-columns: 66% 34%; grid-template-rows: minmax(0,1fr); flex: 1; min-height: 0; }
-.dl-prompt-scene { position: relative; min-width: 0; overflow: hidden; }
-.dl-prompt-canvas { position: absolute; inset: 48px 0 0; }
+.dl-context-settings { position: relative; min-width: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dl-prompt-toolbar { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 12px; }
+.dl-prompt-toolbar-actions { display: flex; align-items: center; gap: 6px; }
+.dl-prompt-total { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; margin-right: 4px; }
+.dl-context-settings>.dl-floating-search { top: 0; right: 0; width: min(510px,100%); translate: none; left: auto; }
+.dl-context-settings[data-search-open=true]>.dl-prompt-toolbar { min-height: 80px; visibility: hidden; }
+.dl-context-studio { position: relative; display: grid; grid-template-rows: minmax(0,1.15fr) minmax(180px,1fr); flex: 1; min-height: 0; gap: 20px; }
+.dl-prompt-diagrams { position: relative; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 32px; min-height: 0; }
+.dl-prompt-diagrams:not(:has(>.dl-prompt-library-scene)) { grid-template-columns: minmax(0,1fr); }
+.dl-prompt-refocus { display: none; }
+.dl-prompt-focus-label[data-slot=button] { position: absolute; top: 0; left: 25%; translate: -50% 0; max-width: calc(50% - 24px); gap: 4px; height: 32px; font-weight: 400; background: var(--background); z-index: 1; }
+.dl-prompt-focus-label[data-source=library] { left: 75%; }
+.dl-prompt-focus-label[aria-pressed=false] { visibility: hidden; pointer-events: none; }
+.dl-prompt-diagrams:not(:has(>.dl-prompt-library-scene))>.dl-prompt-focus-label { left: 50%; max-width: 100%; }
+.dl-prompt-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-prompt-scene { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.dl-prompt-canvas { position: absolute; inset: 42px 0 8px; border-radius: 10px; }
+.dl-prompt-canvas:focus-visible { outline: 1px solid var(--ring); outline-offset: -2px; }
 .dl-prompt-canvas canvas { display: block; width: 100%; height: 100%; }
-.dl-prompt-total { position: absolute; inset: 9% 0 auto; text-align: center; font-size: 15px; letter-spacing: -.3px; pointer-events: none; z-index: 1; }
-.dl-prompt-total strong { font-weight: 500; }
-.dl-prompt-panel { position: relative; display: flex; min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
-.dl-prompt-target { position: absolute; left: 0; top: 50%; translate: -50% -50%; width: 9px; height: 9px; border: 1px solid var(--muted-foreground); border-radius: 50%; background: var(--background); pointer-events: none; z-index: 1; }
-.dl-prompt-content { flex: 1; padding: 9% 24px 36px; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-.dl-prompt-content>h3 { font-size: 13px; display: flex; align-items: center; gap: 9px; margin: 0 0 14px; font-weight: 500; min-width: 0; }
-.dl-prompt-content>h3>span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dl-prompt-swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+.dl-prompt-canvas[data-scrollable=true] { touch-action: pan-x; }
+.dl-prompt-remove { position: absolute; left: 8px; top: 70%; border-radius: 50%; z-index: 1; }
+.dl-layer-create { position: absolute; right: 8px; bottom: 12px; width: 40px; height: 40px; border-radius: 50%; z-index: 1; box-shadow: 0 3px 12px color-mix(in srgb,var(--foreground) 10%,transparent); }
+.dl-prompt-detail-panel { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-top: 1px solid var(--border); }
+.dl-prompt-target { position: absolute; left: 50%; top: 0; translate: -50% -50%; width: 9px; height: 9px; border: 1px solid var(--muted-foreground); border-radius: 50%; background: var(--background); pointer-events: none; z-index: 1; }
+.dl-prompt-detail-heading { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 12px 8px; flex: none; }
+.dl-prompt-detail-heading h3 { font-size: 14px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-prompt-file-swatch { width: 12px; height: 12px; flex: none; border-radius: 3px; }
+.dl-prompt-detail-heading>input { flex: 1; min-width: 0; }
 .dl-prompt-count { color: var(--muted-foreground); margin-left: auto; font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.dl-prompt-source { color: var(--muted-foreground); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; margin-bottom: 18px; }
-.dl-prompt-text { --content-font-size: 13px; --content-line-height: 1.9; font-family: inherit; font-size: 13px; line-height: 1.9; color: var(--muted-foreground); overflow-wrap: anywhere; margin: 0; animation: dl-prompt-reveal .16s ease-out; }
+.dl-prompt-content { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 24px; }
+.dl-prompt-text { --content-font-size: 14px; --content-line-height: 1.85; font-size: 14px; line-height: 1.85; color: var(--foreground); overflow-wrap: anywhere; margin: 0; max-width: 900px; animation: dl-prompt-reveal .16s ease-out; }
 .dl-prompt-connector { position: absolute; inset: 0; pointer-events: none; width: 100%; height: 100%; overflow: visible; }
 .dl-prompt-connector path { stroke: var(--muted-foreground); fill: none; stroke-width: 1; opacity: .6; }
-.dl-prompt-layer-buttons { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.dl-prompt-layer-buttons:focus-within,.dl-prompt-layer-buttons[data-fallback=true] { clip-path: none; width: auto; height: auto; inset: auto 16px 16px; display: flex; flex-wrap: wrap; gap: 8px; background: var(--background); padding: 8px; border-radius: 8px; }
-.dl-prompt-layer-buttons [aria-pressed=true] { background: var(--accent); color: var(--accent-foreground); }
-@keyframes dl-prompt-reveal { from { opacity: 0; } to { opacity: 1; } }
-@media(min-width:1300px) { .dl-prompt-content { padding-inline: 36px; } }
-@media(max-width:1050px) {
-  .dl-prompt-studio { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,.85fr) minmax(0,1fr); }
-  .dl-prompt-panel { border-left: 0; border-top: 1px solid var(--border); }
-  .dl-prompt-target { left: 50%; top: 0; }
-  .dl-prompt-content { padding: 24px 20px; }
+.dl-prompt-empty { color: var(--muted-foreground); font-size: 14px; padding: 20px 8px; }
+.dl-prompt-fallback { margin-top: 20px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--background); max-width: 100%; }
+.dl-md-editor { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0;
+  --atomic-editor-font: var(--font-sans); --atomic-editor-font-mono: var(--font-mono); --atomic-editor-body-size: 14px; --atomic-editor-body-leading: 1.85; --atomic-editor-measure: 90ch;
+  --atomic-editor-fg: var(--foreground); --atomic-editor-fg-muted: var(--muted-foreground); --atomic-editor-fg-faint: var(--muted-foreground);
+  --atomic-editor-bg: var(--background); --atomic-editor-bg-panel: var(--muted); --atomic-editor-bg-surface: var(--accent); --atomic-editor-border: var(--border);
+  --atomic-editor-accent: var(--primary); --atomic-editor-accent-bright: var(--primary); --atomic-editor-accent-soft: var(--accent);
+  --atomic-editor-link: var(--primary); --atomic-editor-link-hover: var(--foreground); --atomic-editor-code-bg: var(--muted);
+  --atomic-editor-selection-bg: color-mix(in srgb,var(--primary) 18%,transparent); --atomic-editor-search-bg: var(--accent); --atomic-editor-search-bg-active: color-mix(in srgb,var(--primary) 28%,transparent);
 }
+.dl-md-toolbar { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 4px 8px; }
+.dl-md-surface { flex: 1; min-height: 0; min-width: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.dl-md-surface .cm-scroller { overscroll-behavior: contain; }
+.dl-md-surface .cm-content { padding-block: 14px; }
+.dl-library-loading { position: absolute; right: 14px; top: 8px; }
+.dl-prompt-library-empty { position: absolute; left: 8px; bottom: 12px; font-size: 13px; color: var(--muted-foreground); }
+.dl-instruction-editor-dialog[data-slot=dialog-content] { width: min(780px,calc(100% - 48px)); max-width: none; height: min(760px,calc(100dvh - 64px)); display: flex; flex-direction: column; gap: 16px; padding: 24px; }
+.dl-instruction-editor-heading { display: flex; align-items: center; gap: 10px; flex: none; }
+.dl-instruction-editor-heading h2 { font-size: 16px; font-weight: 500; }
+.dl-instruction-editor-heading>[data-slot=dialog-title],.dl-instruction-editor-heading>h2 { flex: 1; }
+.dl-instruction-editor-page { display: flex; flex-direction: column; gap: 16px; flex: 1; min-height: 0; padding-top: max(8px,var(--dl-safe-top)); }
+@keyframes dl-prompt-reveal { from { opacity: 0; } to { opacity: 1; } }
 @media(max-width:767px) {
+  .dl-context-settings:has(>.dl-instruction-editor-page)>.dl-prompt-toolbar,.dl-context-settings:has(>.dl-instruction-editor-page)>.dl-context-studio,.dl-context-settings:has(>.dl-instruction-editor-page)>[role=alert] { display: none; }
+  .dl-settings-page[data-category=context]:has(.dl-instruction-editor-page) .dl-settings-page-heading { display: none; }
   .dl-settings-page[data-category=context][data-mobile-detail=true]>.dl-settings-scroll { display: flex; }
   .dl-settings-page[data-category=context][data-mobile-detail=false]>.dl-settings-scroll { display: none; }
+  .dl-context-studio { grid-template-rows: minmax(190px,.85fr) minmax(160px,1.15fr); gap: 16px; }
+  .dl-prompt-diagrams { position: relative; min-width: 0; gap: 12px; }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene) { display: block; overflow: clip; --assembly-x: 40%; --library-x: 86%; }
+  .dl-context-studio[data-focus=library] .dl-prompt-diagrams { --assembly-x: 14%; --library-x: 60%; }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene)>.dl-prompt-scene { position: absolute; top: 52px; bottom: 0; width: 78%; left: var(--assembly-x); transform: translateX(-50%) scale(1); transform-origin: center; transition: left .46s cubic-bezier(.22,1,.36,1),transform .46s cubic-bezier(.22,1,.36,1),opacity .3s ease; }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene)>.dl-prompt-library-scene { left: var(--library-x); }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene)>.dl-prompt-scene[data-focused=false] { transform: translateX(-50%) scale(.4); opacity: .65; }
+  .dl-prompt-focus-label[data-slot=button] { left: 50%; max-width: calc(100% - 12px); height: 36px; padding-inline: 6px; font-weight: 400; color: var(--foreground); transition: left .46s cubic-bezier(.22,1,.36,1),color .2s ease; }
+  .dl-prompt-focus-label[data-source=library] { left: 50%; }
+  .dl-prompt-focus-label[aria-pressed=true] { color: var(--foreground); font-weight: 500; }
+  .dl-prompt-refocus { display: block; position: absolute; inset: 0; border: 0; background: transparent; cursor: pointer; }
+  .dl-prompt-scene[data-focused=false] .dl-layer-create,.dl-prompt-scene[data-focused=false] .dl-library-loading,.dl-prompt-scene[data-focused=false] .dl-prompt-library-empty { visibility: hidden; }
+  .dl-context-studio[data-focus=assembly] path[data-connection=add] { visibility: hidden; }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene) .dl-prompt-canvas { top: 0; bottom: 28px; }
+  .dl-prompt-diagrams:has(>.dl-prompt-library-scene) .dl-layer-create { right: 8px; bottom: 4px; }
+  .dl-prompt-canvas { top: 42px; bottom: 0; }
+  .dl-prompt-remove { left: 0; top: 70%; width: 36px; height: 36px; }
+  .dl-layer-create { right: 0; bottom: 4px; width: 36px; height: 36px; }
+  .dl-prompt-detail-heading { padding-inline: 0; min-height: 48px; gap: 6px; }
+  .dl-prompt-content { padding-inline: 0; }
+  .dl-md-editor { --atomic-editor-body-size: 16px; }
+  .dl-md-toolbar>[data-slot=button] { width: 36px; height: 36px; }
 }
+html[data-reduced-motion=true] .dl-prompt-diagrams>* { transition: none; }
+@media(prefers-reduced-motion:reduce) { html:not([data-reduced-motion=false]) .dl-prompt-diagrams>* { transition: none; } }
+@media(max-width:767px) and (max-height:600px) { .dl-context-studio { grid-template-rows: minmax(120px,.7fr) minmax(100px,1fr); gap: 12px; } }
 @media(prefers-reduced-motion:reduce) { .dl-prompt-text { animation: none; } }
+
 .dl-settings-page-heading { position: sticky; top: 0; z-index: 1; box-sizing: content-box; display: flex; align-items: center; gap: 12px; height: 60px; padding-top: var(--dl-safe-top); margin-bottom: 32px; border-bottom: 1px solid transparent; background: var(--background); }
 .dl-settings-page-heading::before { content: ""; position: absolute; inset: -16px -20px 0; background: var(--background); z-index: -1; }
 .dl-settings-page-heading h1 { font-size: calc(var(--ui-font-size, 14px) * 24 / 14); line-height: 1.2; font-weight: 500; }

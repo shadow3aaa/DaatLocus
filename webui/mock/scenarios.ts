@@ -1,4 +1,5 @@
 import { resetApps } from "./apps";
+import { resetInstructionLayers } from "./system-prompt";
 import { advanceActivityPreview, seedActivityPreview, seedGuidanceActivityPreview, seedOverflowActivityPreview, seedPaginatedActivityPreview, seedProseActivityPreview } from "./activity";
 import type { CoreStatus, Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
@@ -69,6 +70,7 @@ export function activateScenario(id: string): boolean {
   if (!scenarios.some(scene=>scene.id===id)) return false;
   resetStore();
   resetApps(id === "apps-empty");
+  resetInstructionLayers();
   Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],
     core:{worker_stage_id:STAGE_ID,epoch:1,synchronized:true,ready:true,model_ready:true,state:"replica",config_revision:"1"}});
   const core=store.actors.get(ROOT_ACTOR_ID)!;

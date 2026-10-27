@@ -345,7 +345,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return sseResponse(actor.summary.id, req.headers.get("last-event-id"));
   }
 
-  if (method === "GET") { const prompt = systemPromptRoute(url); if (prompt) return prompt; }
+  { const prompt = await systemPromptRoute(req, url); if (prompt) return prompt; }
 
   // ---- actors -------------------------------------------------------------
   if (path === "/v1/actors" && method === "GET") {

@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
 import { matchingConversationMessages, matchesConversationText } from "@/lib/conversation-search";
-import { ConversationSearchBar } from "@/components/conversation-search";
+import { FloatingSearchBar } from "@/components/floating-search";
 import { LazyPage } from "@/components/lazy-page";
 
 export function ConversationPane({ connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
@@ -223,7 +223,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   }
   const errors = localError || chat.error;
   return <section ref={pane} className={cn("dl-conversation", primaryView ? "dl-primary-conversation" : "dl-work-conversation", compact && "dl-conversation-compact")} aria-label={t("conversation_pane.value0_conversation", {value0: name})} data-search-open={searchOpen} onKeyDownCapture={event => { if (searchOpen && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onSearchOpenChange?.(false); } }}>
-    <ConversationSearchBar open={searchOpen} query={searchQuery} onQueryChange={setSearchQuery} onClose={() => onSearchOpenChange?.(false)} busy={search.busy} controls={resultsId} />
+    <FloatingSearchBar open={searchOpen} query={searchQuery} onQueryChange={setSearchQuery} onClose={() => onSearchOpenChange?.(false)} busy={search.busy} controls={resultsId} />
       {!compact && !primaryView && <header className="dl-conversation-heading"><span>{name}</span><span className={cn("dl-status-dot", active && "dl-status-working")} /><small>{chat.streamStatus === "reconnecting" ? t("conversation_pane.reconnecting") : active ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></header>}
       <div className="dl-conversation-scroll" ref={scroll} onScroll={() => { const area = scroll.current; if (!area) return; const near = area.scrollTop > -110; if (!searchOpen) follow.current = area.scrollTop >= 0; setAtBottom(near); if (!searchOpen) rememberView(); }}>
         <div className="dl-message-list" id={resultsId} aria-busy={filtering && search.busy} aria-live={searchOpen ? "off" : "polite"} aria-relevant="additions">
