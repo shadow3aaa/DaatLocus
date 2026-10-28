@@ -2,8 +2,10 @@ import type { AppDetail } from "../src/lib/apps-api";
 
 export const mockApps: AppDetail[] = [];
 let revision = 1;
+let failNextPage = false;
 export function resetApps(empty = false) {
   revision = 1;
+  failNextPage = false;
   mockApps.splice(
     0,
     mockApps.length,
@@ -81,6 +83,11 @@ export function resetApps(empty = false) {
         ]),
   );
 }
+export function seedAppPages(retry = false) {
+  const template = mockApps[0];
+  mockApps.splice(0, mockApps.length, ...Array.from({length:72},(_,index)=>({...template,id:`mcp_${(index+1).toString(16).padStart(32,"0")}`,name:`应用 ${String(index+1).padStart(2,"0")}`})));
+  failNextPage = retry;
+}
 resetApps();
 export async function appsRoute(
   method: string,
@@ -95,6 +102,7 @@ export async function appsRoute(
     const after = url.searchParams.get("after") || "",
       search = (url.searchParams.get("search") || "").toLowerCase();
     const enabled = url.searchParams.get("enabled");
+    if (after && failNextPage) { failNextPage = false; return json({code:"unavailable"},503); }
     const all = mockApps.filter(
       (app) =>
         app.id > after &&

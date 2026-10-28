@@ -3,9 +3,15 @@ import { t } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
-// Mount only inside an open disclosure. Each visible boundary consumes one
+// Mount only inside visible content. Each visible boundary consumes one
 // cursor; the next page is observed again after React has laid out its content.
-export function LazyPage({ cursor, onLoad, errorMessage, scrollRoot }: { cursor: number; onLoad(signal: AbortSignal): Promise<unknown>; errorMessage: string; scrollRoot?: RefObject<HTMLElement | null> }) {
+export function pageScrollRoot(node: HTMLElement): HTMLElement | null {
+  for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+    if (/(auto|scroll|overlay)/.test(getComputedStyle(parent).overflowY)) return parent;
+  }
+  return null;
+}
+export function LazyPage({ cursor, onLoad, errorMessage, scrollRoot, enabled = true }: { cursor: number | string; onLoad(signal: AbortSignal): Promise<unknown>; errorMessage: string; scrollRoot?: RefObject<HTMLElement | null>; enabled?: boolean }) {
   const boundary = useRef<HTMLDivElement>(null);
   const load = useRef(onLoad);
   load.current = onLoad;
@@ -14,7 +20,7 @@ export function LazyPage({ cursor, onLoad, errorMessage, scrollRoot }: { cursor:
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     const node = boundary.current;
-    if (!node) return;
+    if (!node || !enabled) return;
     const controller = new AbortController();
     let requested = false;
     setLoading(false);
@@ -29,10 +35,10 @@ export function LazyPage({ cursor, onLoad, errorMessage, scrollRoot }: { cursor:
       }).finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    }, { root: scrollRoot?.current ?? node.closest(".dl-conversation-scroll"), rootMargin: "160px 0px" });
+    }, { root: scrollRoot?.current ?? pageScrollRoot(node), rootMargin: "160px 0px" });
     observer.observe(node);
     return () => { observer.disconnect(); controller.abort(); };
-  }, [cursor, retry, scrollRoot]);
+  }, [cursor, retry, scrollRoot, enabled]);
   return <div ref={boundary} data-lazy-page className="min-h-px" aria-busy={loading}>
     {loading && <div className="flex justify-center py-2"><Spinner /></div>}
     {failed && <div className="dl-client-error" role="alert"><span>{errorMessage}</span><Button variant="ghost" size="sm" onClick={() => setRetry(value => value + 1)}>{t("app.retry")}</Button></div>}

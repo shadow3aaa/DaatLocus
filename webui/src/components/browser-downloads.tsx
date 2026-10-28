@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { t } from "@/lib/i18n";
 import { isAndroid } from "@/lib/mobile";
 import type { BrowserLibrary, BrowserLibraryAction } from "@/lib/browser-workspace";
+import { LazyPage } from "@/components/lazy-page";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -11,7 +12,7 @@ export function BrowserDownloads({ library, popup = false, onAction, onMore }: {
   library: BrowserLibrary;
   popup?: boolean;
   onAction(action: BrowserLibraryAction, value: string): void;
-  onMore(): void;
+  onMore(signal: AbortSignal): Promise<unknown>;
 }) {
   const { i18n } = useTranslation();
   return <div className="dl-browser-download-list" role="list">
@@ -35,6 +36,6 @@ export function BrowserDownloads({ library, popup = false, onAction, onMore }: {
       </div>;
     })}
     {!library.downloads.length && <Empty><EmptyHeader><EmptyMedia variant="icon"><DownloadIcon/></EmptyMedia><EmptyTitle>{t("browser_use.no_downloads")}</EmptyTitle></EmptyHeader></Empty>}
-    {library.next_offset != null && <Button variant="ghost" onClick={onMore}>{t("browser_use.load_more")}</Button>}
+    {library.next_offset != null && <LazyPage cursor={library.next_offset} onLoad={onMore} errorMessage={t("lazy_page.load_failed")} />}
   </div>;
 }

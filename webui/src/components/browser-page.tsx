@@ -10,6 +10,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { browserDestination } from "@/lib/browser-address";
 import { browserShortcut } from "@/lib/browser-shortcuts";
 import { isAndroid } from "@/lib/mobile";
+import { LazyPage } from "@/components/lazy-page";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
@@ -98,11 +99,27 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
   blocked.current=!nativeVisible;
   const zoom=current?.zoom??1;
   useEffect(()=>{if(!edited.current)setAddress(home?"":current?.url??"");},[current?.url,home]);
-  async function refreshLibrary(offset=0){
-    try{const value=await browserLibrary("library",String(offset));if(!alive.current)return;
-      setLibrary(previous=>offset?{history:[...previous.history,...value.history.filter(item=>!previous.history.some(old=>old.id===item.id))],downloads:[...previous.downloads,...value.downloads.filter(item=>!previous.downloads.some(old=>old.id===item.id))],next_offset:value.next_offset}:value);
-    }catch{if(alive.current)setFailed(true);}
+  const libraryQueue=useRef<Promise<unknown>>(Promise.resolve());
+  const libraryPages=useRef(1);
+  function refreshLibrary(offset=0,signal?:AbortSignal){
+    const request=libraryQueue.current.catch(()=>{}).then(async()=>{
+      if(!alive.current||signal?.aborted)return;
+      let page=await browserLibrary("library",String(offset));
+      if(offset===0) {
+        for(let index=1;index<libraryPages.current&&page.next_offset!=null;index++) {
+          if(!alive.current||signal?.aborted)return;
+          const next=await browserLibrary("library",String(page.next_offset));
+          page={history:[...page.history,...next.history],downloads:[...page.downloads,...next.downloads],next_offset:next.next_offset};
+        }
+      }
+      if(!alive.current||signal?.aborted)return;
+      if(offset)libraryPages.current++;
+      setLibrary(previous=>offset?{history:[...previous.history,...page.history.filter(item=>!previous.history.some(old=>old.id===item.id))],downloads:[...previous.downloads,...page.downloads.filter(item=>!previous.downloads.some(old=>old.id===item.id))],next_offset:page.next_offset}:page);
+    });
+    libraryQueue.current=request;
+    return request.catch(error=>{if(signal?.aborted)return;if(offset)throw error;if(alive.current)setFailed(true);});
   }
+
   useEffect(()=>{
     alive.current=true;let polling=false,again=false,frame=0,lastLayout="";
     const update=()=>{
@@ -271,7 +288,7 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
           <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label={t("browser_use.downloads")} onClick={()=>{if(!wide)showPanel(panel==="downloads"?null:"downloads");}}><DownloadIcon/></Button></PopoverTrigger>
           {wide && <PopoverContent ref={downloadsPopup} tabIndex={-1} onOpenAutoFocus={event=>{event.preventDefault();downloadsPopup.current?.focus();}} align="end" side="bottom" sideOffset={8} collisionPadding={12} className="dl-browser-downloads" aria-label={t("browser_use.downloads")}>
             <header><PopoverTitle>{t("browser_use.downloads")}</PopoverTitle>{!isAndroid() && <Button variant="ghost" size="icon-sm" aria-label={t("browser_use.open_downloads")} title={t("browser_use.open_downloads")} onClick={()=>void libraryAction("open_downloads")}><FolderOpenIcon/></Button>}</header>
-            <div className="dl-browser-download-scroll"><BrowserDownloads library={library} popup onAction={(action,value)=>void libraryAction(action,value)} onMore={()=>void refreshLibrary(library.next_offset!)}/></div>
+            <div className="dl-browser-download-scroll"><BrowserDownloads library={library} popup onAction={(action,value)=>void libraryAction(action,value)} onMore={signal=>refreshLibrary(library.next_offset!,signal)}/></div>
           </PopoverContent>}
         </Popover>
       </div>
@@ -303,9 +320,9 @@ export function BrowserPage({ onNavigation }: { onNavigation(): void }) {
           {panel && <InputGroup><InputGroupAddon><SearchIcon/></InputGroupAddon><InputGroupInput aria-label={t("browser_use.search_history")} placeholder={t("browser_use.search_history")} value={query} onChange={event=>setQuery(event.target.value)}/></InputGroup>}
           {(panel||expanded) && <div className="dl-browser-recent">{recent.slice(0,panel?undefined:6).map(item=><div key={item.id} className="dl-browser-history-row"><button type="button" onClick={()=>go(item.url)}><span className="dl-browser-row-icon"><BrowserSiteIcon src={item.favicon}/></span><span><strong>{item.title||host(item.url)}</strong><small>{panel?item.url:t("browser_use.website")}</small></span><time dateTime={new Date(item.time).toISOString()}>{panel?`${date(item.time)} · `:""}{time(item.time)}</time></button>{panel&&<Button variant="ghost" size="icon-sm" aria-label={t("browser_use.remove_history")} onClick={()=>void libraryAction("remove_history",item.id)}><XIcon/></Button>}</div>)}</div>}
           {recent.length===0 && <Empty><EmptyHeader><EmptyMedia variant="icon"><Clock3Icon/></EmptyMedia><EmptyTitle>{t(query?"browser_use.no_results":"browser_use.no_history")}</EmptyTitle></EmptyHeader></Empty>}
-          {panel && library.next_offset!=null && <Button variant="ghost" onClick={()=>void refreshLibrary(library.next_offset!)}>{t("browser_use.load_more")}</Button>}
+          {panel && library.next_offset!=null && <LazyPage cursor={library.next_offset} onLoad={signal=>refreshLibrary(library.next_offset!,signal)} errorMessage={t("lazy_page.load_failed")}/>}
         </section>}
-        {panel==="downloads" && <BrowserDownloads library={library} onAction={(action,value)=>void libraryAction(action,value)} onMore={()=>void refreshLibrary(library.next_offset!)}/>}
+        {panel==="downloads" && <BrowserDownloads library={library} onAction={(action,value)=>void libraryAction(action,value)} onMore={signal=>refreshLibrary(library.next_offset!,signal)}/>}
         {panel==="settings" && <BrowserSettings/>}
         {panel==="bookmarks" && <BrowserBookmarks onNavigate={go}/>}
       </main></div>}

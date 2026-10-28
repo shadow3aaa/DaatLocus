@@ -4,6 +4,7 @@ import { ChevronRightIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { LazyPage } from "@/components/lazy-page";
 import { discoverModels, type DiscoveredModel, type ProviderConfig } from "@/lib/actor-api";
 import { errorText, StatusNote } from "./controls";
 
@@ -46,7 +47,7 @@ export function ModelDiscovery({state, onSelect, onCustom, disabled}: {
     <div className="dl-settings-discovery">
       {filtered.slice(0, limit).map(model => <Button key={model.id} variant="ghost" disabled={disabled} onClick={() => onSelect(model)}><span className="truncate">{model.id}</span><ChevronRightIcon data-icon="inline-end" /></Button>)}
       {!state.loading && !state.error && !filtered.length ? <p className="dl-settings-caption">{t("model_discovery.no_matching_models")}</p> : null}
-      {filtered.length > limit ? <Button variant="ghost" onClick={() => setLimit(value => value + 30)}>{t("model_discovery.show_more")}</Button> : null}
+      {filtered.length > limit && <LazyPage key={query} cursor={limit} enabled={!disabled} onLoad={async () => setLimit(value => value + 30)} errorMessage={t("lazy_page.load_failed")} />}
       <Button variant="outline" disabled={disabled} onClick={onCustom}>{t("model_discovery.custom_model")}</Button>
     </div>
   </div>;

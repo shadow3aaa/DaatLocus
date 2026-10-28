@@ -23,6 +23,7 @@ import {
   type AppDetail,
   type InstalledApp,
 } from "@/lib/apps-api";
+import { LazyPage } from "@/components/lazy-page";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -218,8 +219,7 @@ export function AppsPage({
   const load = useCallback(
     async (after?: string, signal?: AbortSignal) => {
       const revision = ++epoch.current;
-      setLoading(true);
-      setError("");
+      if (!after) { setLoading(true); setCursor(null); setError(""); }
       try {
         const page = await listApps({
           after,
@@ -227,14 +227,15 @@ export function AppsPage({
           search,
           enabled: filter === "enabled" ? true : undefined,
         });
-        if (revision !== epoch.current) return;
+        if (revision !== epoch.current || signal?.aborted) return;
         setApps((previous) =>
           after ? [...previous, ...page.items] : page.items,
         );
         setCursor(page.next_cursor);
         setStdio(page.stdio_supported);
       } catch (err) {
-        if (signal?.aborted) return;
+        if (signal?.aborted || revision !== epoch.current) return;
+        if (after && !(err instanceof ActorApiError && err.status === 401)) throw err;
         if (err instanceof ActorApiError && err.status === 401)
           onAccessRevoked();
         else setError(failure(err));
@@ -416,17 +417,8 @@ export function AppsPage({
                 )}
               </Empty>
             )}
-            {cursor && (
-              <Button
-                variant="ghost"
-                className="dl-apps-load-more"
-                disabled={loading}
-                onClick={() => void load(cursor)}
-              >
-                {loading && <Spinner data-icon="inline-start" />}
-                {t("apps.load_more")}
-              </Button>
-            )}
+            {cursor && <LazyPage key={`${search}:${filter}`} cursor={cursor} onLoad={signal => load(cursor, signal)} errorMessage={t("lazy_page.load_failed")} />}
+
           </>
         )}
       </div>

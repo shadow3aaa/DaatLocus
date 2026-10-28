@@ -1487,6 +1487,13 @@ activity fetches bounded pages and resumes from its consumed event cursor. Tool
 summaries and completion events carry no redundant duration fields; durable runtime
 and provenance timestamps remain execution evidence.
 
+Paged client lists use the shared visible scroll boundary, including nested dialogs,
+browser popups and settings. Reaching an edge loads the next bounded page; only a
+failed page exposes Retry. Append failures retain loaded content and the same cursor.
+Background browser/device refreshes preserve the loaded page depth and serialize with
+appends so they cannot discard a newly loaded tail. Older conversation pages preserve
+the current reading anchor and are requested only when their upper edge is visible.
+
 ### Conversation import
 
 Local Codex sessions and archived sessions are discovered through a private filesystem

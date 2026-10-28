@@ -1,4 +1,5 @@
 {
+  "lazy_page": {"load_failed": "暂时无法加载，请重试。"},
   "observation_fields": {"status":"状态","output":"输出","stdout":"标准输出","stderr":"错误输出","session":"终端","windows":"窗口","pages":"网页","apps":"应用","actors":"协作者","results":"结果","matches":"匹配结果","entries":"条目","enabled":"已启用","observation":"观察","structuredContent":"结构化结果","structured_content":"结构化结果","resources":"资源","notices":"提示","next_offset":"下一位置"},
   "observation_status": {"submitted":"Sudo 申请已提交，等待权限决定。此调用尚未执行。","scheduled":"已安排","observed":"已观察","dispatched":"已发送操作","outcome_unknown":"操作结果未知","handoff_pending":"正在交还控制","given_to_user":"已交还用户","running":"执行中","completed":"已完成","failed":"失败","cancelled":"已取消","interrupted":"已中断","queued":"等待处理","idle":"就绪","archived":"已归档"},
   "context_composition": {
@@ -142,7 +143,6 @@
     "working": "处理中",
     "ready": "就绪",
     "could_not_load_earlier_messages": "较早的记录暂时无法加载。",
-    "load_earlier_messages": "加载更早的记录",
     "jump_to_latest": "回到最新消息",
     "history_navigation": "对话历史",
     "history_message": "消息",
@@ -227,7 +227,6 @@
     "device": "设备",
     "devices": "设备",
     "status_unknown": "状态未知",
-    "more_devices": "更多设备",
     "invalid_connection": "请输入有效的 wss:// 服务地址。",
     "name_required": "请输入设备名称。",
     "connectivity": "连接模式",
@@ -242,7 +241,6 @@
     "loading_models": "加载模型…",
     "catalog_models": "目录模型",
     "no_matching_models": "没有匹配的模型",
-    "show_more": "显示更多",
     "custom_model": "自定义模型"
   },
   "model_editor": {
@@ -487,7 +485,6 @@
     "download_downloading": "正在下载…",
     "download_failed": "下载失败",
     "download_interrupted": "下载已中断",
-    "load_more": "加载更多",
     "search_engine": "搜索引擎",
     "browsing_data": "浏览数据",
     "clear_data_description": "清除浏览器的 Cookie、缓存和网站数据。网站登录状态会退出，已下载的文件和历史记录会保留。",
@@ -759,7 +756,6 @@
     "empty_description": "添加 MCP 服务器，连接你的工具。",
     "no_results": "未找到应用",
     "try_search": "试试其他名称。",
-    "load_more": "加载更多",
     "add_mcp": "添加自定义 MCP 服务器",
     "name": "名称",
     "name_placeholder": "应用名称",
@@ -825,8 +821,7 @@
     "archived": "已归档",
     "loading": "正在读取会话…",
     "empty": "此设备上没有找到 Codex 会话。",
-    "no_results": "没有匹配的会话。",
-    "load_more": "加载更多"
+    "no_results": "没有匹配的会话。"
   },
   "gui_use": {
     "title": "GUI 操作",

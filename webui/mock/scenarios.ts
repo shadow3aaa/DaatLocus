@@ -1,4 +1,4 @@
-import { resetApps } from "./apps";
+import { resetApps, seedAppPages } from "./apps";
 import { examplesForScene, toolScenes, toolExampleResult } from "./tool-showcase";
 import { resetToolPreview, seedToolExamples } from "./tool-showcase-state";
 import { seedCoreMotionPreview } from "./core-motion";
@@ -14,6 +14,8 @@ export const scenarios = [
   {id:"import-running", label:"导入 · Core 正在准备 Actor", actor:ROOT_ACTOR_ID},
   {id:"import-failed", label:"导入 · 失败", actor:ROOT_ACTOR_ID},
   {id:"apps", label:"应用 · 列表与连接管理", actor:ROOT_ACTOR_ID},
+  {id:"apps-pagination", label:"应用 · 滚动续页", actor:ROOT_ACTOR_ID},
+  {id:"apps-pagination-retry", label:"应用 · 续页失败后重试", actor:ROOT_ACTOR_ID},
   {id:"apps-empty", label:"应用 · 空列表", actor:ROOT_ACTOR_ID},
   {id:"apps-loading", label:"应用 · 加载中", actor:ROOT_ACTOR_ID},
   {id:"apps-error", label:"应用 · 加载失败", actor:ROOT_ACTOR_ID},
@@ -82,6 +84,7 @@ export function activateScenario(id: string, exampleId?: string): boolean {
   resetStore();
   resetToolPreview();
   resetApps(id === "apps-empty");
+  if(id.startsWith("apps-pagination"))seedAppPages(id.endsWith("retry"));
   resetInstructionLayers();
   Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],
     core:{worker_stage_id:STAGE_ID,epoch:1,synchronized:true,ready:true,model_ready:true,state:"replica",config_revision:"1"}});

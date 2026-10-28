@@ -38,6 +38,11 @@ if(scene==="downloads"){
     ...Array.from({length:12},(_,index)=>({id:`photo-${index}`,name:`screenshot-${index+1}.png`,status:"complete" as const,bytes:20480+index*1820})),
   ].map((item,index)=>({...item,url:demo,time:Date.now()-index*60000}));
 }
+if(scene==="pagination"){
+  library.history=Array.from({length:75},(_,index)=>({id:`visit-${index}`,url:`https://example.com/page-${index+1}`,title:`历史记录 ${String(index+1).padStart(2,"0")}`,time:Date.now()-index*60000}));
+  library.downloads=Array.from({length:75},(_,index)=>({id:`download-${index}`,url:demo,name:`Download-${String(index+1).padStart(2,"0")}.txt`,time:Date.now()-index*60000,status:"complete",bytes:1024}));
+  bookmarks=Array.from({length:125},(_,index)=>({id:`bookmark-${index}`,url:`https://example.com/bookmark-${index+1}`,title:`书签 ${String(index+1).padStart(3,"0")}`,time:Date.now()-index*60000}));
+}
 for(const item of library.history)item.favicon=icon;
 for(const page of state.pages)if(page.url!=="about:blank")page.favicon=icon;
 if(scene==="loading"){state.selected="demo";state.pages[1].loading=true;setTimeout(()=>{state.pages[1].loading=false;changed();},12000);}
@@ -132,6 +137,7 @@ export async function browserControl(action:BrowserAction,tab:string|null=null,u
   render();return structuredClone(state);
 }
 export async function browserLibrary(action:BrowserLibraryAction,value:string|null=null):Promise<BrowserLibrary>{
+  if(action==="library"){const offset=Number(value??0),limit=24;return structuredClone({history:library.history.slice(offset,offset+limit),downloads:library.downloads.slice(offset,offset+limit),next_offset:Math.max(library.history.length,library.downloads.length)>offset+limit?offset+limit:null});}
   if(action==="clear_history"){library.history=[];searches=[];localStorage.setItem("dl.mock.browser.searches","[]");window.dispatchEvent(new Event("dl-browser-saved-changed"));}
   if(action==="clear_data")for(const view of frames.values()){view.srcdoc="";}
   if(action==="remove_history")library.history=library.history.filter(item=>item.id!==value);

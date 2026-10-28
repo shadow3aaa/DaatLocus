@@ -335,7 +335,10 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       error_code: null,
       connection: { status: "online", route: null, generation: 1, retry_at_ms: 0 },
     };
-    return json({ items: [device,...previewState.devices], next_cursor: null } satisfies Page<Device, string>);
+    const after=url.searchParams.get("after")??"";
+    const all=[device,...previewState.devices].sort((a,b)=>a.stage_id.localeCompare(b.stage_id)).filter(item=>item.stage_id>after);
+    const items=all.slice(0,limit);
+    return json({ items, next_cursor:all.length>limit?items.at(-1)!.stage_id:null } satisfies Page<Device, string>);
   }
   if (path === "/v1/stage/settings" && method === "PATCH") {
     const body = await jsonBody(req);

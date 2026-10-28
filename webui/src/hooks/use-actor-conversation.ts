@@ -377,23 +377,24 @@ export function useActorConversation(actorId: string | null, options: Conversati
     return () => { abort.abort(); if (controller.current === abort)
       controller.current = null; };
   }, [actorId, enabled, draftEntry, valid, reload, accessFailure, options.includeActivity, draftKey, acceptsInput]);
-  const loadOlder = useCallback(async () => {
+  const loadOlder = useCallback(async (pageSignal?: AbortSignal) => {
     const before = stateRef.current.nextCursor;
     if (!actorId || before === null || loadingOlder)
       return;
     const generation = epoch.current;
     setLoadingOlder(true);
     try {
-      const page = await api.listMessages(actorId, { before, signal: controller.current?.signal });
-      if (!valid(generation))
+      const lifecycle = controller.current?.signal;
+      const signal = pageSignal && lifecycle ? AbortSignal.any([pageSignal, lifecycle]) : pageSignal ?? lifecycle;
+      const page = await api.listMessages(actorId, { before, signal });
+      if (!valid(generation) || pageSignal?.aborted)
         return;
       dispatch({ type: "page", page });
       for (let start = 0; start < page.items.length; start += 4)
         await Promise.all(page.items.slice(start, start + 4).map(message => loadTools(message.id)));
     }
     catch (failure) {
-      if (valid(generation))
-        setError(errorText(failure));
+      if (valid(generation) && !pageSignal?.aborted) throw failure;
     }
     finally {
       if (valid(generation))

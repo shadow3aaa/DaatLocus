@@ -213,11 +213,11 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
     const bounds = footer.current?.querySelector(".dl-composer")?.getBoundingClientRect();
     void chat.send(undefined, undefined, message => { if (bounds) setSendOrigin({messageId:message.id,left:bounds.left,top:bounds.top,width:bounds.width,height:bounds.height}); }).catch(() => {});
   }
-  async function earlier() {
+  async function earlier(signal: AbortSignal) {
     const node = visibleAnchor();
     olderAnchor.current = node ? {node, top: node.getBoundingClientRect().top} : null;
-    try { await chat.loadOlder(); }
-    catch { olderAnchor.current = null; setLocalError(t("conversation_pane.could_not_load_earlier_messages")); }
+    try { await chat.loadOlder(signal); }
+    catch (error) { olderAnchor.current = null; throw error; }
   }
   async function moreMatches(signal: AbortSignal) {
     const node = visibleAnchor();
@@ -236,7 +236,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
             {primaryView && !connecting && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
           </EmptyHeader>{!connecting && !ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
           {chat.loading && <div className="dl-loading-messages"><Skeleton className="h-24 w-4/5 rounded-3xl" /><Skeleton className="ml-auto h-14 w-3/5 rounded-3xl" /><Skeleton className="h-32 w-4/5 rounded-3xl" /></div>}
-          {!filtering && chat.hasMore && <Button variant="ghost" size="sm" className="dl-load-history" disabled={chat.loadingOlder} onClick={() => { void earlier(); }}>{t("conversation_pane.load_earlier_messages")}</Button>}
+          {!filtering && chat.hasMore && chat.nextCursor !== null && <LazyPage key={actorId} cursor={chat.nextCursor} onLoad={earlier} scrollRoot={scroll} errorMessage={t("conversation_pane.could_not_load_earlier_messages")} />}
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}

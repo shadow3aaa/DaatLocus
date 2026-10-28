@@ -565,7 +565,6 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-operation-error { overflow-wrap: anywhere; color: var(--destructive); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin: 6px 0 10px; }
 .dl-conversation-bottom { height: 10px; }
 .dl-loading-messages { display: flex; flex-direction: column; gap: 22px; }
-.dl-load-history { display: flex; margin: 0 auto 26px; }
 .dl-conversation-footer { position: absolute; z-index: 2; bottom: 0; left: 50%; transform: translateX(-50%); max-width: 816px; width: 100%; padding: 10px 24px max(10px,var(--dl-safe-bottom)); background: transparent; pointer-events: none; }
 .dl-conversation-footer>* { pointer-events: auto; }
 .dl-composer-wrap { position: relative; min-width: 0; }
@@ -1054,7 +1053,6 @@ html[data-full-width=true] .dl-message-list, html[data-full-width=true] .dl-conv
 .dl-installed-app>button:not(.dl-installed-app-main) { flex: none; border-radius: 999px; }
 .dl-apps-empty { border: 0; padding-top: 28px; gap: 16px; }
 .dl-apps-empty [data-slot=empty-title] { font-size: 18px; font-weight: 400; }
-.dl-apps-load-more { display: flex; margin: 20px auto 0; }
 .dl-apps-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 16px; color: var(--destructive); }
 .dl-add-app-dialog, .dl-app-detail-dialog { --dl-dialog-width: 600px; width: min(600px,calc(100vw - 32px)); max-width: 600px; max-height: calc(100dvh - 32px); overflow: auto; border-radius: 24px; padding: 20px; gap: 20px; }
 .dl-add-app-dialog [data-slot=dialog-title] { font-size: 22px; line-height: 28px; font-weight: 600; padding-right: 28px; }

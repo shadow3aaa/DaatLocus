@@ -3,6 +3,7 @@ import {PencilIcon,PlusIcon,SearchIcon,StarIcon,Trash2Icon} from "lucide-react";
 import {t} from "@/lib/i18n";
 import {browserSaved,type BrowserBookmark,type BrowserPageInfo,type BookmarkPage} from "@/lib/browser-workspace";
 import {browserDestination} from "@/lib/browser-address";
+import {LazyPage} from "@/components/lazy-page";
 import {Button} from "@/components/ui/button";
 import {Input} from "@/components/ui/input";
 import {Field,FieldGroup,FieldLabel} from "@/components/ui/field";
@@ -50,11 +51,17 @@ export function BrowserBookmarks({onNavigate}:{onNavigate(url:string):void}){
   const request=useRef(0);
   const [pending,setPending]=useState(false);
   useEffect(()=>{const update=()=>setRevision(value=>value+1);window.addEventListener("dl-browser-saved-changed",update);return()=>window.removeEventListener("dl-browser-saved-changed",update);},[]);
-  useEffect(()=>{const id=++request.current;setPending(true);const timer=setTimeout(()=>{void browserSaved<BookmarkPage>("bookmarks",{query,offset:0}).then(value=>{if(request.current===id){setPage(value);setFailed(false);}}).catch(()=>{if(request.current===id)setFailed(true);}).finally(()=>{if(request.current===id)setPending(false);});},query?100:0);return()=>{++request.current;clearTimeout(timer);};},[query,revision]);
-  async function more(){if(pending||page.next_offset===null)return;const id=++request.current;setPending(true);try{const value=await browserSaved<BookmarkPage>("bookmarks",{query,offset:page.next_offset});if(request.current===id)setPage(previous=>({items:[...previous.items,...value.items],next_offset:value.next_offset}));}catch{if(request.current===id)setFailed(true);}finally{if(request.current===id)setPending(false);}}
+  useEffect(()=>{const id=++request.current;setPending(true);setPage({items:[],next_offset:null});const timer=setTimeout(()=>{void browserSaved<BookmarkPage>("bookmarks",{query,offset:0}).then(value=>{if(request.current===id){setPage(value);setFailed(false);}}).catch(()=>{if(request.current===id)setFailed(true);}).finally(()=>{if(request.current===id)setPending(false);});},query?100:0);return()=>{++request.current;clearTimeout(timer);};},[query,revision]);
+  async function more(signal:AbortSignal){
+    if(pending||page.next_offset===null)return;
+    const id=++request.current;
+    const value=await browserSaved<BookmarkPage>("bookmarks",{query,offset:page.next_offset});
+    if(!signal.aborted&&request.current===id)setPage(previous=>({items:[...previous.items,...value.items.filter(item=>!previous.items.some(old=>old.id===item.id))],next_offset:value.next_offset}));
+  }
+
   return <section className="dl-browser-bookmarks"><div className="dl-browser-bookmarks-tools"><InputGroup><InputGroupAddon><SearchIcon/></InputGroupAddon><InputGroupInput aria-label={t("browser_use.search_bookmarks")} placeholder={t("browser_use.search_bookmarks")} value={query} onChange={event=>setQuery(event.target.value)}/></InputGroup><Button variant="outline" onClick={()=>setEditing({})}><PlusIcon data-icon="inline-start"/>{t("browser_use.new_bookmark")}</Button></div>
     {failed&&<Alert variant="destructive"><AlertDescription>{t("browser_use.bookmarks_failed")}</AlertDescription></Alert>}
     <div className="dl-browser-recent">{page.items.map(item=><div className="dl-browser-history-row" key={item.id}><button type="button" onClick={()=>onNavigate(item.url)}><span className="dl-browser-row-icon"><BrowserSiteIcon src={item.favicon}/></span><span><strong>{item.title}</strong><small>{item.url}</small></span></button><Button variant="ghost" size="icon-sm" aria-label={t("browser_use.edit_bookmark_named",{title:item.title})} onClick={()=>setEditing(item)}><PencilIcon/></Button></div>)}</div>
     {!page.items.length&&!failed&&<Empty><EmptyHeader><EmptyMedia variant="icon"><StarIcon/></EmptyMedia><EmptyTitle>{t(query?"browser_use.no_results":"browser_use.no_bookmarks")}</EmptyTitle></EmptyHeader></Empty>}
-    {page.next_offset!==null&&<Button variant="ghost" disabled={pending} onClick={()=>void more()}>{t("browser_use.load_more")}</Button>}{editing&&<BookmarkEditor draft={editing} open onClose={()=>setEditing(null)}/>}</section>;
+    {page.next_offset!==null&&<LazyPage key={`${query}:${revision}`} cursor={page.next_offset} onLoad={more} errorMessage={t("browser_use.bookmarks_failed")}/>}{editing&&<BookmarkEditor draft={editing} open onClose={()=>setEditing(null)}/>}</section>;
 }

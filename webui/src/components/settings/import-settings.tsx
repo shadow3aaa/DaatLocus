@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeftIcon, ArrowUpRightIcon, CheckIcon, CircleAlertIcon, ChevronRightIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
+import { LazyPage } from "@/components/lazy-page";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { CodexMark } from "@/components/import-conversation";
@@ -21,13 +22,14 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
   const listController = useRef<AbortController | null>(null);
   const selectionController = useRef<AbortController | null>(null);
   useEffect(() => () => {listController.current?.abort();selectionController.current?.abort();}, []);
-  async function load(after?: string, refresh = false) {
+  async function load(after?: string, refresh = false, signal?: AbortSignal) {
     listController.current?.abort();
     const current = new AbortController();listController.current=current;
+    const requestSignal = signal ? AbortSignal.any([signal, current.signal]) : current.signal;
     setLoading(true);setError("");
     if (!after) {selectionController.current?.abort();setPreview(null);setSelected(null);setSent(false);setBusy(null);setItems([]);setCursor(null);}
-    try {const page=await listCodexConversations(query,after,refresh,current.signal);if(!current.signal.aborted){setItems(previous=>after?[...previous,...page.items]:page.items);setCursor(page.next_cursor);}}
-    catch(cause){if(!current.signal.aborted)setError(errorText(cause));}
+    try {const page=await listCodexConversations(query,after,refresh,requestSignal);if(!requestSignal.aborted){setItems(previous=>after?[...previous,...page.items]:page.items);setCursor(page.next_cursor);}}
+    catch(cause){if(!requestSignal.aborted){if(after)throw cause;setError(errorText(cause));}}
     finally{if(!current.signal.aborted)setLoading(false);}
   }
   useEffect(() => {
@@ -63,9 +65,9 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
       <header className="dl-import-list-heading"><Button variant="ghost" size="icon-sm" disabled={busy==="sending"} aria-label={t("imports.back")} onClick={()=>{setSource(false);setQuery("");selectionController.current?.abort();setBusy(null);}}><ArrowLeftIcon/></Button><h2>Codex</h2></header>
       <div className="dl-import-list-controls"><label className="dl-import-search"><SearchIcon aria-hidden="true"/><input type="search" value={query} disabled={busy==="sending"} aria-label={t("imports.search")} placeholder={t("imports.search")} onChange={event=>search(event.target.value)}/></label><Button variant="ghost" size="icon" aria-label={t("imports.refresh")} disabled={loading||busy==="sending"} onClick={()=>void load(undefined,true)}><RefreshCwIcon/></Button></div>
       {items.length>0&&<ul className="dl-import-conversations">{items.map(item=><li key={item.id}><button aria-pressed={selected===item.id} disabled={busy==="sending"} onClick={()=>void choose(item)}><span><strong>{item.title}</strong><span>{new Date(item.updated_at_ms).toLocaleString(getCurrentWebUiLanguage(),{dateStyle:"medium",timeStyle:"short"})}{item.archived&&` · ${t("imports.archived")}`}</span></span>{selected===item.id?(busy==="reading"?<Spinner/>:preview?<CheckIcon/>:<CircleAlertIcon/>):<span className="dl-import-selection" aria-hidden="true"/>}</button></li>)}</ul>}
-      {loading&&<div className="dl-import-list-status" role="status"><Spinner/>{t("imports.loading")}</div>}
+      {loading&&!items.length&&<div className="dl-import-list-status" role="status"><Spinner/>{t("imports.loading")}</div>}
       {!loading&&!items.length&&!error&&<p className="dl-import-empty">{t(query?"imports.no_results":"imports.empty")}</p>}
-      {cursor&&!loading&&<Button variant="ghost" disabled={busy==="sending"} onClick={()=>void load(cursor)}>{t("imports.load_more")}</Button>}
+      {cursor&&<LazyPage key={query} cursor={cursor} enabled={busy!=="sending"} onLoad={signal=>load(cursor,false,signal)} errorMessage={t("lazy_page.load_failed")}/>}
       {error&&<div className="dl-import-error"><p role="alert" className="dl-operation-error">{error}</p><Button variant="ghost" size="sm" disabled={loading||busy==="sending"} onClick={()=>void load(undefined,true)}>{t("imports.refresh")}</Button></div>}
       {preview&&<footer className="dl-import-confirm"><div><strong>{preview.title}</strong><p>{t(sent?"imports.submitted":"imports.idle_note")}</p>{!sent&&<span>{t("imports.message_count",{count:preview.message_count})}</span>}</div>{sent?<Button onClick={onViewCore}>{t("imports.view_core")}<ArrowUpRightIcon/></Button>:<Button disabled={!!busy} onClick={()=>void submit()}>{busy==="sending"&&<Spinner/>}{t(busy==="sending"?"imports.sending":"imports.import")}</Button>}</footer>}
     </section>}
