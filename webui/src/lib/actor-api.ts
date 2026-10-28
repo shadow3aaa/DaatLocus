@@ -121,14 +121,13 @@ export type ToolSummary = {
   name: string;
   summary: string;
   error: string | null;
-  started_at_ms?: number | null;
-  finished_at_ms?: number | null;
   outcome?: JsonValue | null;
 };
 export type ToolResult = Omit<ToolSummary, "seq"> & {
   actor_id: string;
   arguments: JsonValue;
   payload: JsonValue;
+  output_schema?: JsonValue;
   model_content: string;
 };
 export type ApprovalScope = {path:string;write:boolean;recursive:boolean};
@@ -183,6 +182,7 @@ export type ActorEvent = {
   message_id: string;
   call_id: string;
   name: string;
+  outcome?: JsonValue | null;
 } | {
   type: "tool_finished";
   message_id: string;
@@ -191,8 +191,6 @@ export type ActorEvent = {
   result_id: string;
   summary: string;
   error: string | null;
-  started_at_ms?: number | null;
-  finished_at_ms?: number | null;
   outcome?: JsonValue | null;
 } | {
   type: "approval_requested";
@@ -367,11 +365,10 @@ export const listMessages = (actor: string, options: FetchOptions & {
   limit?: number;
 } = {}) => request<ConversationPage>(query(`${actorPath(actor)}/messages`, { before: options.before, limit: options.limit ?? 30 }), options);
 export const getMessage = (actor: string, id: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(id)}`, options);
-export const sendMessage = (actor: string, input: {
+export const sendCoreMessage = (input: {
   content: string;
   attachments: string[];
-}, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages`, { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
-export const cancelMessage = (actor: string, id: string, options?: FetchOptions) => request<void>(`${actorPath(actor)}/messages/${segment(id)}/cancel`, { ...options, method: "POST", empty: true });
+}, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>("/v1/core/messages", { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
 export const listMessageActivity = (actor: string, message: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<EventRecord>>(query(`${actorPath(actor)}/messages/${segment(message)}/activity`, { after: options.after, limit: options.limit ?? 100 }), options);
 export const validateAttachment = async (actor: string, item: Attachment, options?: FetchOptions) => {
   const uri = resourceUrl(actor, item.id);
@@ -395,11 +392,11 @@ export const listApprovals = (actor?: string, options: FetchOptions & {
 } = {}) => request<Page<ApprovalRecord>>(query(actor ? `${actorPath(actor)}/approvals` : "/v1/approvals", { before: options.before, limit: options.limit ?? 30 }), options);
 export const getApproval = (id: string, actor?: string, options?: FetchOptions) => request<ApprovalRecord>(`${actor ? `${actorPath(actor)}/approvals` : "/v1/approvals"}/${segment(id)}`, options);
 export const resourceUrl = (actor: string, resource: string) => `${actorPath(actor)}/resources/${segment(resource)}`;
-export const uploadAttachment = (actor: string, file: File, options?: FetchOptions) => {
+export const uploadAttachment = (file: File, options?: FetchOptions) => {
   const maximum = file.type.startsWith("image/") ? 10 * 1024 * 1024 : 32 * 1024 * 1024;
   if (!file.size || file.size > maximum)
     return Promise.reject(new ActorApiError(apiErrorText("payload_too_large"), 413, "payload_too_large"));
-  return request<Attachment>(`${actorPath(actor)}/attachments`, { ...options, method: "POST", raw: file, headers: { "X-File-Name": encodeURIComponent(file.name), "X-File-Name-Encoding": "utf-8-percent", "Content-Type": file.type || "application/octet-stream" } });
+  return request<Attachment>("/v1/core/attachments", { ...options, method: "POST", raw: file, headers: { "X-File-Name": encodeURIComponent(file.name), "X-File-Name-Encoding": "utf-8-percent", "Content-Type": file.type || "application/octet-stream" } });
 };
 export const getConfig = (options?: FetchOptions) => request<SetupConfigRequest>("/v1/config", options);
 export const getConfigReadiness = (options?: FetchOptions) => request<ConfigReadiness>("/v1/config/readiness", options);

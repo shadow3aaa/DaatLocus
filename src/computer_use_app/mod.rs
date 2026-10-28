@@ -484,7 +484,8 @@ impl ComputerUseApp {
         failure: Option<String>,
         image: Option<Vec<u8>>,
     ) -> Result<AppToolExecutionResult> {
-        let mut result = AppToolExecutionResult::new(summary, payload, None);
+        let mut result = AppToolExecutionResult::new(summary, payload, None)
+            .with_output_schema::<crate::app::output::GuiOutput>();
         result.failure = failure;
         if let Some(bytes) = image {
             let resource = match crate::resources::publish(

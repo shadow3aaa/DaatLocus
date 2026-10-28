@@ -171,16 +171,11 @@ impl App for ArtifactsApp {
             reference.uri = format!("/v1/actors/{}/resources/{name}", self.actor_id);
         }
         // Storage paths are trusted infrastructure details, not tool-visible file grants.
-        let mut payload = serde_json::to_value(&reference)
-            .map_err(|err| miette!("artifact result serialization failed: {err}"))?;
-        if let Some(object) = payload.as_object_mut() {
-            object.remove("local_path");
-        }
-        Ok(AppToolExecutionResult::new(
+        AppToolExecutionResult::structured(
             format!("presented {}", reference.title),
-            payload,
+            &reference,
             None,
-        ))
+        )
     }
 }
 

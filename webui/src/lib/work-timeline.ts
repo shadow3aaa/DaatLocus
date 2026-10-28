@@ -1,13 +1,13 @@
 import { t } from "@/lib/i18n";
 import type { ToolRef } from "@/hooks/use-actor-conversation";
 import type { EventRecord, MessageRecord } from "./actor-api";
-export type WorkSegment = { kind: "text"; seq: number; generation: number; channel: "assistant" | "reasoning"; content: string } | { kind: "tools"; seq: number; callIds: string[] };
+export type WorkSegment = { kind: "text"; seq: number; generation: number; channel: "assistant" | "reasoning"; content: string } | { kind: "tools"; seq: number; callIds: string[] } | { kind: "message"; seq: number; resultId: string };
 export function mergeActivity(current: EventRecord[], incoming: EventRecord[], actorId: string, messageId: string): EventRecord[] {
   const records = new Map<number, EventRecord>();
   for (const record of [...current, ...incoming]) if (record.actor_id === actorId && "message_id" in record.event && record.event.message_id === messageId) records.set(record.seq, record);
   return Array.from(records.values()).sort((a,b) => a.seq-b.seq);
 }
-// An expanded round retains its consumed prefix independently of the bounded
+// Visible activity retains its consumed prefix independently of the bounded
 // conversation stream. A disconnected live tail must be backfilled before it
 // can be joined; tool summaries cannot establish chronology for the gap.
 export function extendActivityHistory(history: EventRecord[], live: EventRecord[], actorId: string, messageId: string, through: number) {
@@ -17,11 +17,12 @@ export function extendActivityHistory(history: EventRecord[], live: EventRecord[
   if (window[0].seq > through) return {records: history, through, gap: true};
   return {records: mergeActivity(history, window, actorId, messageId), through: latest, gap: false};
 }
-export function workTimeline(events: EventRecord[], message: MessageRecord, complete = true): WorkSegment[] {
+export function workTimeline(events: EventRecord[], message: MessageRecord, complete = true, settledEvents = events): WorkSegment[] {
   const items = mergeActivity([], events, message.actor_id, message.id);
   const lastGeneration = Math.max(0, ...items.flatMap(({event}) => "generation" in event ? [event.generation] : []));
   const output: WorkSegment[] = [];
   const seenCalls = new Set<string>();
+  const communications = new Set(settledEvents.flatMap(({event}) => event.type === "tool_finished" && event.message_id === message.id && !event.error && event.outcome && typeof event.outcome === "object" && !Array.isArray(event.outcome) && event.outcome.sent_message === true ? [event.call_id] : []));
   for (const record of items) {
     const event = record.event;
     if (event.type === "generation_delta" && (event.channel === "assistant" || event.channel === "reasoning")) {
@@ -30,6 +31,13 @@ export function workTimeline(events: EventRecord[], message: MessageRecord, comp
       if (previous?.kind === "text" && previous.generation === event.generation && previous.channel === event.channel) previous.content += event.text;
       else output.push({ kind: "text", seq: record.seq, generation: event.generation, channel: event.channel, content: event.text });
     } else if (event.type === "tool_started" || event.type === "tool_finished") {
+      if (communications.has(event.call_id)) {
+        if (event.type === "tool_finished" && !seenCalls.has(event.call_id)) {
+          seenCalls.add(event.call_id);
+          output.push({kind:"message",seq:record.seq,resultId:event.result_id});
+        }
+        continue;
+      }
       if (seenCalls.has(event.call_id)) continue;
       seenCalls.add(event.call_id);
       const previous = output.at(-1);
@@ -45,8 +53,8 @@ export function activityTools(events: EventRecord[], message: MessageRecord, sum
   const tools = new Map<string, ToolRef>();
   for (const record of mergeActivity([], events, message.actor_id, message.id)) {
     const event = record.event;
-    if (event.type === "tool_started") tools.set(event.call_id, { seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: !complete || ["queued", "running"].includes(message.status) ? null : t("conversation_content.interrupted"), status: !complete ? "unknown" : ["queued", "running"].includes(message.status) ? "running" : "completed", started_at_ms: record.created_at_ms });
-    if (event.type === "tool_finished") tools.set(event.call_id, { seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", started_at_ms: event.started_at_ms, finished_at_ms: event.finished_at_ms, outcome: event.outcome });
+    if (event.type === "tool_started") tools.set(event.call_id, { seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: !complete || ["queued", "running"].includes(message.status) ? null : t("conversation_content.interrupted"), status: !complete ? "unknown" : ["queued", "running"].includes(message.status) ? "running" : "completed", outcome: event.outcome });
+    if (event.type === "tool_finished") tools.set(event.call_id, { seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", outcome: event.outcome });
   }
   for (const tool of summaries) {
     const existing = tools.get(tool.call_id);
@@ -58,16 +66,16 @@ export function isLiveReasoning(segment: WorkSegment, index: number, segments: W
   return running && index === segments.length - 1 && segment.kind === "text" && segment.channel === "reasoning";
 }
 export type WorkActivitySegment =
-  | Extract<WorkSegment, { kind: "text" }>
+  | Extract<WorkSegment, { kind: "text" | "message" }>
   | { kind: "activity"; seq: number; callIds: string[]; thinking: string | null };
 
 // Reasoning updates the current activity's headline; only actual assistant prose
 // separates groups. Historical reasoning never becomes another disclosure body.
-export function workActivityTimeline(events: EventRecord[], message: MessageRecord, complete = true, live = true): WorkActivitySegment[] {
-  const segments = workTimeline(events, message, complete);
+export function workActivityTimeline(events: EventRecord[], message: MessageRecord, complete = true, live = true, settledEvents = events): WorkActivitySegment[] {
+  const segments = workTimeline(events, message, complete, settledEvents);
   const output: WorkActivitySegment[] = [];
   for (const [index, segment] of segments.entries()) {
-    if (segment.kind === "text" && segment.channel === "assistant") {
+    if (segment.kind === "message" || segment.kind === "text" && segment.channel === "assistant") {
       output.push(segment);
       continue;
     }
@@ -99,18 +107,12 @@ export function workActivityTimeline(events: EventRecord[], message: MessageReco
   }
   return visible;
 }
-export function elapsedLabel(start?: number | null, end?: number | null, now = Date.now()): string | null {
-  if (start == null) return null;
-  const seconds = Math.max(0, Math.floor(((end ?? now) - start) / 1000));
-  if (seconds < 60) return t("work_timeline.value0_s", {value0: seconds});
-  return t("work_timeline.value0_m_value1", {value0: Math.floor(seconds/60), value1: seconds%60 ? ` ${t("work_timeline.value0_s", {value0: seconds%60})}` : ""});
-}
 function workFinishedAt(message: MessageRecord, events: EventRecord[]) {
   const finished = events.filter(record => record.actor_id === message.actor_id && record.event.type === "message_updated" && record.event.message_id === message.id && !["running", "queued"].includes(record.event.status)).at(-1);
   return message.finished_at_ms ?? finished?.created_at_ms ?? message.updated_at_ms;
 }
-export type WorkRoundSpan = { start: number; end: number | null; running: boolean };
-export type WorkTranscriptPart = { message: MessageRecord } & ({ kind: "input" | "outcome" } | { kind: "activity"; span: WorkRoundSpan });
+export type ActivityRange = { start: number; end: number | null; live: boolean };
+export type WorkTranscriptPart = { message: MessageRecord } & ({ kind: "input" | "outcome" } | { kind: "activity"; range: ActivityRange });
 
 /** Split serial execution around nested inputs, rather than placing resumed work at its original input. */
 export function workTranscriptParts(messages: MessageRecord[], allMessages: MessageRecord[], events: EventRecord[] = []): WorkTranscriptPart[] {
@@ -120,28 +122,29 @@ export function workTranscriptParts(messages: MessageRecord[], allMessages: Mess
     message, start: message.started_at_ms ?? message.created_at_ms,
     end: message.status === "running" && message.finished_at_ms == null ? Infinity : workFinishedAt(message, events),
   }));
-  const boundaries = [...new Set(lifetimes.flatMap(item => [item.start, item.end]).filter(Number.isFinite))].sort((a,b) => a-b);
-  const spans: { message: MessageRecord; span: WorkRoundSpan }[] = [];
+  const deliveries = new Set(known.filter(message => message.kind === "delivery" && message.reply).map(message => message.finished_at_ms ?? message.created_at_ms));
+  const boundaries = [...new Set([...lifetimes.flatMap(item => [item.start, item.end]), ...deliveries].filter(Number.isFinite))].sort((a,b) => a-b);
+  const ranges: { message: MessageRecord; range: ActivityRange }[] = [];
   for (const [index, start] of boundaries.entries()) {
     const owner = lifetimes.filter(item => item.start <= start && item.end > start).sort((a,b) => b.message.seq-a.message.seq)[0];
     if (!owner) continue;
     const end = boundaries[index+1] ?? null;
-    const previous = spans.at(-1);
-    if (previous?.message.id === owner.message.id && previous.span.end === start) {
-      previous.span.end = end;
-      previous.span.running = end === null;
-    } else spans.push({message: owner.message, span: {start, end, running: end === null}});
+    const previous = ranges.at(-1);
+    if (previous?.message.id === owner.message.id && previous.range.end === start && !deliveries.has(start)) {
+      previous.range.end = end;
+      previous.range.live = end === null;
+    } else ranges.push({message: owner.message, range: {start, end, live: end === null}});
   }
-  // Instant terminal records still retain their disclosure and outcome.
-  for (const item of lifetimes) if (item.end <= item.start) spans.push({message:item.message,span:{start:item.start,end:item.start,running:false}});
+  // Instant terminal records retain their chronological position.
+  for (const item of lifetimes) if (item.end <= item.start) ranges.push({message:item.message,range:{start:item.start,end:item.start,live:false}});
   const visible = new Set(messages.map(message => message.id));
   const parts: { at: number; order: number; part: WorkTranscriptPart }[] = [];
   for (const message of messages) {
     parts.push({at:Math.min(message.created_at_ms, message.started_at_ms ?? message.created_at_ms),order:0,part:{kind:"input",message}});
-    const last = spans.filter(item => item.message.id === message.id).at(-1);
-    parts.push({at:last?.span.running ? Infinity : message.finished_at_ms ?? last?.span.end ?? message.updated_at_ms,order:last?.span.running ? 4 : 2,part:{kind:"outcome",message}});
+    const last = ranges.filter(item => item.message.id === message.id).at(-1);
+    parts.push({at:last?.range.live ? Infinity : message.finished_at_ms ?? last?.range.end ?? message.updated_at_ms,order:last?.range.live ? 4 : 2,part:{kind:"outcome",message}});
   }
-  for (const {message,span} of spans) if (visible.has(message.id)) parts.push({at:span.running ? Infinity : span.start,order:span.end===span.start ? 1 : 3,part:{kind:"activity",message,span}});
+  for (const {message,range} of ranges) if (visible.has(message.id)) parts.push({at:range.live ? Infinity : range.start,order:range.end===range.start ? 1 : 3,part:{kind:"activity",message,range}});
   return parts.sort((a,b) => a.at-b.at || a.order-b.order || a.part.message.seq-b.part.message.seq).map(item => item.part);
 }
 let primaryActor = "core";

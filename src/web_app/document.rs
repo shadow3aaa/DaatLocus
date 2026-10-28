@@ -233,9 +233,15 @@ impl Document {
             link_bytes += link.url.len();
             links.push(serde_json::json!({"id":link.id,"offset":link.offset,"url":link.url}));
         }
-        Ok(
-            serde_json::json!({"ref_id":ref_id,"requested_url":self.requested_url,"url":self.url,"title":self.title,"source":self.source,"view":if original{"source"}else{"text"},"media_type":self.media_type,"captured_at_ms":self.captured_at_ms,"offset_unit":"utf8_bytes","offset":offset,"next_offset":(end<text.len()).then_some(end),"total_bytes":text.len(),"main_offset":self.main_offsets.first(),"content":&text[offset..end],"links":links,"next_link_offset":next_link_offset,"total_links":self.links.len(),"notices":self.notices}),
-        )
+        let mut value = serde_json::json!({"ref_id":ref_id,"requested_url":self.requested_url,"url":self.url,"title":self.title,"source":self.source,"view":if original{"source"}else{"text"},"media_type":self.media_type,"captured_at_ms":self.captured_at_ms,"offset_unit":"utf8_bytes","offset":offset,"next_offset":(end<text.len()).then_some(end),"total_bytes":text.len(),"main_offset":self.main_offsets.first(),"content":&text[offset..end],"links":links,"next_link_offset":next_link_offset,"total_links":self.links.len(),"notices":self.notices});
+        if self.media_type.contains("json")
+            && offset == 0
+            && end == text.len()
+            && let Ok(data) = serde_json::from_str::<serde_json::Value>(text)
+        {
+            value["structured_content"] = data;
+        }
+        Ok(value)
     }
     pub fn find(&self, ref_id: &str, pattern: &str, offset: usize) -> Result<serde_json::Value> {
         if pattern.is_empty() || offset > self.text.len() || !self.text.is_char_boundary(offset) {

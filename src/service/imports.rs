@@ -141,10 +141,9 @@ async fn submit(
         "idempotency-key",
         key.parse().map_err(|_| ApiError::invalid())?,
     );
-    super::send_message(
+    super::send_core_message(
         State(state),
         headers,
-        axum::extract::Path(core.to_owned()),
         Json(super::SendRequest {
             content: "Import the attached conversation.".into(),
             attachments: vec![resource.id],

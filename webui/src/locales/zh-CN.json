@@ -1,4 +1,6 @@
 {
+  "observation_fields": {"status":"状态","output":"输出","stdout":"标准输出","stderr":"错误输出","session":"终端","windows":"窗口","pages":"网页","apps":"应用","actors":"协作者","results":"结果","matches":"匹配结果","entries":"条目","enabled":"已启用","observation":"观察","structuredContent":"结构化结果","structured_content":"结构化结果","resources":"资源","notices":"提示","next_offset":"下一位置"},
+  "observation_status": {"submitted":"Sudo 申请已提交，等待权限决定。此调用尚未执行。","scheduled":"已安排","observed":"已观察","dispatched":"已发送操作","outcome_unknown":"操作结果未知","handoff_pending":"正在交还控制","given_to_user":"已交还用户","running":"执行中","completed":"已完成","failed":"失败","cancelled":"已取消","interrupted":"已中断","queued":"等待处理","idle":"就绪","archived":"已归档"},
   "context_composition": {
     "title": "上下文组成",
     "role": "角色",
@@ -94,19 +96,11 @@
     "send_message": "发送消息"
   },
   "conversation_content": {
-    "completed": "已完成",
-    "incomplete": "项未完成",
-    "queued": "待接收",
-    "in_progress": "进行中",
-    "stopped": "已停止",
+    "sent_by": "由 {{name}} 发送",
+    "sent_to": "发送给 {{name}}",
     "interrupted": "已中断",
-    "ready": "对话就绪",
-    "view_conversation": "查看对话",
-    "view_value0_value1": "查看 {{value0}} · {{value1}}",
     "thinking": "正在思考",
     "reasoning": "思考过程",
-    "delegated": "已委派",
-    "created": "已创建",
     "could_not_load_details_try_again": "详细结果暂时无法加载，请重试。",
     "failed": "失败",
     "could_not_load_earlier_actions": "更早的操作暂时无法加载。",
@@ -414,13 +408,10 @@
     "details_count_one": "{{count}} 项细节",
     "details_count_other": "{{count}} 项细节"
   },
-  "work_round": {
+  "work_activity": {
     "could_not_load_activity": "活动暂时无法加载。",
     "could_not_load_more_activity": "更多活动暂时无法加载。",
-    "working_value0": "正在处理 · {{value0}}",
-    "elapsed_value0": "用时 {{value0}}",
-    "activity": "执行记录",
-    "no_intermediate_activity_recorded": "这一轮未记录中间活动。"
+    "activity": "执行记录"
   },
   "use_actor_conversation": {
     "some_attachments_are_unavailable_your_draft_is_retained_attach_t": "部分附件已不可用，草稿已保留，请重新添加附件。"
@@ -606,10 +597,6 @@
     "edited_file_details": "已编辑的文件",
     "command_ran": "已运行命令",
     "running_2": "正在执行…"
-  },
-  "work_timeline": {
-    "value0_s": "{{value0}}秒",
-    "value0_m_value1": "{{value0}}分钟{{value1}}"
   },
   "common": {
     "close": "关闭",

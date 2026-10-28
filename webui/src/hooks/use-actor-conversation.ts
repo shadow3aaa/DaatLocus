@@ -1,6 +1,7 @@
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import * as api from "@/lib/actor-api";
+import { isPrimaryActor } from "@/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "@/lib/conversation-drafts";
 export type GenerationDraft = {
   generation: number;
@@ -120,9 +121,9 @@ export function conversationReducer(state: ConversationState, action: Conversati
         }
       }
       if (event.type === "tool_started")
-        next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: null, status: "running" }]) };
+        next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: null, status: "running", outcome: event.outcome }]) };
       if (event.type === "tool_finished")
-        next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", started_at_ms: event.started_at_ms, finished_at_ms: event.finished_at_ms, outcome: event.outcome }]) };
+        next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", outcome: event.outcome }]) };
       return next;
     }
   }
@@ -198,6 +199,7 @@ export function sameAccessSession(expected: string | undefined, actual: api.Acce
 }
 export function useActorConversation(actorId: string | null, options: ConversationOptions = {}) {
   const enabled = options.enabled ?? true;
+  const acceptsInput = Boolean(actorId && isPrimaryActor(actorId));
   const draftKey = `${options.sessionKey ?? "session"}:${actorId ?? ""}`;
   const [state, dispatch] = useReducer(conversationReducer, initialConversation(actorId));
   const stateRef = useRef(state);
@@ -258,6 +260,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     return loadTools(messageId, before);
   }, [loadTools]);
   useEffect(() => {
+    if (!acceptsInput) return;
     const sync = () => { const entry = draftEntry(); setDraftState(entry.text); setAttachments([...entry.attachments]); setUploading(Boolean(entry.uploadQueue?.pending)); };
     let listeners = draftListeners.get(draftKey);
     if (!listeners) {
@@ -267,7 +270,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     listeners.add(sync);
     return () => { listeners.delete(sync); if (!listeners.size)
       draftListeners.delete(draftKey); };
-  }, [draftKey, draftEntry]);
+  }, [draftKey, draftEntry, acceptsInput]);
   useEffect(() => {
     const generation = ++epoch.current;
     const abort = new AbortController();
@@ -279,7 +282,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setSending(false);
     setUploading(false);
     setLoadingOlder(false);
-    const entry = draftEntry();
+    const entry = acceptsInput ? draftEntry() : {text:"",attachments:[]} as DraftEntry;
     setDraftState(entry.text);
     setAttachments([...entry.attachments]);
     setUploading(Boolean(entry.uploadQueue?.pending));
@@ -373,7 +376,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     void initialize();
     return () => { abort.abort(); if (controller.current === abort)
       controller.current = null; };
-  }, [actorId, enabled, draftEntry, valid, reload, accessFailure, options.includeActivity, draftKey]);
+  }, [actorId, enabled, draftEntry, valid, reload, accessFailure, options.includeActivity, draftKey, acceptsInput]);
   const loadOlder = useCallback(async () => {
     const before = stateRef.current.nextCursor;
     if (!actorId || before === null || loadingOlder)
@@ -407,8 +410,8 @@ export function useActorConversation(actorId: string | null, options: Conversati
     return actor;
   }, [actorId, valid]);
   const refresh = useCallback(async () => { setReload(value => value + 1); }, []);
-  const send = useCallback(async (content?: string, attachmentIds?: string[]) => {
-    if (!actorId || sending || !enabled || stateRef.current.actorId !== actorId)
+  const send = useCallback(async (content?: string, attachmentIds?: string[], onAccepted?: (message: api.MessageRecord) => void) => {
+    if (!acceptsInput || !actorId || sending || !enabled || stateRef.current.actorId !== actorId)
       return;
     const generation = epoch.current;
     const entry = draftEntry();
@@ -420,7 +423,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setSending(true);
     setError(null);
     try {
-      const message = await api.sendMessage(actorId, { content: submission.content, attachments: submission.attachments }, submission.key, { signal: controller.current?.signal });
+      const message = await api.sendCoreMessage({ content: submission.content, attachments: submission.attachments }, submission.key, { signal: controller.current?.signal });
       if (entry.pending?.key === submission.key)
         delete entry.pending;
       if (entry.text === submission.content && JSON.stringify(entry.attachments.map(item => item.id)) === JSON.stringify(submission.attachments)) {
@@ -429,6 +432,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
       }
       notifyDraft(draftKey);
       if (valid(generation)) {
+        onAccepted?.(message);
         dispatch({ type: "message", message });
         setDraftState(entry.text);
         setAttachments([...entry.attachments]);
@@ -444,25 +448,9 @@ export function useActorConversation(actorId: string | null, options: Conversati
       if (valid(generation))
         setSending(false);
     }
-  }, [actorId, sending, draftEntry, draftKey, enabled, valid, persistDraft]);
-  const cancel = useCallback(async (messageId: string) => {
-    if (!actorId)
-      return;
-    const generation = epoch.current;
-    try {
-      await api.cancelMessage(actorId, messageId);
-      const message = await api.getMessage(actorId, messageId);
-      if (valid(generation))
-        dispatch({ type: "message", message });
-    }
-    catch (failure) {
-      if (valid(generation))
-        setError(errorText(failure));
-      throw failure;
-    }
-  }, [actorId, valid]);
+  }, [actorId, sending, draftEntry, draftKey, enabled, valid, persistDraft, acceptsInput]);
   const addAttachments = useCallback(async (files: FileList | File[]) => {
-    if (!actorId || !enabled || stateRef.current.actorId !== actorId)
+    if (!acceptsInput || !actorId || !enabled || stateRef.current.actorId !== actorId)
       return;
     const generation = epoch.current;
     const signal = controller.current?.signal;
@@ -472,7 +460,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
       await queueAttachmentUploads(entry, files, {
         signal,
         isCurrent: () => valid(generation),
-        upload: (file, uploadSignal) => api.uploadAttachment(actorId, file, { signal: uploadSignal }),
+        upload: (file, uploadSignal) => api.uploadAttachment(file, { signal: uploadSignal }),
         onChanged: () => notifyDraft(draftKey),
       });
     }
@@ -481,7 +469,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
         setError(errorText(failure));
       throw failure;
     }
-  }, [actorId, enabled, draftEntry, draftKey, valid]);
+  }, [actorId, enabled, draftEntry, draftKey, valid, acceptsInput]);
   const removeAttachment = useCallback((id: string) => { const entry = draftEntry(); entry.attachments = entry.attachments.filter(item => item.id !== id); setAttachments([...entry.attachments]); notifyDraft(draftKey); }, [draftEntry, draftKey]);
   const loadToolDetails = useCallback(async (resultId: string) => {
     if (!actorId)
@@ -497,8 +485,8 @@ export function useActorConversation(actorId: string | null, options: Conversati
   const live = useMemo(() => new Map(Object.entries(state.generations)), [state.generations]);
   const current = state.actorId === actorId && enabled;
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
-    draft: current ? draft : draftEntry().text, setDraft, attachments: current ? attachments : draftEntry().attachments, uploading, addAttachments, removeAttachment,
+    draft: current ? draft : acceptsInput ? draftEntry().text : "", setDraft, attachments: current ? attachments : acceptsInput ? draftEntry().attachments : [], uploading, addAttachments, removeAttachment,
     loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder,
-    sending, send, cancel, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
+    sending, send, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
     loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {} };
 }

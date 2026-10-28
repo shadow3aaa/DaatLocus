@@ -1,4 +1,8 @@
 import { systemPromptRoute } from "./system-prompt";
+import { examplesForScene } from "./tool-showcase";
+import { prepareToolPreviewRead } from "./tool-showcase-state";
+import { toolPreviewControls } from "./tool-preview-controls";
+import { acceptCoreMotionInput, advanceCoreMotionPreview } from "./core-motion";
 import { appsRoute } from "./apps";
 import { configureComputerUse, getComputerUseStatus } from "./computer-use";
 import { importsRoute } from "./imports";
@@ -184,16 +188,15 @@ const RE_ACTOR_USAGE = /^\/v1\/actors\/([^/]+)\/usage$/;
 const RE_MESSAGES = /^\/v1\/actors\/([^/]+)\/messages$/;
 const RE_MESSAGE_SEARCH = /^\/v1\/actors\/([^/]+)\/messages\/search$/;
 const RE_MESSAGE = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)$/;
-const RE_MESSAGE_ACTION = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/(cancel|edit|withdraw)$/;
+const RE_MESSAGE_ACTION = /^\/v1\/(?:actors\/([^/]+)|core)\/messages\/([^/]+)\/(cancel|edit|withdraw)$/;
 const RE_ACTIVITY = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/activity$/;
 const RE_RESULTS = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/results$/;
 const RE_RESULT = /^\/v1\/actors\/([^/]+)\/results\/([^/]+)$/;
 const RE_QUEUE = /^\/v1\/actors\/([^/]+)\/queue$/;
-const RE_QUEUE_CLEAR = /^\/v1\/actors\/([^/]+)\/queue\/clear$/;
+const RE_QUEUE_CLEAR = /^\/v1\/core\/queue\/clear$/;
 const RE_ACTOR_APPROVALS = /^\/v1\/actors\/([^/]+)\/approvals$/;
 const RE_ACTOR_APPROVAL_ITEM = /^\/v1\/actors\/([^/]+)\/approvals\/([^/]+)$/;
 const RE_APPROVAL = /^\/v1\/approvals\/([^/]+)$/;
-const RE_ATTACHMENTS = /^\/v1\/actors\/([^/]+)\/attachments$/;
 const RE_RESOURCE = /^\/v1\/actors\/([^/]+)\/resources\/([^/]+)$/;
 const RE_ACTOR_STREAM = /^\/v1\/actors\/([^/]+)\/event-stream$/;
 const RE_REMOTE = /^\/v1\/stages\//;
@@ -235,6 +238,9 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if(previewState.id==="reconnecting" && (path==="/v1/event-stream"||RE_ACTOR_STREAM.test(path))) return json({message:"Stream unavailable",code:"unavailable"},503);
 
   // ---- mock control -------------------------------------------------------
+  if (path === "/__mock/core-motion/step" && method === "POST") {
+    return previewState.id === "core-motion" ? json(advanceCoreMotionPreview()) : conflict("Select the motion preview first");
+  }
   if (path === "/__mock/activity/step" && method === "POST") {
     return ["activity-replay", "activity-overflow"].includes(previewState.id) && advanceActivityPreview() ? noContent() : conflict("No further activity phase");
   }
@@ -242,15 +248,20 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const id=url.searchParams.get("scene")??"conversation";
     const scene=scenarios.find(item=>item.id===id);
     if(!scene) return invalidRequest("Unknown preview scenario");
+    const exampleId=url.searchParams.get("case") ?? undefined;
+    if(exampleId&&!examplesForScene(id).some(example=>example.id===exampleId)) return invalidRequest("Unknown tool example");
+    const toolControls=toolPreviewControls(id,exampleId);
+    const caseQuery=exampleId?`&case=${encodeURIComponent(exampleId)}`:"";
+    const previewSource=`/__mock/open?scene=${scene.id}${caseQuery}`;
     const requestedWidth=Number(url.searchParams.get("width")??390);
     const width=Number.isInteger(requestedWidth)&&requestedWidth>=320&&requestedWidth<=1440?requestedWidth:390;
-    return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${scene.label} · ${width}px</title><style>body{margin:0;height:100dvh;display:flex;flex-direction:column;background:#e9e9e9;font:14px/1.5 system-ui,sans-serif}nav{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:16px;padding:8px 12px;min-height:45px;box-sizing:border-box}a{color:#333}label{display:inline-flex;align-items:center;gap:6px}input{width:76px;font:inherit;padding:2px 6px}iframe{display:block;flex:1;min-height:0;border:0;margin:0 auto;width:${width}px;max-height:844px;max-width:100%;background:#fcfcfc}</style><nav><a href="/__mock">所有场景</a><a href="/__mock/frame?scene=${scene.id}&width=320">320px</a><a href="/__mock/frame?scene=${scene.id}&width=390">390px</a>${["activity-replay","activity-overflow"].includes(scene.id)?'<button id="activity-step" type="button">下一阶段</button><a href="/__mock/frame?scene='+scene.id+'&width='+width+'">重新开始</a>':""}<label>预览宽度 <input id="preview-width" type="number" min="320" max="1440" value="${width}">px</label></nav><iframe id="preview-frame" title="${scene.label}" src="/__mock/open?scene=${scene.id}"></iframe><script>const widthInput=document.getElementById('preview-width');widthInput.addEventListener('input',()=>{const next=widthInput.valueAsNumber;if(Number.isInteger(next)&&next>=320&&next<=1440)document.getElementById('preview-frame').style.width=next+'px';});const step=document.getElementById('activity-step');let phase=0;if(step)step.addEventListener('click',async()=>{step.disabled=true;const response=await fetch('/__mock/activity/step',{method:'POST'});if(response.ok){phase++;step.textContent=phase===4?'演示已完成':'下一阶段（'+phase+'/4）';step.disabled=phase===4;}else{step.textContent='请重新开始';}});</script></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+    return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${scene.label} · ${width}px</title><style>body{margin:0;height:100dvh;display:flex;flex-direction:column;background:#e9e9e9;font:14px/1.5 system-ui,sans-serif}nav{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:16px;padding:8px 12px;min-height:45px;box-sizing:border-box}a{color:#333}label{display:inline-flex;align-items:center;gap:6px}input{width:76px;font:inherit;padding:2px 6px}iframe{display:block;flex:1;min-height:0;border:0;margin:0 auto;width:${width}px;max-height:844px;max-width:100%;background:#fcfcfc}</style><nav><a href="/__mock">所有场景</a><a href="/__mock/frame?scene=${scene.id}&width=320${caseQuery}">320px</a><a href="/__mock/frame?scene=${scene.id}&width=390${caseQuery}">390px</a>${["activity-replay","activity-overflow","core-motion"].includes(scene.id)?'<button id="activity-step" type="button">下一阶段</button><a href="/__mock/frame?scene='+scene.id+'&width='+width+'">重新开始</a>':""}${toolControls.html}<label>预览宽度 <input id="preview-width" type="number" min="320" max="1440" value="${width}">px</label></nav><iframe id="preview-frame" title="${scene.label}" src="${previewSource}"></iframe><script>${toolControls.script}const widthInput=document.getElementById('preview-width');widthInput.addEventListener('input',()=>{const next=widthInput.valueAsNumber;if(Number.isInteger(next)&&next>=320&&next<=1440)document.getElementById('preview-frame').style.width=next+'px';});const step=document.getElementById('activity-step');let phase=0;if(step)step.addEventListener('click',async()=>{step.disabled=true;const response=await fetch('${scene.id === "core-motion" ? "/__mock/core-motion/step" : "/__mock/activity/step"}',{method:'POST'});if(response.ok){if(response.headers.get("content-type")?.includes("json")){const data=await response.json();if(data.input){const frame=document.getElementById("preview-frame"),doc=frame.contentDocument,win=frame.contentWindow,input=doc.querySelector("textarea");Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype,"value").set.call(input,data.input);input.dispatchEvent(new win.Event("input",{bubbles:true}));await new Promise(requestAnimationFrame);await new Promise(resolve=>{const observer=new win.MutationObserver(()=>{if([...doc.querySelectorAll(".dl-bubble-user")].some(node=>node.textContent===data.input)){observer.disconnect();resolve();}});observer.observe(doc.body,{subtree:true,childList:true});doc.querySelector(".dl-send-button").click();setTimeout(()=>{observer.disconnect();resolve();},3000);});}}phase++;step.textContent=phase===${scene.id === "core-motion" ? 6 : 4}?'演示已完成':'下一阶段（'+phase+'/${scene.id === "core-motion" ? 6 : 4}）';step.disabled=phase===${scene.id === "core-motion" ? 6 : 4};}else{step.textContent='请重新开始';}});</script></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
   }
-  if(path==="/__mock" && method==="GET") return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Daat Locus · UI 预览</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#fafafa;color:#222}main{max-width:800px;margin:48px auto;padding:0 24px}h1{font-size:24px;margin-bottom:8px}p{color:#666}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:28px}article{padding:16px;border:1px solid #ddd;border-radius:12px;background:white}article>a{display:block}article>span{display:flex;gap:16px;margin-top:12px}article>span a{font-size:13px;color:#666}a{color:inherit;text-decoration:none;padding:0;border:1px solid #ddd;border-radius:12px;background:white}a:hover{border-color:#999}small{display:block;margin-top:6px;color:#777}</style><main><h1>WebUI 场景预览</h1><p>使用实际 WebUI 组件和内存数据。切换场景会清除本次预览的草稿以外的数据；不会连接真实账号或设备。</p><nav>${scenarios.map(scene=>`<article><a href="/__mock/${["activity-replay","activity-overflow"].includes(scene.id)?"frame":"open"}?scene=${scene.id}${["activity-replay","activity-overflow"].includes(scene.id)?"&width=1000":""}">${scene.label}<small>${scene.id}</small></a><span><a href="/__mock/frame?scene=${scene.id}&width=390">手机 390px</a><a href="/__mock/frame?scene=${scene.id}&width=320">窄屏 320px</a></span></article>`).join("")}</nav></main></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+  if(path==="/__mock" && method==="GET") return new Response(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Daat Locus · UI 预览</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#fafafa;color:#222}main{max-width:800px;margin:48px auto;padding:0 24px}h1{font-size:24px;margin-bottom:8px}p{color:#666}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:28px}article{padding:16px;border:1px solid #ddd;border-radius:12px;background:white}article>a{display:block}article>span{display:flex;gap:16px;margin-top:12px}article>span a{font-size:13px;color:#666}a{color:inherit;text-decoration:none;padding:0;border:1px solid #ddd;border-radius:12px;background:white}a:hover{border-color:#999}small{display:block;margin-top:6px;color:#777}</style><main><h1>WebUI 场景预览</h1><p>使用实际 WebUI 组件和内存数据。切换场景会清除本次预览的草稿以外的数据；不会连接真实账号或设备。</p><nav>${scenarios.map(scene=>`<article><a href="/__mock/${(["activity-replay","activity-overflow","core-motion"].includes(scene.id)||scene.id.startsWith("tools-"))?"frame":"open"}?scene=${scene.id}${(["activity-replay","activity-overflow","core-motion"].includes(scene.id)||scene.id.startsWith("tools-"))?"&width=1000":""}">${scene.label}<small>${scene.id}</small></a><span><a href="/__mock/frame?scene=${scene.id}&width=390">手机 390px</a><a href="/__mock/frame?scene=${scene.id}&width=320">窄屏 320px</a></span></article>`).join("")}</nav></main></html>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
   if(path==="/__mock/scenarios" && method==="GET") return json({items:scenarios,current:previewState.id});
   if(path==="/__mock/open" && method==="GET") {
     const id=url.searchParams.get("scene")??"conversation";
-    if(!activateScenario(id)) return invalidRequest("Unknown preview scenario");
+    if(!activateScenario(id,url.searchParams.get("case") ?? undefined)) return invalidRequest("Unknown preview scenario or tool example");
     const scene=scenarios.find(item=>item.id===id)!;
     return new Response(null,{status:303,headers:{Location:scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
   }
@@ -389,8 +400,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if (RE_REMOTE.test(path)) return notFound("Unknown remote stage");
 
   // ---- messages -----------------------------------------------------------
-  if ((match = RE_MESSAGES.exec(path))) {
-    const actor = getActor(decodeSegment(match[1]));
+  if ((match = RE_MESSAGES.exec(path)) || path === "/v1/core/messages") {
+    const actor = getActor(match ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
     if (!actor) return notFound("Unknown actor");
     if (method === "GET") {
       const before = intParam(url, "before");
@@ -399,7 +410,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       const page = pageDesc(actor.messages, before, limit);
       return json({ ...page, ...(before === null ? {active:[...actor.messages].reverse().find(message=>message.status === "running") ?? null} : {}), event_cursor: actor.eventSeq });
     }
-    if (method === "POST") {
+    if (method === "POST" && path === "/v1/core/messages") {
       // Backend (src/service/mod.rs): optional key, 1..=128 ASCII graphic.
       const key = req.headers.get("idempotency-key");
       if (key !== null && (key.length > 128 || !/^[\x21-\x7e]+$/.test(key)))
@@ -426,11 +437,12 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
         attachments: attachmentsFromIds(body.attachments),
       });
       if (key) store.idempotency.set(key, message);
+      if (previewState.id === "core-motion") acceptCoreMotionInput(message);
       emitEvent(actor.summary.id, { type: "message_added", message_id: message.id });
-      submitTurn(actor, message);
+      if (previewState.id !== "core-motion") submitTurn(actor, message);
       return json(message, 202);
     }
-    return null;
+    return json({code:"method_not_allowed"},405);
   }
   if ((match = RE_MESSAGE_SEARCH.exec(path)) && method === "GET") {
     const actor = getActor(decodeSegment(match[1]));
@@ -447,7 +459,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return json({ ...page, event_cursor: actor.eventSeq });
   }
   if ((match = RE_MESSAGE_ACTION.exec(path)) && method === "POST") {
-    const actor = getActor(decodeSegment(match[1]));
+    if (match[1] ? match[3] !== "cancel" : match[3] === "cancel") return notFound("Unknown action");
+    const actor = getActor(match[1] ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
     if (!actor) return notFound("Unknown actor");
     const message = findMessage(actor, decodeSegment(match[2]));
     if (!message) return notFound("Unknown message");
@@ -483,6 +496,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     if (!actor) return notFound("Unknown actor");
     const messageId = decodeSegment(match[2]);
     if (!findMessage(actor, messageId)) return notFound("Unknown message");
+    if (!await prepareToolPreviewRead(messageId,true)) return json({message:"Preview activity temporarily unavailable",code:"unavailable"},503);
     const matches = actor.events.filter(record => {
       const event = record.event as { message_id?: string };
       return typeof event.message_id === "string" && event.message_id === messageId;
@@ -506,18 +520,19 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     if (!actor) return notFound("Unknown actor");
     const resultId = decodeSegment(match[2]);
     const entry = actor.tools.find(item => item.result.id === resultId);
+    if (entry && !await prepareToolPreviewRead(resultId)) return json({message:"Preview tool result temporarily unavailable",code:"unavailable"},503);
     return entry ? json(entry.result) : notFound("Unknown tool result");
   }
   if ((match = RE_MESSAGE.exec(path)) && method === "GET") {
-    const actor = getActor(decodeSegment(match[1]));
+    const actor = getActor(match[1] ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
     if (!actor) return notFound("Unknown actor");
     const message = findMessage(actor, decodeSegment(match[2]));
     return message ? json(message) : notFound("Unknown message");
   }
 
   // ---- queue --------------------------------------------------------------
-  if ((match = RE_QUEUE_CLEAR.exec(path)) && method === "POST") {
-    const actor = getActor(decodeSegment(match[1]));
+  if (RE_QUEUE_CLEAR.test(path) && method === "POST") {
+    const actor = getActor(ROOT_ACTOR_ID);
     if (!actor) return notFound("Unknown actor");
     let cancelled = 0;
     for (const message of actor.messages)
@@ -580,8 +595,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   }
 
   // ---- attachments / resources ---------------------------------------------
-  if ((match = RE_ATTACHMENTS.exec(path)) && method === "POST") {
-    const actor = getActor(decodeSegment(match[1]));
+  if (path === "/v1/core/attachments" && method === "POST") {
+    const actor = getActor(ROOT_ACTOR_ID);
     if (!actor) return notFound("Unknown actor");
     // Header/limits contract from src/service/resources.rs.
     const rawName = req.headers.get("x-file-name");

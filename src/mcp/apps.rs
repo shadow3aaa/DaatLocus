@@ -128,6 +128,7 @@ impl AppsManager {
 }
 fn result(summary: &str, value: Value) -> AppToolExecutionResult {
     AppToolExecutionResult::new(summary, value.clone(), Some(value.to_string()))
+        .with_output_schema::<crate::app::output::AppsOutput>()
 }
 fn spec<T: crate::schema_utils::ModelSchema>(name: &str, description: &str) -> AppToolSpec {
     AppToolSpec {
@@ -533,7 +534,8 @@ impl App for McpApp {
             } else {
                 text
             }),
-        );
+        )
+        .with_output_schema::<crate::app::output::McpOutput>();
         result.model_images = images;
         if failed {
             result.failure = Some("MCP tool returned an error".into());

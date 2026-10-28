@@ -1,9 +1,12 @@
 import { resetApps } from "./apps";
+import { examplesForScene, toolScenes, toolExampleResult } from "./tool-showcase";
+import { resetToolPreview, seedToolExamples } from "./tool-showcase-state";
+import { seedCoreMotionPreview } from "./core-motion";
 import { resetInstructionLayers } from "./system-prompt";
 import { advanceActivityPreview, seedActivityPreview, seedGuidanceActivityPreview, seedOverflowActivityPreview, seedPaginatedActivityPreview, seedProseActivityPreview } from "./activity";
 import type { CoreStatus, Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
-import { addApproval, addMessage, addTool, configHolder, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
+import { addApproval, addMessage, addTool, configHolder, createActor, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
 
 export const scenarios = [
   {id:"imports", label:"导入 · 本机会话选择", actor:ROOT_ACTOR_ID},
@@ -18,8 +21,11 @@ export const scenarios = [
   {id:"bubble-spacing", label:"主对话 · 连续气泡与双方切换", actor:ROOT_ACTOR_ID},
   {id:"long-core", label:"主对话 · 长历史与长回复", actor:ROOT_ACTOR_ID},
   {id:"core-incoming", label:"主对话 · 处理中收到新消息", actor:ROOT_ACTOR_ID},
+  {id:"core-motion", label:"主对话 · 气泡与状态动画演示", actor:ROOT_ACTOR_ID},
   {id:"empty", label:"空对话", actor:ROOT_ACTOR_ID},
   {id:"work", label:"工作对话", actor:"research"},
+  {id:"actor-messages", label:"协作者 · 消息气泡", actor:"research"},
+  ...toolScenes,
   {id:"activity-replay", label:"工作活动 · 分步演示", actor:"research"},
   {id:"activity-overflow", label:"工作活动 · 长时间执行与事件补载", actor:"research"},
   {id:"activity-guidance", label:"工作活动 · 执行中收到新消息", actor:"research"},
@@ -69,9 +75,12 @@ function message(actor: ActorStore, content: string, running = false) {
   return record;
 }
 
-export function activateScenario(id: string): boolean {
+export function activateScenario(id: string, exampleId?: string): boolean {
   if (!scenarios.some(scene=>scene.id===id)) return false;
+  const examples = examplesForScene(id);
+  if (exampleId && !examples.some(example=>example.id===exampleId)) return false;
   resetStore();
+  resetToolPreview();
   resetApps(id === "apps-empty");
   resetInstructionLayers();
   Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],
@@ -81,6 +90,36 @@ export function activateScenario(id: string): boolean {
   if(id==="approval"||id==="long-content") {
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
+  if (examples.length || id === "actor-messages") createActor({id:"atlas",name:"Atlas",parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+  if (examples.length) { clear(work); seedToolExamples(work,exampleId ? examples.filter(example=>example.id===exampleId) : examples); }
+  if (id === "actor-messages") {
+    clear(work);
+    const clock = now();
+    const request = addMessage(work,{kind:"request",source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:"layout-request"},content:"请检查消息气泡的配色，确认桌面和手机上的显示都正常。",status:"completed"});
+    const bytes = new TextEncoder().encode("# 布局检查\n\n消息内容应当遵循气泡主题。\n");
+    const attachment = {id:"bubble-layout-note",name:"布局检查.md",media_type:"text/markdown",size_bytes:bytes.length,uri:"/v1/actors/research/resources/bubble-layout-note"};
+    store.attachments.set(attachment.id,{attachment,bytes,media_type:attachment.media_type});
+    request.attachments = [attachment];
+    touchMessage(request,{created_at_ms:clock-60000,started_at_ms:clock-59000,finished_at_ms:clock-30000,reply:"已完成。我的消息使用浅绿色气泡，对方消息使用白色气泡。"});
+    const followup = addMessage(work,{kind:"request",source:{kind:"actor",actor_id:"atlas"},reply_to:{kind:"actor",actor_id:"atlas",request_id:"followup"},content:"也请保留 **Markdown**、代码和长段落的换行。\n\n不要改变中间工具活动的显示方式。",status:"completed"});
+    touchMessage(followup,{created_at_ms:clock-20000,started_at_ms:clock-19000,finished_at_ms:clock-1000,reply:"已经检查 ✅\n\n消息内容支持 **Markdown**、`inlineCode` 和 Emoji。\n\n> 卡片、表格、引用与按钮都跟随气泡主题。\n\n```ts\nconst greeting = '你好，世界 🌍';\nconsole.log(greeting);\n```\n\n| 检查项 | 结果 |\n| --- | --- |\n| 手机换行 | 正常 |\n| 气泡主题 | 一致 |"});
+  }
+  if (id === "actor-messages") {
+    const request = work.messages[0];
+    const examples = examplesForScene("tools-actors").filter(example => ["actor-create", "actor-message", "actor-list"].includes(example.id));
+    const prose = emitEvent(work.summary.id,{type:"generation_delta",message_id:request.id,generation:1,channel:"assistant",text:"我会先检查已有布局，再核对手机尺寸。"});
+    if (prose) prose.created_at_ms = request.started_at_ms! + 500;
+    for (const [index, example] of examples.entries()) {
+      const result = {...toolExampleResult(example, work.summary.id),message_id:request.id};
+      addTool(work,result);
+      const started = emitEvent(work.summary.id,{type:"tool_started",message_id:request.id,call_id:result.call_id,name:result.name});
+      const finished = emitEvent(work.summary.id,{type:"tool_finished",message_id:request.id,call_id:result.call_id,name:result.name,result_id:result.id,summary:result.summary,error:result.error,outcome:result.outcome});
+      if (started) started.created_at_ms = request.started_at_ms! + 1000 + index*2000;
+      if (finished) finished.created_at_ms = request.started_at_ms! + 2000 + index*2000;
+    }
+    request.final_generation = 2;
+  }
+  if (id === "core-motion") { clear(core); seedCoreMotionPreview(core); }
   if (id.startsWith("activity-") || id === "thinking-only") {
     clear(work);
     if (id === "activity-pagination") seedPaginatedActivityPreview(work);
@@ -139,7 +178,7 @@ export function activateScenario(id: string): boolean {
     const followUp = message(core, "这些模板部分来自模板要求吗？");
     touchMessage(followUp, {reply: "我核对一下这两项的来源，区分老师明确要求的内容和我整理文档时加的结构。"});
     const report = deliver("按我读取指导书后的记录，这两类内容有要求依据，但具体表格是我整理的：\n\n- 需求提出：记录需求编号、提出人、日期与原始描述。\n- 修订记录：记录评审后改了什么，以及待确定问题清单。\n\n表格样式和栏目是否必须原样保留，还需核对原文。");
-    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__message", summary: "核对原文", error: null, started_at_ms: now()-1000, finished_at_ms: now(), arguments: {}, model_content: "已交给研究员", outcome: {actor_id: "research", name: "研究员", show_to_user: false}, payload: null});
+    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__message", summary: "核对原文", error: null, arguments: {}, model_content: "已交给研究员", outcome: {actor_id: "research", name: "研究员"}, payload: null});
     deliver("我也会检查原文，确认哪些必须保留，哪些可以删简。");
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "好，再看看原文。", status: "queued"});
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "保留需要确认的地方。", status: "queued"});
@@ -196,7 +235,7 @@ export function activateScenario(id: string): boolean {
     const record=message(work,"检查长代码、表格和文件差异的滚动条。" );
     touchMessage(record,{reply:"布局检查结果：\n\n```typescript\n"+Array.from({length:32},(_,i)=>`const viewport${i+1} = measureConversationLayout({ keepReadingPosition: true, reserveComposerSpace: true, preserveAttachmentDraft: true });`).join("\n")+"\n```\n\n| 位置 | 桌面 | 手机 | 历史位置 | 输入框展开 | 最后一条消息 |\n| --- | --- | --- | --- | --- | --- |\n"+Array.from({length:16},(_,i)=>`| 检查 ${i+1} | 正常 | 正常 | 保持 | 已检查 | 完整可见 |`).join("\n")});
     const toolId=newId(), callId=newId();
-    addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"调整对话区的底部留白",error:null,started_at_ms:now()-6000,finished_at_ms:now()-3000,arguments:{path:"webui/src/index.css"},model_content:"已更新对话区域留白。",outcome:{path:"webui/src/index.css"},payload:{path:"webui/src/index.css",change:{added_lines:24,removed_lines:24,lines:Array.from({length:48},(_,i)=>({kind:i%2?"add":"remove",old_line:i%2?null:i+1,new_line:i%2?i+1:null,text:i%2?"padding-bottom: calc(var(--dl-footer-space) + 24px);":"padding-bottom: 24px;"}))}}});
+    addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"调整对话区的底部留白",error:null,arguments:{path:"webui/src/index.css"},model_content:"已更新对话区域留白。",outcome:{path:"webui/src/index.css"},payload:{path:"webui/src/index.css",change:{added_lines:24,removed_lines:24,lines:Array.from({length:48},(_,i)=>({kind:i%2?"add":"remove",old_line:i%2?null:i+1,new_line:i%2?i+1:null,text:i%2?"padding-bottom: calc(var(--dl-footer-space) + 24px);":"padding-bottom: 24px;"}))}}});
     emitEvent(work.summary.id,{type:"tool_finished",message_id:record.id,call_id:callId,name:"files__edit_file",result_id:toolId,summary:"调整对话区的底部留白",error:null});
   }
   if(id==="diff-overflow") {
@@ -213,7 +252,7 @@ export function activateScenario(id: string): boolean {
       });
       const added=lines.filter(line=>line.kind==="add").length, removed=lines.filter(line=>line.kind==="remove").length;
       const toolId=newId(),callId=newId();
-      addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"更新文件",error:null,started_at_ms:now()-6000,finished_at_ms:now()-3000,arguments:{path:filename},model_content:"文件已更新。",outcome:{path:filename,added_lines:added,removed_lines:removed},payload:{path:filename,change:{added_lines:added,removed_lines:removed,lines}}});
+      addTool(work,{id:toolId,actor_id:work.summary.id,message_id:record.id,call_id:callId,name:"files__edit_file",summary:"更新文件",error:null,arguments:{path:filename},model_content:"文件已更新。",outcome:{path:filename,added_lines:added,removed_lines:removed},payload:{path:filename,change:{added_lines:added,removed_lines:removed,lines}}});
       emitEvent(work.summary.id,{type:"tool_finished",message_id:record.id,call_id:callId,name:"files__edit_file",result_id:toolId,summary:"更新文件",error:null});
     }
   }

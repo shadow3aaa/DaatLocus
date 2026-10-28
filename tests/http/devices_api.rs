@@ -296,7 +296,7 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
 }
 
 #[tokio::test]
-async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_account_grants() {
+async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grants() {
     let relay = crate::support::relay::Relay::new().await;
     use daat_locus::stage::ledger::StageLedger;
     let a = Fixture::new().await;
@@ -417,50 +417,36 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
         StatusCode::METHOD_NOT_ALLOWED
     );
     assert!(a.system.actor(&target).is_ok());
-    let upload = b
-        .owner(reqwest::Method::POST, &format!("{path}/attachments"))
-        .header("x-file-name", "remote.txt")
-        .header("content-type", "text/plain")
-        .body("remote attachment")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        upload.status(),
-        StatusCode::CREATED,
-        "{}",
-        upload.text().await.unwrap()
-    );
-    let upload = upload.json::<Value>().await.unwrap();
-    let id = upload["id"].as_str().unwrap();
-    let sent = b
-        .owner(reqwest::Method::POST, &format!("{path}/messages"))
-        .header("idempotency-key", "remote-with-attachment")
-        .json(&json!({"content":"read the attachment","attachments":[id]}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        sent.status(),
-        StatusCode::OK,
-        "{}",
-        sent.text().await.unwrap()
-    );
-    let sent = sent.json::<Value>().await.unwrap();
-    assert_eq!(sent["attachments"][0]["uri"], upload["uri"]);
-    let local = a
+    let before = a
         .system
         .store()
-        .message(sent["id"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(local.attachments.len(), 1);
-    let download = b
-        .owner(reqwest::Method::GET, upload["uri"].as_str().unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(download.status(), StatusCode::OK);
-    assert_eq!(download.text().await.unwrap(), "remote attachment");
+        .messages(&target, None, 100)
+        .unwrap()
+        .items
+        .len();
+    for (suffix, expected) in [
+        ("messages", StatusCode::METHOD_NOT_ALLOWED),
+        ("attachments", StatusCode::NOT_FOUND),
+    ] {
+        assert_eq!(
+            b.owner(reqwest::Method::POST, &format!("{path}/{suffix}"))
+                .json(&json!({"content":"no direct owner input", "attachments":[]}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    assert_eq!(
+        a.system
+            .store()
+            .messages(&target, None, 100)
+            .unwrap()
+            .items
+            .len(),
+        before
+    );
     let changed = b
         .owner(reqwest::Method::PATCH, &path)
         .json(&json!({"model":null}))
@@ -692,7 +678,7 @@ async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
     assert!(!controller.accepts_input());
 
     let response = f
-        .owner(reqwest::Method::POST, "/v1/actors/core/messages")
+        .owner(reqwest::Method::POST, "/v1/core/messages")
         .json(&json!({"content":"keep this draft","attachments":[]}))
         .send()
         .await
@@ -950,7 +936,7 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
     drop(events);
     b.system.resume_execution().await.unwrap();
     let submit = || {
-        b.owner(Method::POST, "/v1/actors/core/messages")
+        b.owner(Method::POST, "/v1/core/messages")
         .header("idempotency-key", "forward-before-execution-sync")
         .json(&json!({"content":"Forward this without importing execution history", "attachments":[]}))
     };

@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 pub use daat_locus_bash::{TerminalSessionState, TerminalToolResult};
 use miette::{Result, bail, miette};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use std::{fmt::Write as _, path::Path};
 pub type TerminalExecCommandRequest<'a> =
@@ -18,6 +20,22 @@ mod backend;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod command_tests;
 const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
+#[derive(Serialize, JsonSchema)]
+struct TerminalObservation<'a> {
+    #[serde(flatten)]
+    result: &'a TerminalToolResult,
+    running: bool,
+    yield_time_ms: Option<u64>,
+    max_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_mode: Option<&'a str>,
+}
+#[derive(Serialize, JsonSchema)]
+struct TerminatedSession {
+    session: TerminalSessionState,
+}
 pub struct TerminalApp {
     terminal: TerminalManager<RuntimeSandboxPolicy>,
 }
@@ -345,21 +363,18 @@ impl App for TerminalApp {
                     context.tool_output_max_tokens,
                 );
                 let session_id = result.session.session_id.clone();
-                let mut tool_result = AppToolExecutionResult::new(
+                let mut tool_result = AppToolExecutionResult::structured(
                     summary,
-                    json!({
-                        "session": result.session,
-                        "output": result.output,
-                        "output_missed_bytes": result.output_missed_bytes,
-                        "output_dropped_bytes": result.output_dropped_bytes,
-                        "output_retained_bytes": result.output_retained_bytes,
-                        "output_buffer_capacity": result.output_buffer_capacity,
-                        "running": running,
-                        "yield_time_ms": args.yield_time_ms,
-                        "max_chars": args.max_chars,
-                    }),
+                    &TerminalObservation {
+                        result: &result,
+                        running,
+                        yield_time_ms: args.yield_time_ms,
+                        max_chars: args.max_chars,
+                        mode: None,
+                        wait_mode: None,
+                    },
                     Some(model_content),
-                );
+                )?;
                 tool_result.sandbox = self.terminal.take_denial_report(&session_id);
                 Ok(tool_result)
             }
@@ -437,34 +452,29 @@ impl App for TerminalApp {
                     context.tool_output_max_tokens,
                 );
                 let session_id = result.session.session_id.clone();
-                let mut tool_result = AppToolExecutionResult::new(
+                let mut tool_result = AppToolExecutionResult::structured(
                     summary,
-                    json!({
-                        "session": result.session,
-                        "output": result.output,
-                        "output_missed_bytes": result.output_missed_bytes,
-                        "output_dropped_bytes": result.output_dropped_bytes,
-                        "output_retained_bytes": result.output_retained_bytes,
-                        "output_buffer_capacity": result.output_buffer_capacity,
-                        "running": running,
-                        "mode": mode,
-                        "wait_mode": wait_mode_label,
-                        "yield_time_ms": args.yield_time_ms,
-                        "max_chars": args.max_chars,
-                    }),
+                    &TerminalObservation {
+                        result: &result,
+                        running,
+                        yield_time_ms: args.yield_time_ms,
+                        max_chars: args.max_chars,
+                        mode: Some(mode),
+                        wait_mode: Some(wait_mode_label),
+                    },
                     Some(model_content),
-                );
+                )?;
                 tool_result.sandbox = self.terminal.take_denial_report(&session_id);
                 Ok(tool_result)
             }
             "terminal_terminate" => {
                 let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
                 let session = self.terminate_session(&args.session_id)?;
-                let mut tool_result = AppToolExecutionResult::new(
+                let mut tool_result = AppToolExecutionResult::structured(
                     format!("terminated {}", display_session_label(&session.session_id)),
-                    json!({ "session": session }),
+                    &TerminatedSession { session },
                     None,
-                );
+                )?;
                 tool_result.sandbox = self.terminal.take_denial_report(&args.session_id);
                 Ok(tool_result)
             }

@@ -60,8 +60,6 @@ struct MessageArgs {
     actor_id: String,
     reply_to: Option<String>,
     content: String,
-    /// Show a task link in the user's Core conversation. False keeps this coordination internal.
-    show_to_user: bool,
 }
 #[model_schema]
 #[derive(Serialize, JsonSchema)]

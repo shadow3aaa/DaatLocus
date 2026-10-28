@@ -176,13 +176,6 @@ describe("incremental SSE", () => {
   }, 2000);
 });
 describe("cookie-only requests", () => {
-  test("accepted cancellation has no response body and still reports denied cancellation", async () => {
-    globalThis.fetch = (async () => new Response(null, { status: 202 })) as typeof fetch;
-    const { cancelMessage } = await import("../src/lib/actor-api");
-    expect(await cancelMessage("root", "message")).toBeUndefined();
-    globalThis.fetch = (async () => Response.json({ code: "forbidden", message: "Cancellation is forbidden" }, { status: 403 })) as typeof fetch;
-    await expect(cancelMessage("root", "message")).rejects.toBeInstanceOf(ActorApiError);
-  });
   test("account logout use guarded HttpOnly sessions", async () => {
     const requests: {
       url: string;
@@ -225,7 +218,7 @@ describe("cookie-only requests", () => {
   test("Unicode attachment names have an ASCII transport representation", async () => {
     let headers = new Headers();
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => { headers = new Headers(init?.headers); return Response.json({ id: "upload" }); }) as typeof fetch;
-    await uploadAttachment("root", new File(["内容"], "报告.txt", { type: "text/plain" }));
+    await uploadAttachment(new File(["内容"], "报告.txt", { type: "text/plain" }));
     expect(headers.get("X-File-Name")).toBe("%E6%8A%A5%E5%91%8A.txt");
     expect(headers.get("X-File-Name-Encoding")).toBe("utf-8-percent");
   });

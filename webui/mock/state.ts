@@ -302,8 +302,6 @@ export function toolSummary(entry: ToolEntry): ToolSummary {
     name: result.name,
     summary: result.summary,
     error: result.error,
-    started_at_ms: result.started_at_ms ?? null,
-    finished_at_ms: result.finished_at_ms ?? null,
     outcome: result.outcome ?? null,
   };
 }

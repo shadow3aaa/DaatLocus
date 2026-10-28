@@ -491,41 +491,6 @@ impl ActorSystem {
     pub fn infrastructure_dir(&self) -> PathBuf {
         self.inner.data_dir.clone()
     }
-    pub fn send_stage_user(
-        &self,
-        target: crate::stage::ActorAddress,
-        content: String,
-        key: &str,
-    ) -> Result<crate::stage::protocol::Envelope> {
-        self.send_stage_user_with_attachments(target, content, Vec::new(), key)
-    }
-    pub fn send_stage_user_with_attachments(
-        &self,
-        target: crate::stage::ActorAddress,
-        content: String,
-        attachments: Vec<crate::resources::Resource>,
-        key: &str,
-    ) -> Result<crate::stage::protocol::Envelope> {
-        if self.inner.stopping.load(Ordering::Acquire)
-            || self.inner.reconfiguring.load(Ordering::Acquire)
-        {
-            return Err(forbidden("Actor service is not accepting input"));
-        }
-        let local = self
-            .store()
-            .stage_local_id()
-            .map_err(|error| miette::miette!("{error}"))?;
-        crate::stage::delivery::Deliveries::new(self.store(), local)
-            .queue(
-                &self.core_device_actor()?,
-                None,
-                target,
-                (content, attachments),
-                now(),
-                key,
-            )
-            .map_err(|error| miette::miette!("{error}"))
-    }
     pub fn message_stage_from_actor(
         &self,
         sender: &str,

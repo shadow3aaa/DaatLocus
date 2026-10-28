@@ -708,11 +708,9 @@ Actors App 只有 `actors__message` 一种发消息操作，所有 Actor 都可�
 关联 ID 由接收设备校验并解析为本地消息。Core、普通 Actor、Owner 输入、进展、结果与
 运行时通知采用相同的即时接收机制。
 
-Core 的 `message` 另外要求显式填写布尔参数 `show_to_user`：`true` 在 Core 对话中
-展示该次委派的 Actor 任务链接，`false` 保留内部协作记录但不生成用户卡片。
-首次需要用户知悉的委派通常选 `true`，内部补充、追问与协调选 `false`。该值跟随
-工具结果的语义 outcome 持久化、流送与跨设备同步；不影响消息投递、执行权限或结果关联。
-普通 Actor 的工具参数保持不变；创建与导入 Actor 的任务链接保持原有行为。
+Actor 间消息以可跳转的气泡呈现，顶部注明发送方或接收方；成功发送的正文来自结构化工具结果，
+增量事件只携带引用，客户端按需读取有权限的结果详情。创建、导入、状态查询等使用普通工具行，
+不生成任务卡片。Core 隐藏内部通信与工具活动，只呈现明确面向用户的交付。
 
 首个消息分页额外返回至多一个当前输入，避免长历史尾页漏掉仍在运行的旧请求；
 旧输入恢复时发出带原 ID 的消息更新，客户端按需读取，不再加载输入框队列。
@@ -1312,9 +1310,9 @@ Android 前台恢复先解除本地执行暂停，再尝试恢复设备传输；
 早于查询，每次输出与心跳重新认证，尊重背压。同步缺口触发有界重查；重连
 不会反复传完整 runtime snapshot。工具正文和重资源仅在展开时获取。
 
-Core 固定采用 IM，只显示明确用户交付、任务链接、决策与成果。其他 Actor
-固定采用工作呈现，在桌面对话框和手机全屏中均使用同一种身份样式：普通正文、静默耗时
-展开、细分活动与独立成果。活动按时间穿插在对话中，不使用嵌套滚动框。工具
+Core 固定采用 IM，只显示明确用户交付、决策与成果。其他 Actor
+固定采用工作呈现，在桌面对话框和手机全屏中均使用同一种身份样式：消息气泡、
+连续工具调用的折叠活动与独立成果，不保留外层计时条。活动按时间穿插在对话中，不使用嵌套滚动框。工具
 参数用只读标记字段呈现；不以原始 JSON 或模型协议作为产品兜底。活动历史与
 工具列表在展开且滚动接近分页边界时自动加载下一页；折叠后停止续页，加载失败
 才显示重试操作，不提供“更多活动”分页按钮。
@@ -1439,15 +1437,55 @@ viewports supply their own scroll root and keep the boundary reachable horizonta
 Repeated edits to one file retain distinct numbered entries in the change picker.
 
 Work activity distinguishes unfinished input lifetime from serial execution ownership.
-Only the latest running input shows a working heading and a live clock. Suspended
-inputs freeze at the next claimed input's start; completed inputs use their finish
-timestamp (or the terminal event while detail is loading), never the current wall clock.
-An older input can own the clock again after nested inputs finish, without changing
-its durable status or hiding its history. Work presentation splits activity at
-execution handoffs and resumes it after the intervening inputs' outcomes. Each
-disclosure covers only its own execution interval, with its own fixed or live
-duration; original inputs stay anchored at their original position. There is no
-whole-input activity wrapper that moves resumed work ahead of completed inputs.
+Owner input and attachment uploads use only `/v1/core/messages` and
+`/v1/core/attachments`. Owner queue edits, withdrawal and clearing also use the
+Core namespace. Hosted Actor conversations expose observations without a composer
+or local/remote Owner input endpoints; App delegation and correlated Actor messages
+retain their existing authority and delivery contracts.
+
+Tool results retain their original payload and an optional output schema derived from
+Rust `Serialize`/`JsonSchema` types. Field names follow serde renames; source files,
+file changes, artifacts and verbatim text carry content-type metadata on their domain
+types. Native/protocol adapters expose public facts through derived domain schemas.
+The client uses one recursive value renderer and shared content primitives, with no
+per-tool payload dispatch or argument decoding. Schemas are fetched with heavy result
+details; bounded activity events and model-visible tool output do not carry them.
+Terminal start events include the same bounded command source fact used by completed
+observations, preserving a running command preview across live updates and history
+replay without streaming argument envelopes. The client renders it on one line with
+end fading; it never infers a command by decoding model transcripts.
+Sudo retains its immutable wrapper call for review and audit, while bounded
+observations identify the underlying `operation` through the server's Sudo protocol
+adapter. The client reuses that operation's icon, preview, activity grouping and
+outcome handling; original output schemas, content and resources pass through.
+Clients never decode Sudo's serialized target arguments to render the result.
+Tool detail containers have no default card fill or padded outer frame. Code, diffs
+and resource previews inherit the conversation surface, retaining only content
+boundaries, syntax colors and semantic difference backgrounds.
+Activity rows show one translated action and a compact source fact, without echoing
+an operation's summary as a second title. Failures appear inside expanded result
+details, without failure badges or counts on activity headings and tool previews.
+
+Core transcript presence and layout transitions are client state. Accepted sends
+contract from the composer into the destination bubble along an eased path;
+history loading never synthesizes a send. Receipts and the three-dot thinking
+capsule enter and leave with the transcript, respecting reduced-motion preferences.
+Composer height and transcript movement share an explicit duration and easing;
+textarea measurement happens before paint without exposing auto-height geometry.
+Only the turn owns position projection; nested content animates disclosure height
+without adding a second position projection.
+The capsule matches a single-line bubble's height. The `core-motion` mock scenario
+drives the real input path, then advances thinking, replies and disposable history
+removal using semantic events.
+
+Work presentation interleaves message bubbles and collapsible groups of consecutive
+tools directly in the transcript. There is no elapsed-time bar or outer per-input
+disclosure. Commentary uses the Actor's outgoing bubble style. Activity stays at
+its chronological execution position across interleaved inputs and resumed work;
+original input bubbles and independent outcomes retain their anchors. Visible
+activity fetches bounded pages and resumes from its consumed event cursor. Tool
+summaries and completion events carry no redundant duration fields; durable runtime
+and provenance timestamps remain execution evidence.
 
 ### Conversation import
 

@@ -42,10 +42,12 @@ const fieldLabels: Record<string, string> = {
 
 function words(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/_+/g, " "); }
 export function domainToolName(name: string) { return name.replace(/^d_[0-9a-f]{12}_/, ""); }
+/** The backend identifies wrapped operations; never decode wrapper arguments in the client. */
+export function operationToolName(tool: Pick<ToolSummary,"name"|"outcome">) { return domainToolName(asText(asObject(tool.outcome).operation) || tool.name); }
 export function toolLabel(name: string) { const domain=domainToolName(name); return /^mcp_[a-f0-9]{32}__/.test(domain) ? t("apps.tool_action") : labels[domain] ? t(labels[domain]) : domain.split("__").map(words).join(" · "); }
-export function fieldLabel(name: string) { return fieldLabels[name] ? t(fieldLabels[name]) : words(name); }
+export function fieldLabel(name: string) { return t(`observation_fields.${name}`,{defaultValue:fieldLabels[name] ? t(fieldLabels[name]) : words(name)}); }
 export function toolIcon(name: string, outcome?: JsonValue | null) {
-  name = domainToolName(name);
+  name = operationToolName({name,outcome});
   if (name.startsWith("phone_use__")) return SmartphoneIcon;
   if (name.startsWith("computer_use__")) return MonitorIcon;
   if (name.startsWith("terminal__")) return TerminalSquareIcon;
@@ -79,27 +81,18 @@ export function activityIcon(names: string[]) {
 }
 
 export function activityLabel(tool: ToolSummary & { status?: "running" | "completed" | "unknown" }) {
-  const name = domainToolName(tool.name);
+  const name = operationToolName(tool);
   const rejection = approvalNotice(tool.outcome);
-  if (rejection) return { label: rejection.kind === "denied" ? t("tool_presentation.action_not_approved", { action: toolLabel(tool.name) }) : approvalNoticeTitle(rejection.kind), detail: rejection.reason };
-  if (tool.status === "unknown") return { label: toolLabel(tool.name), detail: "" };
-  const active = tool.status === "running";
+  if (rejection) return { label: rejection.kind === "denied" ? t("tool_presentation.action_not_approved", { action: toolLabel(name) }) : approvalNoticeTitle(rejection.kind), detail: rejection.reason };
+  if (tool.status === "unknown") return { label: toolLabel(name), detail: "" };
   const outcome = asObject(tool.outcome ?? undefined);
-  const summary = readableSummary(tool.summary);
-  if (name.startsWith("web__")) return {label:summary || toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
-  if (name.startsWith("browser_use__")) return {label:toolLabel(name),detail:asText(asObject(outcome.observation).title) || (active?t("tool_presentation.running_2"):"")};
-  if (name.startsWith("apps_manager__")) return {label:toolLabel(name),detail:active?t("tool_presentation.running_2"):""};
-  if (/^mcp_[a-f0-9]{32}__/.test(name)) { const app=asObject(outcome.app); return {label:asText(app.name) || t("apps.tool_action"),detail:asText(app.tool) || (active?t("tool_presentation.running_2"):"")}; }
-  if (name === "terminal__terminal_exec") return {
-    label: active ? t("tool_presentation.running") : tool.error ? t("tool_presentation.command_failed") : t("tool_presentation.ran"),
-    detail: asText(outcome.command) || summary || t("tool_presentation.command"),
-  };
-  if (["files__write_file", "files__edit_file", "files__copy_file"].includes(name)) return {
-    label: active ? t("tool_presentation.editing") : tool.error ? t("tool_presentation.edit_failed") : t("tool_presentation.edited"),
-    detail: asText(outcome.path) || summary || t("tool_presentation.file"),
-  };
-  if (name === "files__read_file") return { label: active ? t("tool_presentation.reading") : t("tool_presentation.read"), detail: asText(outcome.path) || summary };
-  return { label: toolLabel(tool.name), detail: active ? t("tool_presentation.running_2") : summary };
+  const app = asObject(outcome.app);
+  if (tool.status === "running" && name.startsWith("terminal__")) return { label: t("tool_presentation.running"), detail: asText(outcome.command) };
+  const label = asText(app.name) || toolLabel(name);
+  const fact = [outcome.command, outcome.path, outcome.title, asObject(outcome.observation).title, app.tool].map(asText).find(Boolean);
+  const detail = fact || (tool.status === "running" ? t("tool_presentation.running_2") : labels[name] || tool.error ? "" : readableSummary(tool.summary));
+  return { label, detail: detail === label ? "" : detail };
+
 }
 
 /** A tool's model transcript is never a UI fallback. Drop serialized envelopes in summaries too. */

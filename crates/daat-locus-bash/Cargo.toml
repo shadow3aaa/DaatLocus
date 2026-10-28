@@ -11,6 +11,7 @@ daat-locus-sandbox = { path = "../daat-locus-sandbox" }
 miette = "7.6.0"
 parking_lot = "0.12.5"
 rubash = "=1.4.3"
+schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["io-util", "rt", "sync", "time"] }
 uuid = { version = "1.23.4", features = ["v4"] }

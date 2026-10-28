@@ -69,34 +69,31 @@ impl App for FilesApp {
                 let args: CopyFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid copy_file arguments"))?;
                 let result = context.files().copy_file(&args).await?;
-                Ok(AppToolExecutionResult::new(
+                AppToolExecutionResult::structured(
                     format!("copied {}", args.destination),
-                    serde_json::to_value(result)
-                        .map_err(|_| miette!("copy result serialization failed"))?,
+                    &result,
                     None,
-                ))
+                )
             }
             "list_directory" => {
                 let args: ListDirectoryArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid list_directory arguments"))?;
                 let result = context.files().list_directory(&args).await?;
-                Ok(AppToolExecutionResult::new(
+                AppToolExecutionResult::structured(
                     format!("listed {} entries", result.entries.len()),
-                    serde_json::to_value(result)
-                        .map_err(|_| miette!("directory result serialization failed"))?,
+                    &result,
                     None,
-                ))
+                )
             }
             "search_text" => {
                 let args: SearchTextArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|error| miette!("invalid search_text arguments: {error}"))?;
                 let result = context.files().search_text(&args).await?;
-                Ok(AppToolExecutionResult::new(
+                AppToolExecutionResult::structured(
                     format!("found {} matching lines", result.matches.len()),
-                    serde_json::to_value(result)
-                        .map_err(|_| miette!("search result serialization failed"))?,
+                    &result,
                     None,
-                ))
+                )
             }
             "read_file" => {
                 let mut args: ReadFileArgs = serde_json::from_value(call.arguments.clone())
@@ -107,12 +104,11 @@ impl App for FilesApp {
                 // before the plaintext when the execution loop bounds model output.
                 let content = serde_json::to_string(&result)
                     .map_err(|err| miette!("file result serialization failed: {err}"))?;
-                let mut output = AppToolExecutionResult::new(
+                let mut output = AppToolExecutionResult::structured(
                     format!("read {} lines from {}", result.line_count, args.path),
-                    serde_json::to_value(&result)
-                        .map_err(|err| miette!("file result serialization failed: {err}"))?,
+                    &result,
                     Some(content),
-                );
+                )?;
                 if result.content.lines().all(|line| {
                     line.len().saturating_mul(6)
                         < context
@@ -134,23 +130,13 @@ impl App for FilesApp {
                 let args: WriteFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid write_file arguments"))?;
                 let result = context.files().write_file(&args).await?;
-                Ok(AppToolExecutionResult::new(
-                    format!("wrote {}", args.path),
-                    serde_json::to_value(result)
-                        .map_err(|err| miette!("file result serialization failed: {err}"))?,
-                    None,
-                ))
+                AppToolExecutionResult::structured(format!("wrote {}", args.path), &result, None)
             }
             "edit_file" => {
                 let args: EditFileArgs = serde_json::from_value(call.arguments.clone())
                     .map_err(|_| miette!("invalid edit_file arguments"))?;
                 let result = context.files().edit_file(&args).await?;
-                Ok(AppToolExecutionResult::new(
-                    format!("edited {}", args.path),
-                    serde_json::to_value(result)
-                        .map_err(|err| miette!("edit result serialization failed: {err}"))?,
-                    None,
-                ))
+                AppToolExecutionResult::structured(format!("edited {}", args.path), &result, None)
             }
             "view_image" if self.supports_vision => {
                 let args: ViewImageArgs = serde_json::from_value(call.arguments.clone())
@@ -163,7 +149,7 @@ impl App for FilesApp {
                     format!("viewed image {}", args.path),
                     json!({ "path": args.path, "media_type": viewed.media_type, "byte_count": viewed.byte_count }),
                     None,
-                );
+                ).with_output_schema::<crate::app::output::ImageOutput>();
                 result.model_images.push(viewed.model_image);
                 Ok(result)
             }

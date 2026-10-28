@@ -969,6 +969,7 @@ fn finish_tool_result(
             .permission_reference
             .as_ref()
             .map(|reference| reference.tool_result_id.as_str()),
+        result.output_schema,
     )?;
     let content = if result.failure.is_some() {
         format!("App error: {model_content}")

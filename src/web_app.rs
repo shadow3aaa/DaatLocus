@@ -330,7 +330,8 @@ impl App for WebApp {
             "Read Web documents",
             payload.clone(),
             Some(payload.to_string()),
-        );
+        )
+        .with_output_schema::<crate::app::output::WebOutput>();
         result.overflow_continuation = Some(
             "Recover omitted text or links by continuing from the returned document references and pagination positions."
                 .into(),

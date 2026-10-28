@@ -28,6 +28,21 @@ describe("standalone WebUI preview",()=>{
     expect(actor.messages).toHaveLength(1);expect(actor.messages[0].reply).toContain("消息区");
     expect(actor.tools.every(tool=>tool.result.message_id===actor.messages[0].id)).toBe(true);
   });
+  test("motion preview covers sends, thinking, reply arrival and message removal through normal message facts",async()=>{
+    activateScenario("core-motion");
+    const core=store.actors.get(ROOT_ACTOR_ID)!;
+    expect(core.messages).toHaveLength(1);
+    for (let phase=1;phase<=6;phase++) {
+      const step=await (await request("/__mock/core-motion/step",{method:"POST"})).json();
+      expect(step.phase).toBe(phase);
+      if (step.input) expect((await request("/v1/core/messages",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content:step.input,attachments:[]})})).status).toBe(202);
+      if (phase===2) expect(core.messages[1].status).toBe("running");
+      if (phase===3) expect(core.messages).toHaveLength(3);
+      if (phase===5) expect(core.messages.every(message=>message.status==="completed")).toBe(true);
+    }
+    expect(core.messages).toHaveLength(2);
+    expect(core.events.at(-1)?.event.type).toBe("conversation_restored");
+  });
   test("connection fixtures reach the actual fixed core readiness contract",async()=>{
     activateScenario("synchronizing");const stage=await (await request("/v1/stage")).json();
     expect(stage.primary_actor_id).toBe("core");expect(stage.core).toMatchObject({ready:false,synchronized:false,state:"synchronizing"});
@@ -65,15 +80,12 @@ describe("standalone WebUI preview",()=>{
     expect(store.actors.get(ROOT_ACTOR_ID)!.messages.some(item=>item.reply?.includes("/reports"))).toBe(true);
     expect((await request("/v1/approvals?awaiting_owner=true")).status).toBe(400);
   });
-  test("cancelling a running mock request retains one cancelled conversation record",async()=>{
-    activateScenario("work");const actor=store.actors.get("research")!;
-    const response=await request("/v1/actors/research/messages",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content:"检查输入框",attachments:[]})});
-    const record=await response.json();expect(response.status).toBe(202);
-    const until=async(check:()=>boolean)=>{const deadline=Date.now()+2000;while(!check()&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));expect(check()).toBe(true);};
-    await until(()=>actor.events.some(item=>item.event.type==="generation_delta"&&item.event.message_id===record.id&&item.event.channel==="assistant"&&item.event.text.includes("检查")));
-    expect((await request(`/v1/actors/research/messages/${record.id}/cancel`,{method:"POST"})).status).toBe(204);
-    await until(()=>actor.messages.find(item=>item.id===record.id)?.status==="cancelled");
-    expect(actor.messages.filter(item=>item.id===record.id||item.in_reply_to===record.id)).toHaveLength(1);
-    expect(actor.messages.find(item=>item.id===record.id)?.reply).toContain("检查");
-  });
-});
+  test("Owner input is Core-only while hosted conversation observations remain available",async()=>{
+    activateScenario("empty");
+    const body={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content:"Hello Core",attachments:[]})};
+    expect((await request("/v1/actors/research/messages",body)).status).toBe(405);
+    expect((await request("/v1/actors/research/messages")).status).toBe(200);
+    const response=await request("/v1/core/messages",body);
+    expect(response.status).toBe(202);
+    expect((await response.json()).actor_id).toBe(ROOT_ACTOR_ID);
+  });});

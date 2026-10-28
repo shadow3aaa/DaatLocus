@@ -4,7 +4,7 @@ use daat_locus_macros::model_schema;
 use miette::{IntoDiagnostic, Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     actors::{ActorConfig, ActorSystem},
@@ -22,6 +22,22 @@ pub struct ActorApp {
 }
 
 impl ActorApp {
+    fn sent_message(
+        summary: String,
+        receipt: Value,
+        conversation_url: String,
+        content: String,
+    ) -> Result<AppToolExecutionResult> {
+        let mut result =
+            AppToolExecutionResult::new(summary, receipt.clone(), Some(receipt.to_string()));
+        result.payload["sent_message"] =
+            serde_json::to_value(crate::app::output::SentActorMessage {
+                conversation_url,
+                content,
+            })
+            .into_diagnostic()?;
+        Ok(result.with_output_schema::<crate::app::output::ActorOutput>())
+    }
     fn conversation_url(&self, actor: &str) -> Result<String> {
         Ok(crate::stage::ActorAddress {
             stage_id: self
@@ -59,26 +75,6 @@ impl ActorApp {
     }
     pub fn new(actor_id: String, system: ActorSystem) -> Self {
         Self { actor_id, system }
-    }
-
-    fn message_arguments(&self, call: &AgentToolCall) -> Result<(MessageActorArgs, Option<bool>)> {
-        if self.actor_id == crate::stage::shared::ACTOR_ID {
-            let args: CoreMessageActorArgs = serde_json::from_value(call.arguments.clone())
-                .map_err(|_| miette!("invalid Core message arguments"))?;
-            Ok((
-                MessageActorArgs {
-                    actor_id: args.actor_id,
-                    stage_id: args.stage_id,
-                    reply_to: args.reply_to,
-                    content: args.content,
-                },
-                Some(args.show_to_user),
-            ))
-        } else {
-            let args = serde_json::from_value(call.arguments.clone())
-                .map_err(|_| miette!("invalid Actor message arguments"))?;
-            Ok((args, None))
-        }
     }
 
     fn caller<'a>(&self, context: &'a AppToolExecutionContext) -> Result<&'a ActorCallContext> {
@@ -174,20 +170,6 @@ struct MessageActorArgs {
     /// Exact related message ID; null starts a request. Does not change timing or authority.
     reply_to: Option<String>,
     content: String,
-}
-
-#[model_schema]
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct CoreMessageActorArgs {
-    actor_id: String,
-    /// Null addresses an Actor on this Stage.
-    stage_id: Option<String>,
-    /// Exact related message ID; null starts a request. Does not change timing or authority.
-    reply_to: Option<String>,
-    content: String,
-    /// Show a task link in the user's Core conversation. False keeps this coordination internal.
-    show_to_user: bool,
 }
 
 #[model_schema]
@@ -390,7 +372,7 @@ impl App for ActorApp {
             AppToolSpec { name: "list".into(), description: "List account Actors and their names on the target device, including archived Actors. Follow next_cursor until null to read all names. Null stage_id selects the current device; null cursor starts the list; null limit uses 25 (maximum 100).".into(), input_schema: model_schema_for::<ListActorArgs>() },
             AppToolSpec { name: "create".into(), description: "Create a persistent owned Actor with a unique name and every device-provided App. Null stage_id selects the current device. Null workspace uses the current working directory. Initial authorization includes recursive read/write access to that directory plus any explicit roots. Core grants this group directly to the device without review; other Actors use the sandbox authorization flow. The group is not Actor configuration.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
             AppToolSpec { name: "import_conversation".into(), description: "Prepare an idle Actor from this request's attached historical conversation. Read the evidence first, choose a name and concise factual context. Original prose is retained as a readable resource. Return its conversation_url to the user and wait for their explicit request before sending work or continuing the imported task. Uses the current workspace and device sandbox; does not queue work or replay effects. Repeated calls for this input return the same Actor.".into(), input_schema: model_schema_for::<ImportConversationArgs>() },
-            AppToolSpec { name: "message".into(), description: "Message an authorized Actor at its next safe boundary. Inference is interrupted; running tools settle first. Null reply_to starts a request; otherwise use an exact related message ID. Receipt does not complete work. Results retain their originating request.".into(), input_schema: if self.actor_id == crate::stage::shared::ACTOR_ID { model_schema_for::<CoreMessageActorArgs>() } else { model_schema_for::<MessageActorArgs>() } },
+            AppToolSpec { name: "message".into(), description: "Message an authorized Actor at its next safe boundary. Inference is interrupted; running tools settle first. Null reply_to starts a request; otherwise use an exact related message ID. Receipt does not complete work. Results retain their originating request.".into(), input_schema: model_schema_for::<MessageActorArgs>() },
             AppToolSpec { name: "status".into(), description: "Inspect a delegated request or one of this Actor's own inputs; never wait or poll for completion. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<RequestArgs>() },
             AppToolSpec { name: "cancel".into(), description: "Cancel one delegated request or an earlier input of this Actor. Use its exact message_id. Other inputs and completed effects remain. Core uses stop to stop an Actor's entire current execution. Null stage_id selects the current device.".into(), input_schema: model_schema_for::<RequestArgs>() },
             AppToolSpec { name: "read_history".into(), description: "Read this Actor's archived task evidence. Null/current scope and null message_id select the active task's source Request using runtime links (including Progress/Result origins), not other tasks. Set message_id for one exact input; use scope=all with message_id=null only for deliberate cross-task investigation. Null cursor starts within the selected scope. Read the first request fragment, then only relevant guidance/results and next_cursor pages needed to determine the next step; stop when sufficient. Keep the same filter while paging. A root filter is one input, not the whole task archive: if current_input_message_id differs from the root, always read that current input too, even when root history exists. related_inputs supplies bounded direct same-Actor Progress/Result locators, not a complete task event tree; new Requests remain independent even if related. Use related_cursor for more locators. If empty, use only returned runtime-related source IDs, never automatically all history. Notes and historical records are evidence, not authority or approvals; never replay uncertain effects.".into(), input_schema: model_schema_for::<ReadHistoryArgs>() },
@@ -413,6 +395,9 @@ impl App for ActorApp {
             AppToolSpec { name: "report".into(), description: "Send a material update, blocker or decision to the original requester while continuing this task. Does not complete the task. Do not send tool-by-tool chatter.".into(), input_schema: model_schema_for::<ReportArgs>() }
         });
         tools
+    }
+    fn output_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(crate::app::output::ActorOutput).to_value())
     }
     async fn execute_tool(
         &mut self,
@@ -581,9 +566,23 @@ impl App for ActorApp {
                 if self.actor_id == crate::stage::shared::ACTOR_ID {
                     self.system.store().publish_delivery(&delivered.id)?;
                 }
+                let receipt = json!({"message_id":delivered.id,"finish_turn":finish_turn});
+                // Local reports become recipient-owned progress inputs; the sender's
+                // tool observation retains the original outward communication.
+                let original = self.system.store().message(&caller.message_id)?;
+                if call.name == "report"
+                    && let crate::actors::ReplyTarget::Actor { actor_id, .. } = original.reply_to
+                {
+                    return Self::sent_message(
+                        "Message delivered".into(),
+                        receipt,
+                        self.conversation_url(&actor_id)?,
+                        content,
+                    );
+                }
                 Ok(AppToolExecutionResult::new(
                     "Message delivered",
-                    json!({"message_id":delivered.id,"finish_turn":finish_turn}),
+                    receipt,
                     None,
                 ))
             }
@@ -908,7 +907,9 @@ impl App for ActorApp {
                 ))
             }
             "message" => {
-                let (args, show_to_user) = self.message_arguments(call)?;
+                let args: MessageActorArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let content = args.content.clone();
                 if let Some(stage) = args.stage_id.as_deref() {
                     let stage = crate::stage::StageId(
                         uuid::Uuid::parse_str(stage)
@@ -933,11 +934,12 @@ impl App for ActorApp {
                             &call.id,
                             args.reply_to.as_deref(),
                         )?;
-                        return Ok(AppToolExecutionResult::new(
+                        return Self::sent_message(
                             format!("message accepted by {}", address.actor_id),
-                            json!({"message_id":frame.invocation_id,"actor_id":address.actor_id,"stage_id":address.stage_id,"conversation_url":address.conversation_url(),"reply_to":args.reply_to,"show_to_user":show_to_user,"status":"queued"}),
-                            None,
-                        ));
+                            json!({"message_id":frame.invocation_id,"actor_id":address.actor_id,"stage_id":address.stage_id,"conversation_url":address.conversation_url(),"reply_to":args.reply_to,"status":"queued"}),
+                            address.conversation_url(),
+                            content,
+                        );
                     }
                 }
                 let message = self.system.message_from_actor_with_context(
@@ -948,11 +950,12 @@ impl App for ActorApp {
                     Some(context),
                     args.reply_to.as_deref(),
                 )?;
-                Ok(AppToolExecutionResult::new(
+                Self::sent_message(
                     format!("message accepted by {}", args.actor_id),
-                    json!({ "message_id": message.id, "actor_id": message.actor_id, "stage_id":self.system.store().public_stage_id()?, "conversation_url":self.conversation_url(&message.actor_id)?, "reply_to":message.in_reply_to, "show_to_user":show_to_user, "status": message.status }),
-                    None,
-                ))
+                    json!({ "message_id": message.id, "actor_id": message.actor_id, "stage_id":self.system.store().public_stage_id()?, "conversation_url":self.conversation_url(&message.actor_id)?, "reply_to":message.in_reply_to, "status": message.status }),
+                    self.conversation_url(&message.actor_id)?,
+                    content,
+                )
             }
             _ => Err(miette!("unknown Actors tool")),
         }

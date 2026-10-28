@@ -2,7 +2,6 @@ import i18n from "../src/lib/i18n";
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PrimaryTranscript, PrimaryTurn, WorkTranscript } from "../src/components/conversation-turns";
-import { WorkRound } from "../src/components/work-round";
 import { Activities } from "../src/components/conversation-content";
 import { Composer } from "../src/components/composer";
 import { TooltipProvider } from "../src/components/ui/tooltip";
@@ -13,13 +12,37 @@ const message: MessageRecord = { seq: 1,id:"m",actor_id:"root",source:{kind:"use
 const event = (seq:number,event:EventRecord["event"]): EventRecord => ({seq,actor_id:"root",created_at_ms:seq,event});
 const memory = (): Storage => { const data = new Map<string,string>(); return { get length(){return data.size;},clear(){data.clear();},getItem(key){return data.get(key)??null;},key(index){return [...data.keys()][index]??null;},removeItem(key){data.delete(key);},setItem(key,value){data.set(key,value);} }; };
 describe("fixed presentation and chronological source", () => {
-  test("Core shows an explicit delegation once and keeps internal collaboration out of task cards", () => {
+  test("message bubbles distinguish user, user-facing reply and local or remote collaboration", () => {
+    const render = (record: MessageRecord) => {
+      const chat = {messages:[record],tools:[],approvals:[],events:[]} as unknown as Parameters<typeof WorkTranscript>[0]["chat"];
+      return renderToStaticMarkup(<WorkTranscript messages={[record]} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
+    };
+    const completed = {...message,status:"completed" as const,reply:"RESULT"};
+    const user = render(completed);
+    expect(user).toContain('dl-bubble-user');
+    expect(user).toContain('dl-bubble-assistant');
+    expect(user).not.toContain('dl-bubble-actor');
+    for (const record of [
+      {...completed,source:{kind:"actor" as const,actor_id:"core"},reply_to:{kind:"actor" as const,actor_id:"core",request_id:"request"}},
+      {...completed,source:{kind:"remote_actor" as const,stage_id:"peer",actor_id:"core",invocation_id:"call"},reply_to:{kind:"remote" as const,stage_id:"peer",invocation_id:"call",user:false}},
+    ]) {
+      const html = render(record);
+      expect(html.match(/dl-bubble-actor/g)).toHaveLength(1);
+      expect(html.match(/dl-bubble-peer/g)).toHaveLength(1);
+      expect(html).toContain('dl-work-actor-reply');
+      expect(html).not.toContain('dl-bubble-user');
+      expect(html).not.toContain('dl-bubble-assistant');
+      expect(html).toContain("RESULT");
+    }
+  });
+  test("Core hides Actor communications and tool cards while retaining user deliveries", () => {
     const initial = {...message,actor_id:"core",id:"initial",content:"Delegate work",status:"completed" as const};
     const internal = {...initial,id:"followup",source:{kind:"actor" as const,actor_id:"research"},reply_to:{kind:"user" as const},content:"Internal evidence"};
-    const tool = (messageId: string, show: boolean) => ({id:`tool-${messageId}`,message_id:messageId,call_id:messageId,name:"actors__message",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",name:"TASK_REFERENCE",message_id:messageId,show_to_user:show}});
-    const chat = {messages:[initial,internal],tools:[tool(initial.id,true),tool(internal.id,false)],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
+    const tool = (messageId: string) => ({id:`tool-${messageId}`,message_id:messageId,call_id:messageId,name:"actors__message",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",name:"TASK_REFERENCE",message_id:messageId}});
+    const chat = {messages:[initial,internal],tools:[tool(initial.id),tool(internal.id)],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
     const html = renderToStaticMarkup(<PrimaryTranscript messages={[initial,internal]} working={false} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
-    expect(html.match(/aria-label="[^"]*TASK_REFERENCE[^"]*"/g)).toHaveLength(1);
+    expect(html).not.toContain("TASK_REFERENCE");
+    expect(html).not.toContain("dl-actor-reference");
     expect(html).not.toContain("Internal evidence");
     expect(renderToStaticMarkup(<PrimaryTurn message={internal} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toBe("");
     const reply = renderToStaticMarkup(<PrimaryTurn message={{...internal,reply:"Meaningful user update"}} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
@@ -40,23 +63,22 @@ describe("fixed presentation and chronological source", () => {
     expect(render([old,latest], true, "")).not.toContain('role="status"');
   });
   test("the shared composer can send a new message while work is running", () => {
-    const props: Parameters<typeof Composer>[0] = {value:"New input",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
+    const props: Parameters<typeof Composer>[0] = {value:"New input",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
     const html = renderToStaticMarkup(<Composer {...props} />);
     expect(html).toContain(`aria-label="${i18n.t("composer.send_message")}"`);
     expect(html).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
     expect(html).not.toContain('disabled=""');
   });
   test("the composer renders exactly one action for its current draft and execution state", () => {
-    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,working:true,onStop:()=>{},canManage:false,models:[],modelName:"",onModelChange:()=>{}};
+    const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
     const attachment = {id:"file",name:"report.txt",media_type:"text/plain",size_bytes:10,uri:"/v1/actors/root/resources/file"};
     const cases = [
-      {patch:{},stop:true,disabled:false},
-      {patch:{value:"   "},stop:true,disabled:false},
+      {patch:{},stop:false,disabled:true},
+      {patch:{value:"   "},stop:false,disabled:true},
       {patch:{value:"Continue"},stop:false,disabled:false},
       {patch:{attachments:[attachment]},stop:false,disabled:false},
       {patch:{uploading:true},stop:false,disabled:true},
-      {patch:{working:false},stop:false,disabled:true},
-      {patch:{busy:true},stop:true,disabled:true},
+      {patch:{busy:true},stop:false,disabled:true},
     ];
     for (const {patch,stop,disabled} of cases) {
       const html = renderToStaticMarkup(<Composer {...props} {...patch} />);
@@ -108,7 +130,7 @@ describe("fixed presentation and chronological source", () => {
     const chat = {messages:[],tools:[],approvals:[]} as unknown as Parameters<typeof PrimaryTurn>[0]["chat"];
     const render = () => renderToStaticMarkup(<PrimaryTurn message={delivery} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
     expect(render()).toBe("");
-    chat.tools = [{id:"file",message_id:delivery.id,call_id:"present",name:"artifacts__present",summary:"",error:null,started_at_ms:1,finished_at_ms:2,outcome:{uri:"/v1/actors/root/resources/report",title:"report.txt"}}];
+    chat.tools = [{id:"file",message_id:delivery.id,call_id:"present",name:"artifacts__present",summary:"",error:null,outcome:{uri:"/v1/actors/root/resources/report",title:"report.txt"}}];
     const html = render();
     expect(html).toContain('href="/v1/actors/root/resources/report"');
     expect(html).toContain("report.txt");
@@ -161,12 +183,7 @@ describe("fixed presentation and chronological source", () => {
     expect(html).not.toContain("<button");
     expect(workActivityTimeline(records,{...message,status:"completed"})).toEqual([]);
   });
-  test("completed activity renders collapsed with intermediate prose hidden", () => {
-    const completed = {...message,status:"completed" as const,started_at_ms:10_000,finished_at_ms:72_000,reply:"结果",final_generation:2};
-    const html = renderToStaticMarkup(<WorkRound message={completed} span={{start:0,end:1,running:false}} events={[event(1,{type:"generation_delta",message_id:"m",generation:1,channel:"assistant",text:"INTERMEDIATE_TEXT"})]} tools={[]} onActor={()=>{}}/>);
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).not.toContain("INTERMEDIATE_TEXT");
-  });
+
 });
 describe("durable drafts are identity/Actor partitioned data, never credentials", () => {
   test("drafts and pending sends retain more than four attachment references", () => {

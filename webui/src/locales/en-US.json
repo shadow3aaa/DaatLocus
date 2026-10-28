@@ -1,4 +1,6 @@
 {
+  "observation_fields": {"status":"Status","output":"Output","stdout":"Standard output","stderr":"Error output","session":"Terminal","windows":"Windows","pages":"Pages","apps":"Apps","actors":"Actors","results":"Results","matches":"Matches","entries":"Entries","enabled":"Enabled","observation":"Observation","structuredContent":"Structured result","structured_content":"Structured result","resources":"Resources","notices":"Notices","next_offset":"Next position"},
+  "observation_status": {"submitted":"Sudo application submitted; awaiting permission. This invocation has not executed.","scheduled":"Scheduled","observed":"Observed","dispatched":"Input dispatched","outcome_unknown":"Outcome unknown","handoff_pending":"Handoff pending","given_to_user":"Given to user","running":"Running","completed":"Completed","failed":"Failed","cancelled":"Cancelled","interrupted":"Interrupted","queued":"Queued","idle":"Ready","archived":"Archived"},
   "context_composition": {
     "title": "Context composition",
     "role": "Role",
@@ -94,19 +96,11 @@
     "send_message": "Send message"
   },
   "conversation_content": {
-    "completed": "Completed",
-    "incomplete": "incomplete",
-    "queued": "Awaiting receipt",
-    "in_progress": "In progress",
-    "stopped": "Stopped",
+    "sent_by": "Sent by {{name}}",
+    "sent_to": "Sent to {{name}}",
     "interrupted": "Interrupted",
-    "ready": "Ready",
-    "view_conversation": "View conversation",
-    "view_value0_value1": "View {{value0}} · {{value1}}",
     "thinking": "Thinking",
     "reasoning": "Reasoning",
-    "delegated": "Delegated",
-    "created": "Created",
     "could_not_load_details_try_again": "Could not load details. Try again.",
     "failed": "Failed",
     "could_not_load_earlier_actions": "Could not load earlier actions.",
@@ -414,13 +408,10 @@
     "details_count_one": "{{count}} detail",
     "details_count_other": "{{count}} details"
   },
-  "work_round": {
+  "work_activity": {
     "could_not_load_activity": "Could not load activity.",
     "could_not_load_more_activity": "Could not load more activity.",
-    "working_value0": "Working · {{value0}}",
-    "elapsed_value0": "Elapsed {{value0}}",
-    "activity": "Activity",
-    "no_intermediate_activity_recorded": "No intermediate activity recorded."
+    "activity": "Activity"
   },
   "use_actor_conversation": {
     "some_attachments_are_unavailable_your_draft_is_retained_attach_t": "Some attachments are unavailable. Your draft is retained. Attach the files again."
@@ -606,10 +597,6 @@
     "edited_file_details": "Edited files",
     "command_ran": "Ran command",
     "running_2": "Running…"
-  },
-  "work_timeline": {
-    "value0_s": "{{value0}}s",
-    "value0_m_value1": "{{value0}}m{{value1}}"
   },
   "common": {
     "close": "Close",

@@ -1,8 +1,8 @@
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { isAndroid } from "@/lib/mobile";
-import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, PlusIcon, XIcon } from "lucide-react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
@@ -12,9 +12,9 @@ import { cn } from "@/lib/utils";
 export type ComposerModel = { name: string; label: string; effort?: string; isDefault?: boolean };
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 
-export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, working, onStop, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
+export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
-  onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean; working: boolean; onStop(): void;
+  onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean;
   disabled?: boolean; submissionDisabled?: boolean; canManage: boolean;
   models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean;
 }) {
@@ -25,12 +25,23 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
   const preference = models.some(model => model.name === modelName) ? modelName : "";
   const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
   const hasDraft = Boolean(value.trim()) || attachments.length > 0;
-  const showStop = working && !hasDraft && !uploading;
   const canSend = !disabled && !submissionDisabled && !busy && !uploading && hasDraft;
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = text.current;
     if (!element) return;
-    const resize = () => { element.style.height = "auto"; const height = element.scrollHeight; const limit = Math.min(240, window.innerHeight / 4); element.style.height = `${Math.min(height, limit)}px`; element.style.overflowY = height > limit ? "auto" : "hidden"; };
+    const resize = () => {
+      const previous = element.getBoundingClientRect().height;
+      // Measure content without exposing an intermediate auto-height frame.
+      element.style.transition = "none";
+      element.style.height = "auto";
+      const height = element.scrollHeight;
+      const limit = Math.min(240, window.innerHeight / 4);
+      element.style.height = `${previous}px`;
+      void element.offsetHeight;
+      element.style.transition = "";
+      element.style.height = `${Math.min(height, limit)}px`;
+      element.style.overflowY = height > limit ? "auto" : "hidden";
+    };
     resize();
     let width = element.clientWidth;
     const observer = new ResizeObserver(() => { if (element.clientWidth !== width) { width = element.clientWidth; resize(); } });
@@ -59,13 +70,13 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {!isAndroid() && <DropdownMenuItem onSelect={() => folder.current?.click()}><FolderIcon data-icon="inline-start" />{t("composer.folder")}<span className="dl-menu-hint">{t("composer.attach_folder")}</span></DropdownMenuItem>}
           </DropdownMenuGroup></DropdownMenuContent>
         </DropdownMenu>
-        {canManage && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy || working} aria-label={`${t("composer.models")}: ${selected?.label || t("composer.default_model")}`} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
+        {canManage && <DropdownMenu><DropdownMenuTrigger asChild><InputGroupButton disabled={disabled || busy} aria-label={`${t("composer.models")}: ${selected?.label || t("composer.default_model")}`} className="dl-model-trigger"><span className="dl-model-name">{selected?.label || t("composer.default_model")}</span>{selected?.effort && <span className="dl-model-effort">{effortLabel(selected.effort)}</span>}<ChevronDownIcon data-icon="inline-end" /></InputGroupButton></DropdownMenuTrigger>
           <DropdownMenuContent align="end" side="top" className="dl-model-menu"><DropdownMenuLabel>{t("composer.models")}</DropdownMenuLabel><DropdownMenuRadioGroup value={preference} onValueChange={onModelChange}>
             <DropdownMenuRadioItem value="">{t("composer.use_default_model")}</DropdownMenuRadioItem>
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
-        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t(showStop ? "composer.stop_task" : "composer.send_message")} disabled={showStop ? busy : !canSend} onClick={showStop ? onStop : onSubmit}>{busy ? <Spinner /> : showStop ? <SquareIcon fill="currentColor" strokeWidth={0} style={{ scale: "0.75" }} /> : <ArrowUpIcon />}</InputGroupButton>
+        <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>
       </InputGroupAddon>
     </InputGroup>
     <input ref={file} className="sr-only" aria-hidden="true" tabIndex={-1} type="file" multiple onChange={event => { onFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />

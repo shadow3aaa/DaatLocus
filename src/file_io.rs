@@ -140,33 +140,34 @@ pub struct SearchTextArgs {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DirectoryEntry {
     pub name: String,
     pub path: String,
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DirectoryPage {
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchMatch {
     pub path: String,
     pub line_number: usize,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
     pub limited: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "source"))]
 pub struct ReadFileResult {
     pub path: String,
     pub start_line: usize,
@@ -178,7 +179,8 @@ pub struct ReadFileResult {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "file-change"))]
 pub struct FileWriteResult {
     pub path: String,
     pub sha256: String,
@@ -187,7 +189,7 @@ pub struct FileWriteResult {
     pub change: Option<FileChange>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FileChange {
     pub before_sha256: Option<String>,
     pub after_sha256: String,
@@ -197,7 +199,7 @@ pub struct FileChange {
     pub patch: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiffLine {
     pub kind: String,
     pub old_line: Option<usize>,

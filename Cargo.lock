@@ -1616,6 +1616,7 @@ dependencies = [
  "miette",
  "parking_lot",
  "rubash",
+ "schemars 1.2.3",
  "serde",
  "tokio",
  "uuid",

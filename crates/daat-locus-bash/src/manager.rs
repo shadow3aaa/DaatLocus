@@ -32,9 +32,10 @@ struct TerminalSession<P: ProcessPolicy> {
     state: TerminalSessionState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalToolResult {
     pub session: TerminalSessionState,
+    #[schemars(extend("x-dl-content" = "text"))]
     pub output: String,
     pub output_missed_bytes: usize,
     pub output_dropped_bytes: usize,
@@ -42,9 +43,11 @@ pub struct TerminalToolResult {
     pub output_buffer_capacity: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalSessionState {
+    #[schemars(skip)]
     pub session_id: String,
+    #[schemars(skip)]
     pub process_id: Option<u32>,
     pub command: Option<String>,
     pub status: String,

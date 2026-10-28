@@ -124,6 +124,7 @@ impl ActorStore {
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 payload: Value::Null,
+                output_schema: None,
                 model_content: String::new(),
                 summary: String::new(),
                 error: None,

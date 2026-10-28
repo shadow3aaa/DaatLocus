@@ -483,7 +483,17 @@ async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
         .find(|tool| tool.call_id == "invalid-observation-id")
         .unwrap();
     assert!(observation_error.error.is_some());
-    assert!(observation_error.started_at_ms.is_some());
+    let summary = serde_json::to_value(observation_error).unwrap();
+    assert!(summary.get("started_at_ms").is_none());
+    assert!(summary.get("finished_at_ms").is_none());
+    assert!(
+        system
+            .store()
+            .tool_result(&observation_error.id)
+            .unwrap()
+            .started_at_ms
+            .is_some()
+    );
     assert!(
         invalid.started_at_ms.is_some(),
         "Domain target validation runs inside the original invocation"
@@ -1506,7 +1516,7 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
         device_pair(core_model.clone(), worker_model.clone()).await;
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__message".into(),
-            arguments:json!({"reply_to":null,"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task","show_to_user":true})}]),
+            arguments:json!({"reply_to":null,"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task"})}]),
         MockReply::Pending,
     ]);
     let original = a
@@ -1538,7 +1548,7 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
     let policy = b.execution_actor(&target).unwrap().config;
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"remote-guidance".into(),name:"actors__message".into(),
-            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","reply_to":target.id,"content":"REMOTE_CORE_GUIDANCE","show_to_user":false})}]),
+            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","reply_to":target.id,"content":"REMOTE_CORE_GUIDANCE"})}]),
         MockReply::Answer("Guidance sent"),
         MockReply::PendingOnEveryRequest,
     ]);
@@ -1578,14 +1588,14 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
     let outcome = result[0].outcome.as_ref().unwrap();
     assert_eq!(outcome["stage_id"], net_b.host.local.to_string());
     assert_eq!(outcome["reply_to"], target.id);
-    assert_eq!(outcome["show_to_user"], json!(false));
+    assert_eq!(outcome["sent_message"], json!(true));
     let delegation = a
         .store()
         .tool_summaries("core", &original.id, None, 10)
         .unwrap()
         .items;
     assert_eq!(
-        delegation[0].outcome.as_ref().unwrap()["show_to_user"],
+        delegation[0].outcome.as_ref().unwrap()["sent_message"],
         json!(true)
     );
     assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
@@ -2977,23 +2987,18 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
     handle
         .watch("root", view, SubscriptionLevel::Detail)
         .unwrap();
-    let frame = a
-        .send_stage_user(
+    let send = || {
+        crate::stage::delivery::Deliveries::new(a.store(), host_a.local).queue(
+            &a.core_device_actor().unwrap(),
+            None,
             target.clone(),
-            "Respond over the native peer channel.".into(),
+            ("Respond over the native peer channel.".into(), vec![]),
+            chrono::Utc::now().timestamp_millis(),
             "tcp-client-operation",
         )
-        .unwrap();
-    assert_eq!(
-        a.send_stage_user(
-            target.clone(),
-            "Respond over the native peer channel.".into(),
-            "tcp-client-operation"
-        )
-        .unwrap()
-        .invocation_id,
-        frame.invocation_id
-    );
+    };
+    let frame = send().unwrap();
+    assert_eq!(send().unwrap().invocation_id, frame.invocation_id);
     handle.flush();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -5358,7 +5363,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     let stage = system.store().public_stage_id().unwrap();
     core.replies.lock().extend([
         MockReply::Calls(vec![
-            AgentToolCall{id:"delegate".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair","show_to_user":true})},
+            AgentToolCall{id:"delegate".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair"})},
             AgentToolCall{id:"ack".into(),name:"actors__deliver".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
         ]),
         MockReply::Answer("Your second message has been handled."),

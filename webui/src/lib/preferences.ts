@@ -47,6 +47,8 @@ export function applyPreferences(value: Preferences) {
   root.style.setProperty("--background", palette.background);
   root.style.setProperty("--foreground", palette.foreground);
   const custom = palette.background !== defaults.background || palette.foreground !== defaults.foreground;
+  if (custom) root.style.setProperty("--chat-canvas", palette.background);
+  else root.style.removeProperty("--chat-canvas");
   for (const [token, mix] of Object.entries({card: 3, popover: 5, secondary: 6, muted: 6, "settings-muted": 4, accent: 6, input: 14, "settings-border": 10, "history-muted": 17, "history-visible": 56, "history-hover": 100})) {
     if (custom) root.style.setProperty(`--${token}`, `color-mix(in srgb, ${palette.foreground} ${mix}%, ${palette.background})`);
     else root.style.removeProperty(`--${token}`);
@@ -58,11 +60,7 @@ export function applyPreferences(value: Preferences) {
   if (custom) root.style.setProperty("--muted-foreground", `color-mix(in srgb, ${palette.foreground} 65%, ${palette.background})`);
   else root.style.removeProperty("--muted-foreground");
   const accent = accentColors[palette.accent];
-  for (const [token, color] of Object.entries({"work-user": accent || (custom ? palette.foreground : null), "work-user-foreground": accent ? "#FFFFFF" : custom ? palette.background : null})) {
-    if (color) root.style.setProperty(`--${token}`, color);
-    else root.style.removeProperty(`--${token}`);
-  }
-  for (const token of ["primary", "ring", "chat-user"]) {
+  for (const token of ["primary", "ring"]) {
     if (accent) root.style.setProperty(`--${token}`, accent);
     else root.style.removeProperty(`--${token}`);
   }

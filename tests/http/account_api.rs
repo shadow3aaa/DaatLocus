@@ -392,7 +392,7 @@ async fn account_browser_sessions_enforce_csrf_logout_and_password_revision() {
     ] {
         let mut request = fixture
             .client
-            .post(format!("{}/v1/actors/root/messages", fixture.url))
+            .post(format!("{}/v1/core/messages", fixture.url))
             .header("cookie", &cookie)
             .json(&json!({"content":"browser mutation", "attachments":[]}));
         if let Some(origin) = origin {
@@ -409,7 +409,7 @@ async fn account_browser_sessions_enforce_csrf_logout_and_password_revision() {
     assert_eq!(
         fixture
             .client
-            .post(format!("{}/v1/actors/root/messages", fixture.url))
+            .post(format!("{}/v1/core/messages", fixture.url))
             .header("cookie", &cookie)
             .header("origin", &fixture.url)
             .header("x-daat-request", "1")
@@ -418,12 +418,12 @@ async fn account_browser_sessions_enforce_csrf_logout_and_password_revision() {
             .await
             .unwrap()
             .status(),
-        StatusCode::ACCEPTED
+        StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
         fixture
             .client
-            .post(format!("{}/v1/actors/root/messages", fixture.url))
+            .post(format!("{}/v1/core/messages", fixture.url))
             .header("cookie", &cookie)
             .header("authorization", "Bearer invalid")
             .json(&json!({"content":"invalid Bearer cannot bypass CSRF", "attachments":[]}))

@@ -169,12 +169,12 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
         completeRun(actor, user, reply, `已根据会话创建 [Athena](/actors/${id})，保留了原始上下文。它会等待你继续，尚未开始执行任务。`);
         return;
       }
-      const callId = newId(), resultId = newId(), started = now();
+      const callId = newId(), resultId = newId();
       const text = "已经交给工作对话检查，完成后会把结果发到这里。";
       emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__message" });
       if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
-      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: "检查消息滚动与输入框布局", error: null, started_at_ms: started, finished_at_ms: now(), arguments: { actor_id: "research", content: user.content, show_to_user: true }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true }, payload: null });
-      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true } });
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: "检查消息滚动与输入框布局", error: null, arguments: { actor_id: "research", content: user.content }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" }, payload: null });
+      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" } });
       completeRun(actor, user, reply, text);
       return;
     }
@@ -193,10 +193,8 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     }
 
     const callId = newId();
-    const toolStarted = now();
     emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "files__list_directory" });
     if (!(await rest(run, 250))) return cancelRun(actor, user, reply, assistantText);
-    const toolFinished = now();
 
     const error = null;
     const resultId = newId();
@@ -207,8 +205,6 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       name: "files__list_directory",
       summary: "Listed 3 entries in .",
       error,
-      started_at_ms: toolStarted,
-      finished_at_ms: toolFinished,
       outcome: { path: ".", entries: 3 },
       actor_id: actorId,
       arguments: { path: "." },
@@ -231,8 +227,6 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       result_id: resultId,
       summary: "Listed 3 entries in .",
       error,
-      started_at_ms: toolStarted,
-      finished_at_ms: toolFinished,
       outcome: { path: ".", entries: 3 },
     });
 

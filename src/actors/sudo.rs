@@ -153,6 +153,6 @@ pub(crate) async fn review(
             Some(format!(
                 "{payload}\nNo operation was executed. Await the permission decision before continuing this operation."
             )),
-        )))
+        ).with_output_schema::<crate::app::output::SudoOutput>()))
     }
 }

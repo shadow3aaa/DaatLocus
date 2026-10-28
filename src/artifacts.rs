@@ -9,6 +9,7 @@ use std::{
 };
 
 use miette::{Result, miette};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,7 +20,7 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Image,
@@ -28,7 +29,8 @@ pub enum ArtifactKind {
     Url,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[schemars(extend("x-dl-content" = "artifact"))]
 pub struct ArtifactReference {
     pub artifact_id: String,
     pub version: u32,

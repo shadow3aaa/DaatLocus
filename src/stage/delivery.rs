@@ -85,6 +85,7 @@ impl<'a> Deliveries<'a> {
     pub fn new(store: &'a ActorStore, local: StageId) -> Self {
         Self { store, local }
     }
+    #[cfg(test)]
     pub(crate) fn queue(
         &self,
         source: &ActorRecord,

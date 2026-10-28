@@ -1,164 +1,38 @@
 import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useState } from "react";
-import { ExternalLinkIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { CodeBlock, Markdown } from "@/components/markdown";
-import type { JsonValue, ToolResult } from "@/lib/actor-api";
-import { resourceActorId, safeLink } from "@/lib/conversation-links";
-import { asObject, asRows, asText, readableSummary, domainToolName, approvalNotice, approvalNoticeTitle } from "@/lib/tool-presentation";
-import { FileChangeView } from "@/components/file-change";
-import { ToolParameters } from "@/components/tool-parameters";
+import type { ToolResult } from "@/lib/actor-api";
+import { resourceActorId } from "@/lib/conversation-links";
+import { asObject, asRows, asText, approvalNotice, approvalNoticeTitle, readableSummary } from "@/lib/tool-presentation";
+import { StructuredObservation, outputSchema } from "./structured-observation";
 
-function TextOutput({ label, content, command, context, href }: { label: string; content: string; command?: string; context?: string; href?: string | null }) {
-  return <section className="dl-tool-output"><header><span>{label}</span>{context && <span className="dl-output-context" title={context}>{context}</span>}{href && <a href={href} target="_blank" rel="noreferrer" aria-label={t("tool_details.open_value0", {value0:context || href})}><ExternalLinkIcon aria-hidden="true" /></a>}</header><div className="dl-output-scroll" tabIndex={0} role="region" aria-label={label}>{command && <div className="dl-output-command"><span aria-hidden="true">$</span><code>{command}</code></div>}<pre>{content}</pre></div></section>;
-}
+type ToolDetailProps = {result:ToolResult;onActor?(id:string):void};
 
-function domainFields(payload: Record<string,JsonValue>): JsonValue {
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !["private_metadata","model_content","model_transcript","debug","raw_response","resource_references","sandbox","sudo","permission_reference"].includes(key)).map(([key,value]) => {
-    if (typeof value === "string" && /^[\[{]/.test(value.trim())) { try { const decoded: unknown = JSON.parse(value); if (decoded && typeof decoded === "object") return [key, decoded as JsonValue]; } catch { /* Literal content stays literal. */ } }
-    return [key,value];
-  }));
-}
-
-function ArtifactView({ result }: { result: ToolResult }) {
-  const payload = asObject(result.payload);
-  const uri = asText(payload.uri);
-  const title = asText(payload.title) || t("tool_details.deliver_result");
-  const kind = asText(payload.kind);
-  const [expanded, setExpanded] = useState(false);
-  const local = Boolean(resourceActorId(uri, location.href));
-  const safe = local ? uri : safeLink(uri);
-  if (!safe) return <p className="dl-tool-note">{t("tool_details.could_not_open_the_result")}</p>;
-  return <section className="dl-artifact"><div className="dl-artifact-header"><span>{title}</span><a href={safe} target="_blank" rel="noreferrer" aria-label={t("tool_details.open_value0", {value0: title})}><ExternalLinkIcon /></a></div>
-    {local && (kind === "image" || kind === "svg") && <img src={resourceSource(uri)} alt={title} loading="lazy" />}
-    {local && kind === "html" && <><iframe src={resourceSource(uri)} sandbox="allow-scripts" referrerPolicy="no-referrer" title={title} className={expanded ? "dl-artifact-frame-expanded" : undefined} /><Button variant="ghost" size="sm" onClick={() => setExpanded(!expanded)}>{expanded ? t("tool_details.collapse_preview") : t("tool_details.expand_preview")}</Button></>}
-    {readableSummary(asText(payload.description)) && <p>{readableSummary(asText(payload.description))}</p>}
-  </section>;
-}
-
-type ToolDetailProps = { result: ToolResult; onActor?(id: string): void };
-
-function imageReferences(result: ToolResult): { uri: string; name: string }[] {
-  const payload = asObject(result.payload);
-  const observation = asObject(payload.observation);
-  const origin = typeof location === "undefined" ? "http://localhost" : location.href;
-  const fallback = asText(observation.title) || asText(payload.path).split(/[\\/]/).at(-1) || t("markdown.image");
-  const references = asRows(payload.resource_references).filter(reference => asText(reference.media_type).startsWith("image/"));
-  if (["computer_use__", "phone_use__", "browser_use__"].some(prefix => domainToolName(result.name).startsWith(prefix))) {
-    references.push({ uri: asText(observation.screenshot_url), name: fallback });
-  }
-  const seen = new Set<string>();
-  return references.flatMap(reference => {
-    const uri = asText(reference.uri);
-    if (!resourceActorId(uri, origin) || seen.has(uri)) return [];
-    seen.add(uri);
-    const name = asText(reference.name);
-    return [{ uri, name: name && name !== "image" ? name : fallback }];
-  });
-}
-
-function ImageThumbnail({ uri, name }: { uri: string; name: string }) {
-  const [failed, setFailed] = useState(false);
-  return <a href={uri} target="_blank" rel="noreferrer" className="block min-w-0 max-w-full" aria-label={t("tool_details.open_value0", { value0: name })}>
-    {failed ? <span className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</span> : <img src={resourceSource(uri)} alt={name} loading="lazy" className="block h-auto max-h-64 max-w-full rounded-xl object-contain" onError={() => setFailed(true)} />}
+function ImageThumbnail({uri,name}:{uri:string;name:string}) {
+  const [failed,setFailed]=useState(false);
+  return <a href={uri} target="_blank" rel="noreferrer" className="block min-w-0 max-w-full" aria-label={t("tool_details.open_value0",{value0:name})}>
+    {failed?<span className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</span>:<img src={resourceSource(uri)} alt={name} loading="lazy" className="block h-auto max-h-64 max-w-full rounded-xl object-contain" onError={()=>setFailed(true)}/>}
   </a>;
 }
 
-export function ToolDetail(props: ToolDetailProps) {
-  const images = approvalNotice(props.result.payload) ? [] : imageReferences(props.result);
-  return <><ToolContent {...props} hasImages={images.length > 0} />{images.length > 0 && <div className="flex min-w-0 flex-wrap items-start gap-3">{images.map(image => <ImageThumbnail key={image.uri} {...image} />)}</div>}</>;
-}
-
-function ToolContent({ result, onActor, hasImages }: ToolDetailProps & { hasImages: boolean }) {
-  result = { ...result, name: domainToolName(result.name) };
-  const payload = asObject(result.payload);
-  const args = asObject(result.arguments);
-  const path = asText(payload.path) || asText(args.path);
-  const rejection = approvalNotice(result.payload);
-  if (result.name.startsWith("sudo__")) {
-    const target = asText(asObject(payload.sudo).tool);
-    if (target && !domainToolName(target).startsWith("sudo__")) {
-      try {
-        const argumentsValue: JsonValue = JSON.parse(asText(args.arguments_json));
-        if (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)) {
-          return <ToolContent result={{ ...result, name: target, arguments: argumentsValue }} onActor={onActor} hasImages={hasImages} />;
-        }
-      } catch { /* Preserve malformed or historical source values in the ordinary detail view. */ }
-    }
-    if (payload.status === "submitted") return <p className="dl-tool-note">{t("tool_details.sudo_submitted")}</p>;
-  }
-  if (rejection) return <section className="dl-tool-details" aria-label={approvalNoticeTitle(rejection.kind)}><p className="dl-tool-note">{approvalNoticeTitle(rejection.kind)}</p><p className="whitespace-pre-wrap break-words">{rejection.reason}</p></section>;
-  if (/^mcp_[a-f0-9]{32}__/.test(result.name)) {
-    const resources = asRows(payload.resources);
-    return <div className="dl-tool-details dl-mcp-details">
-      {result.error && <p className="dl-operation-error">{t("tool_details.action_failed")}</p>}
-      {asRows(payload.content).filter(part=>part.type === "text").map((part,index)=><pre key={index}>{asText(part.text)}</pre>)}
-      {asRows(payload.content).filter(part=>part.type === "resource_link").map((part,index)=>{const uri=safeLink(asText(part.uri));return uri?<a href={uri} target="_blank" rel="noreferrer" key={index}>{asText(part.name)||uri}<ExternalLinkIcon aria-hidden="true"/></a>:null;})}
-      {payload.structuredContent != null && <ToolParameters value={payload.structuredContent}/>}
-      {resources.map(resource=>{const uri=asText(resource.uri);return resourceActorId(uri,location.href)?<a key={uri} href={uri} target="_blank" rel="noreferrer">{asText(resource.name)}<ExternalLinkIcon aria-hidden="true"/></a>:null;})}
-    </div>;
-  }
-  if (result.name.startsWith("apps_manager__") && !result.error) {
-    const apps=Array.isArray(payload.apps)?asRows(payload.apps):[asObject(payload.app ?? payload)];
-    if (result.name === "apps_manager__refresh") return <p className="dl-tool-note">{t("apps.refresh_action")}</p>;
-    return <ul className="dl-tool-result-list">{apps.filter(app=>asText(app.name)).map((app,index)=><li key={index}><strong>{asText(app.name)}</strong>{asText(app.description)&&<p>{asText(app.description)}</p>}<small>{app.enabled?t("apps.enabled"):t("apps.disabled")}</small></li>)}</ul>;
-  }
-  if ((result.name.startsWith("computer_use__") || result.name.startsWith("phone_use__"))) {
-    const observation = asObject(payload.observation);
-    const rows = [...asRows(payload.apps), ...asRows(payload.windows), ...asRows(payload.discovered_windows), ...asRows(payload.related_windows)];
-    const status = asText(payload.status);
-    const statusKeys: Record<string, string> = { observed: "computer_use.observed", dispatched: "computer_use.dispatched", outcome_unknown: "computer_use.outcome_unknown", handoff_pending: "computer_use.handoff_pending", given_to_user: "computer_use.given_to_user" };
-    return <section className="dl-tool-details">
-      {result.error && <p className="dl-operation-error">{readableSummary(result.error)}</p>}
-      {asText(observation.title) && <p>{asText(observation.title)}</p>}
-      {statusKeys[status] && <p className="dl-tool-note">{t(statusKeys[status])}</p>}
-      {rows.length > 0 && <ul className="dl-tool-result-list">{rows.map((row, index) => <li key={asText(row.window_id) || asText(row.app_id) || index}><strong>{asText(row.title) || asText(row.name)}</strong>{typeof row.taken === "boolean" && <small>{t(row.taken ? "computer_use.controlled" : "computer_use.not_controlled")}</small>}</li>)}</ul>}
-    </section>;
-  }
-  if (result.error) return <p className="dl-operation-error">{readableSummary(result.error) || t("tool_details.action_failed")}</p>;
-  if (result.name.startsWith("terminal__")) {
-    const session = asObject(payload.session);
-    const command = asText(payload.command) || asText(session.command) || asText(args.command);
-    const output = asText(payload.stdout) || asText(payload.output);
-    const stderr = asText(payload.stderr);
-    const cwd = asText(payload.cwd) || asText(session.cwd);
-    const exit = payload.exit_code ?? session.exit_code;
-    return <div className="dl-terminal-details"><TextOutput label="Shell" command={command} context={cwd} content={`${output}${stderr ? `\n${stderr}` : ""}`} />{typeof exit === "number" && exit !== 0 && <small>{t("tool_details.exit_code_value", {value:exit})}</small>}{payload.running === true && <small>{t("tool_details.command_is_running")}</small>}</div>;
-  }
-  if (result.name === "artifacts__present") return <ArtifactView result={result} />;
-  if (result.name === "files__view_image") return hasImages ? null : <p className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</p>;
-  if (result.name === "actors__read_resource") return hasImages ? null : <p className="dl-tool-note">{t("tool_details.read_attachment_or_complete_output")}</p>;
-  if (["files__read_file", "files__read_skill"].includes(result.name)) {
-    const source = asText(payload.content) || asText(payload.text);
-    return <div className="dl-file-details"><CodeBlock code={source} language={path || "text"} startLine={typeof payload.start_line === "number" ? payload.start_line : undefined} />{typeof payload.start_line === "number" && typeof payload.end_line === "number" && <small>{t("tool_details.lines")}{payload.start_line}–{payload.end_line} {t("file_change.lines")}{typeof payload.total_lines === "number" && t("tool_details.value0_lines_total", {value0: payload.total_lines})}</small>}</div>;
-  }
-  if (["files__write_file", "files__edit_file", "files__copy_file"].includes(result.name)) return <FileChangeView path={path || asText(args.destination)} value={payload.change} />;
-  if (result.name === "files__list_directory") return <div className="dl-file-details"><code>{path}</code><ul>{asRows(payload.entries).map((entry, index) => <li key={index}>{asText(entry.name)}{entry.kind === "directory" && "/"}</li>)}</ul>{payload.next_cursor != null && <small>{t("tool_details.file_contents_displayed")}</small>}</div>;
-  if (result.name === "files__search_text") return <div className="dl-file-details"><p className="dl-tool-note">{t("tool_details.search")}{asText(args.query)}</p><ul className="dl-file-matches">{asRows(payload.matches).map((match, index) => <li key={index}><small>{asText(match.path)}:{String(match.line_number)}</small><pre>{asText(match.text)}</pre></li>)}</ul>{payload.limited === true && <small>{t("tool_details.result_limit_reached")}</small>}</div>;
-  if (result.name === "files__list_skills") return <ul className="dl-tool-result-list">{asRows(payload.skills).map((skill, index) => <li key={index}><strong>{asText(skill.name)}</strong><p>{readableSummary(asText(skill.description))}</p></li>)}</ul>;
-  if (result.name === "actors__list") return <ul className="dl-tool-result-list">{asRows(payload.actors).map((actor, index) => <li key={index}>{onActor && asText(actor.id) ? <button className="dl-result-actor" type="button" onClick={() => onActor(asText(actor.id))}>{asText(actor.name) || "Actor"}</button> : <strong>{asText(actor.name) || "Actor"}</strong>}<small>{actor.read_only === true ? t("tool_details.read_only") : actor.status === "archived" ? t("conversation_pane.actor_archived") : actor.status === "running" ? t("conversation_pane.working") : t("conversation_pane.ready")}</small></li>)}</ul>;
-  if (result.name.startsWith("browser_use__")) {
-    const observation=asObject(payload.observation);
-    const pages=asRows(payload.pages);
-    const url=safeLink(asText(observation.url));
-    return <section className="dl-tool-details">{url&&<p><a href={url} target="_blank" rel="noreferrer">{asText(observation.title)||url}<ExternalLinkIcon aria-hidden="true"/></a></p>}{!hasImages&&pages.length>0&&<ul className="dl-tool-result-list">{pages.map((page,index)=><li key={index}><strong>{asText(page.title)||asText(page.url)}</strong></li>)}</ul>}{payload.status==="outcome_unknown"&&<p className="dl-operation-note">{t("browser_use.unknown")}</p>}</section>;
-  }
-  if (domainToolName(result.name).startsWith("web__")) {
-    return <div className="dl-tool-details">{asRows(payload.results).map((entry,index) => {
-      if (asText(entry.error)) return <p className="dl-operation-error" key={index}>{asText(entry.error)}</p>;
-      const document=asObject(entry.result);
-      const content=asText(document.content);
-      let structured: JsonValue | undefined;
-      if (asText(document.media_type).includes("json") && document.next_offset == null && document.offset === 0) {try {structured=JSON.parse(content) as JsonValue;} catch { /* Keep the original source text. */ }}
-      const matches=asRows(document.matches);
-      return <section key={index}>{structured !== undefined ? <ToolParameters value={structured} /> : <>
-        {content && <TextOutput label={t("tool_details.plain_text")} context={asText(document.title) || asText(document.url)} content={content} href={safeLink(asText(document.url))} />}
-        {matches.map((match,matchIndex)=><TextOutput key={matchIndex} label={t("tool_presentation.read_page")} content={asText(match.content)} />)}
-      </>}{document.next_offset != null && <p className="dl-operation-note">{t("tool_details.partial_document")}</p>}{Array.isArray(document.notices) && document.notices.filter((notice):notice is string=>typeof notice === "string").map((notice,noticeIndex)=><p className="dl-operation-note" key={noticeIndex}>{notice}</p>)}</section>;
-    })}{payload.closed === true && <p>{t("tool_details.page_action_completed")}</p>}</div>;
-  }
-  const text = [payload.message, payload.description, payload.text, payload.content].map(value => readableSummary(asText(value))).find(Boolean);
-  const fields = text ? Object.fromEntries(Object.entries(payload).filter(([key]) => !["message","description","text","content"].includes(key))) : payload;
-  return <div className="dl-tool-note">{text ? <Markdown content={text} /> : <p>{readableSummary(result.summary) || t("tool_details.action_completed")}</p>}<ToolParameters value={domainFields(fields)} /></div>;
+export function ToolDetail({result,onActor}:ToolDetailProps) {
+  const schema=outputSchema(result.output_schema);
+  const rejection=approvalNotice(result.payload);
+  if(rejection)return <section className="dl-tool-details" aria-label={approvalNoticeTitle(rejection.kind)}><p className="dl-tool-note">{approvalNoticeTitle(rejection.kind)}</p><p className="whitespace-pre-wrap break-words">{rejection.reason}</p></section>;
+  const payload=asObject(result.payload),observation=asObject(payload.observation);
+  const origin=typeof location==="undefined"?"http://localhost":location.href;
+  const fallback=asText(observation.title)||asText(payload.path).split(/[\\/]/).at(-1)||t("markdown.image");
+  const seen=new Set<string>();
+  const images=[...asRows(payload.resource_references),{uri:observation.screenshot_url,name:fallback,media_type:"image/"}].flatMap(reference=>{
+    const uri=asText(reference.uri);
+    if(!asText(reference.media_type).startsWith("image/")||!resourceActorId(uri,origin)||seen.has(uri))return [];
+    seen.add(uri);const name=asText(reference.name);
+    return [{uri,name:name&&name!=="image"?name:fallback}];
+  });
+  return <section className="dl-tool-details">
+    {result.error&&<p className="dl-operation-error">{schema?.["x-dl-error"]==="generic"?t("tool_details.action_failed"):readableSummary(result.error)||t("tool_details.action_failed")}</p>}
+    <StructuredObservation onActor={onActor} value={result.payload} schema={schema} fallback={!result.error&&!images.length?readableSummary(result.summary)||t("tool_details.action_completed"):undefined}/>
+    {schema?.["x-dl-content"]==="image"&&!images.length&&<p className="dl-tool-note">{t("tool_details.image_preview_unavailable")}</p>}
+    {images.length>0&&<div className="flex min-w-0 flex-wrap items-start gap-3">{images.map(image=><ImageThumbnail key={image.uri} {...image}/>)}</div>}
+  </section>;
 }

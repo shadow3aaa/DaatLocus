@@ -325,6 +325,8 @@ pub enum ActorEvent {
         message_id: String,
         call_id: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Value>,
     },
     ToolFinished {
         message_id: String,
@@ -333,10 +335,6 @@ pub enum ActorEvent {
         result_id: String,
         summary: String,
         error: Option<String>,
-        #[serde(default)]
-        started_at_ms: Option<i64>,
-        #[serde(default)]
-        finished_at_ms: Option<i64>,
         #[serde(default)]
         outcome: Option<Value>,
     },
@@ -362,6 +360,8 @@ pub struct ToolResultRecord {
     pub name: String,
     pub arguments: Value,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
     pub model_content: String,
     pub summary: String,
     pub error: Option<String>,
@@ -380,8 +380,6 @@ pub struct ToolResultSummary {
     pub name: String,
     pub summary: String,
     pub error: Option<String>,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
     /// Small domain facts; the complete observation stays at the result endpoint.
     pub outcome: Option<Value>,
 }

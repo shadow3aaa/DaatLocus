@@ -27,12 +27,12 @@ test("an appeal decision notification is immediate, hidden and never inline guid
   // While it waits it is no user-observable queue entry and no transcript turn.
   const queued = {...notice,status:"queued" as const};
   expect(partitionConversationMessages([queued],false)).toEqual({transcript:[]});
-  // Once claimed it runs its own turn: the machine input stays hidden, the round remains.
+  // A claimed machine input stays hidden and creates no empty activity disclosure.
   const turn = render(notice);
   expect(turn).not.toContain("9f8b204d");
   expect(turn).not.toContain("instruction");
   expect(turn).not.toContain(i18n.t("conversation_turns.guidance_applied"));
-  expect(turn).toContain('aria-expanded="false"');
+  expect(turn).not.toContain('aria-expanded="false"');
   // Search, history previews and copies never expose it either.
   expect(messageDisplayText(notice)).toBe("");
   expect(render(notice,"9f8b204d")).not.toContain("9f8b204d");

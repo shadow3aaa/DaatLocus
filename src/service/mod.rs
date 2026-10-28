@@ -115,10 +115,8 @@ pub fn router(state: ServiceState) -> Router {
             "/v1/actors/{actor}",
             get(get_actor).patch(patch_actor_preferences),
         )
-        .route(
-            "/v1/actors/{actor}/messages",
-            get(messages).post(send_message),
-        )
+        .route("/v1/actors/{actor}/messages", get(messages))
+        .route("/v1/core/messages", post(send_core_message))
         .route("/v1/actors/{actor}/messages/{message}", get(message))
         .route("/v1/actors/{actor}/messages/search", get(search_messages))
         .route(
@@ -139,7 +137,7 @@ pub fn router(state: ServiceState) -> Router {
             get(resources::download),
         )
         .route(
-            "/v1/actors/{actor}/attachments",
+            "/v1/core/attachments",
             post(resources::upload).layer(DefaultBodyLimit::max(
                 crate::daemon::attachments::MAX_FILE_ATTACHMENT_BYTES,
             )),
@@ -692,22 +690,19 @@ struct SendRequest {
     #[serde(default)]
     attachments: Vec<String>,
 }
-async fn send_message(
+async fn send_core_message(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Path(actor): Path<String>,
     Json(request): Json<SendRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    access_actor(&state, &headers, &actor, true).await?;
-    if actor == crate::stage::shared::ACTOR_ID && !state.system.core_accepts_input() {
+    let actor = crate::stage::shared::ACTOR_ID;
+    access_actor(&state, &headers, actor, true).await?;
+    if !state.system.core_accepts_input() {
         return Err(ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "core_not_ready",
             message: "Conversation is connecting or synchronizing; retry when ready",
         });
-    }
-    if actor != crate::stage::shared::ACTOR_ID && state.system.config().validate().is_err() {
-        return Err(ApiError::unavailable());
     }
     if request.content.len() > 64 * 1024
         || (request.content.trim().is_empty() && request.attachments.is_empty())
@@ -729,7 +724,7 @@ async fn send_message(
         let resource = state
             .system
             .store()
-            .resource(&actor, &id)
+            .resource(actor, &id)
             .map_err(ApiError::from_report)?;
         attachments.push(Attachment {
             id: resource.id,
@@ -741,9 +736,9 @@ async fn send_message(
     }
     let record = state
         .system
-        .send_user(&actor, request.content, attachments, key)
+        .send_user(actor, request.content, attachments, key)
         .map_err(ApiError::from_report)?;
-    if actor == crate::stage::shared::ACTOR_ID && remote::core_source(&state).is_some() {
+    if remote::core_source(&state).is_some() {
         state
             .system
             .shared_core()
@@ -754,7 +749,7 @@ async fn send_message(
         if let Some(value) = remote::core_read(
             &state,
             &headers,
-            &actor,
+            actor,
             ConversationRead::Message {
                 id: record.id.clone(),
             },

@@ -8,6 +8,8 @@ import { CheckIcon, CopyIcon, MessageCircleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { actorIdFromUrl, resourceActorId, safeLink } from "@/lib/conversation-links";
 
+const tokenColor = (color?: string) => color ? `color-mix(in srgb, ${color} var(--code-token-strength, 100%), var(--foreground))` : undefined;
+
 export function CodeBlock({ code, language, startLine }: { code: string; language: string; startLine?: number }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -16,7 +18,7 @@ export function CodeBlock({ code, language, startLine }: { code: string; languag
   return <div className="dl-code-block">
     <div className="dl-code-heading"><span>{language || t("markdown.code")}</span><Button variant="ghost" size="sm" aria-label={t("markdown.copy_code")} onClick={() => { setCopyFailed(false); void navigator.clipboard.writeText(code).then(() => setCopied(true)).catch(() => setCopyFailed(true)); }}>{copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}{copied ? t("markdown.copied") : t("markdown.copy")}</Button></div>
     {copyFailed && <p role="alert" className="dl-operation-error">{t("conversation_content.copy_failed")}</p>}
-    <pre style={{background: highlight?.background, color: highlight?.foreground}} className={startLine != null ? "dl-numbered-source" : undefined}><code>{startLine != null ? (code.endsWith("\n") ? code.slice(0,-1) : code).split("\n").map((line,index) => <span className="dl-source-line" key={index}><span className="dl-source-number">{startLine + index}</span><span>{highlight?.lines[index] ? highlight.lines[index].map((token,part) => <span key={part} style={{color:token.color}}>{token.content}</span>) : line}</span></span>) : highlight ? highlight.lines.map((line, index) => <span className="dl-code-line" key={index}>{line.map((token, part) => <span key={part} style={{ color: token.color, fontWeight: token.fontStyle && token.fontStyle & 2 ? 700 : undefined, fontStyle: token.fontStyle && token.fontStyle & 1 ? "italic" : undefined }}>{token.content}</span>)}{index < highlight.lines.length - 1 ? "\n" : ""}</span>) : code}</code></pre>
+    <pre style={{background: `var(--code-background, ${highlight?.background ?? "transparent"})`, color: `var(--code-foreground, ${highlight?.foreground ?? "inherit"})`}} className={startLine != null ? "dl-numbered-source" : undefined}><code>{startLine != null ? (code.endsWith("\n") ? code.slice(0,-1) : code).split("\n").map((line,index) => <span className="dl-source-line" key={index}><span className="dl-source-number">{startLine + index}</span><span>{highlight?.lines[index] ? highlight.lines[index].map((token,part) => <span key={part} style={{color:tokenColor(token.color)}}>{token.content}</span>) : line}</span></span>) : highlight ? highlight.lines.map((line, index) => <span className="dl-code-line" key={index}>{line.map((token, part) => <span key={part} style={{ color: tokenColor(token.color), fontWeight: token.fontStyle && token.fontStyle & 2 ? 700 : undefined, fontStyle: token.fontStyle && token.fontStyle & 1 ? "italic" : undefined }}>{token.content}</span>)}{index < highlight.lines.length - 1 ? "\n" : ""}</span>) : code}</code></pre>
   </div>;
 }
 

@@ -23,23 +23,8 @@ pub(super) fn routes() -> Router<ServiceState> {
             "/v1/stages/{stage}/actors/{actor}/messages/{message}/cancel",
             axum::routing::post(cancel),
         )
-        .route(
-            "/v1/stages/{stage}/actors/{actor}/messages/{message}/edit",
-            axum::routing::post(edit),
-        )
-        .route(
-            "/v1/stages/{stage}/actors/{actor}/messages/{message}/withdraw",
-            axum::routing::post(withdraw),
-        )
-        .route(
-            "/v1/stages/{stage}/actors/{actor}/queue/clear",
-            axum::routing::post(clear),
-        )
         .route("/v1/stages/{stage}/actors/{actor}", get(actor).patch(patch))
-        .route(
-            "/v1/stages/{stage}/actors/{actor}/messages",
-            get(messages).post(send),
-        )
+        .route("/v1/stages/{stage}/actors/{actor}/messages", get(messages))
         .route(
             "/v1/stages/{stage}/actors/{actor}/messages/search",
             get(search),
@@ -72,10 +57,6 @@ pub(super) fn routes() -> Router<ServiceState> {
         .route(
             "/v1/stages/{stage}/actors/{actor}/resources/{resource}",
             get(resource),
-        )
-        .route(
-            "/v1/stages/{stage}/actors/{actor}/attachments",
-            axum::routing::post(upload),
         )
         .route(
             "/v1/stages/{stage}/actors/{actor}/event-stream",
@@ -202,92 +183,6 @@ async fn cancel(
     )
     .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Edit {
-    content: String,
-    attachments: Vec<String>,
-    expected_updated_at_ms: i64,
-}
-async fn edit(
-    State(s): State<ServiceState>,
-    h: HeaderMap,
-    Path((stage, actor, message)): Path<(StageId, String, String)>,
-    Json(input): Json<Edit>,
-) -> ApiResult<Json<Value>> {
-    let target = address(stage, actor)?;
-    let original = read(
-        &s,
-        &h,
-        target.clone(),
-        Read::Message {
-            id: message.clone(),
-        },
-    )
-    .await?;
-    let ids = original["attachments"]
-        .as_array()
-        .ok_or_else(ApiError::internal)?
-        .iter()
-        .filter_map(|item| item["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    if ids != input.attachments {
-        return Err(ApiError::invalid());
-    }
-    Ok(Json(
-        control(
-            &s,
-            &h,
-            target,
-            crate::stage::protocol::ConversationAction::Amend {
-                message,
-                expected: input.expected_updated_at_ms,
-                content: Some(input.content),
-            },
-        )
-        .await?,
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Withdraw {
-    expected_updated_at_ms: i64,
-}
-async fn withdraw(
-    State(s): State<ServiceState>,
-    h: HeaderMap,
-    Path((stage, actor, message)): Path<(StageId, String, String)>,
-    Json(input): Json<Withdraw>,
-) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        control(
-            &s,
-            &h,
-            address(stage, actor)?,
-            crate::stage::protocol::ConversationAction::Amend {
-                message,
-                expected: input.expected_updated_at_ms,
-                content: None,
-            },
-        )
-        .await?,
-    ))
-}
-async fn clear(
-    State(s): State<ServiceState>,
-    h: HeaderMap,
-    Path((stage, actor)): Path<(StageId, String)>,
-) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        control(
-            &s,
-            &h,
-            address(stage, actor)?,
-            crate::stage::protocol::ConversationAction::ClearQueue,
-        )
-        .await?,
-    ))
 }
 pub(super) fn qualify(value: &mut Value, target: &ActorAddress) {
     qualify_as(
@@ -678,166 +573,6 @@ async fn approval(
 ) -> ApiResult<Json<Value>> {
     Ok(Json(
         read(&s, &h, address(stage, id)?, Read::Approval { id: m }).await?,
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Input {
-    content: String,
-    attachments: Vec<String>,
-}
-async fn send(
-    State(s): State<ServiceState>,
-    h: HeaderMap,
-    Path((stage, id)): Path<(StageId, String)>,
-    Json(input): Json<Input>,
-) -> ApiResult<Json<Value>> {
-    manage(&s, &h).await?;
-    let target = address(stage, id)?;
-    let handle = authorize(&s, &h, &target).await?;
-    let mut attachments = Vec::new();
-    for id in input.attachments {
-        let descriptor = read(&s, &h, target.clone(), Read::Resource { id }).await?;
-        attachments.push(serde_json::from_value(descriptor).map_err(|_| ApiError::internal())?);
-    }
-    let key = h
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(ApiError::invalid)?;
-    let frame = s
-        .system
-        .send_stage_user_with_attachments(target.clone(), input.content, attachments, key)
-        .map_err(ApiError::from_report)?;
-    handle.flush();
-    let invocation = frame
-        .invocation_id
-        .ok_or_else(ApiError::internal)?
-        .to_string();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(value) = read(
-            &s,
-            &h,
-            target.clone(),
-            Read::InvocationMessage {
-                id: invocation.clone(),
-            },
-        )
-        .await
-        {
-            return Ok(Json(value));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(ApiError::unavailable());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-async fn upload(
-    State(state): State<ServiceState>,
-    Path((stage, id)): Path<(StageId, String)>,
-    request: axum::extract::Request,
-) -> ApiResult<(axum::http::StatusCode, Json<crate::actors::Attachment>)> {
-    let headers = request.headers().clone();
-    manage(&state, &headers).await?;
-    let target = address(stage, id)?;
-    let handle = authorize(&state, &headers, &target).await?;
-    let raw_name = headers
-        .get("x-file-name")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(ApiError::invalid)?;
-    let name = match headers.get("x-file-name-encoding") {
-        None => raw_name.to_owned(),
-        Some(value) if value == "utf-8-percent" => super::resources::decode_filename(raw_name)?,
-        Some(_) => return Err(ApiError::invalid()),
-    };
-    if name.is_empty()
-        || name.len() > 255
-        || name
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
-    {
-        return Err(ApiError::invalid());
-    }
-    let media_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(60),
-        axum::body::to_bytes(
-            request.into_body(),
-            crate::daemon::attachments::MAX_FILE_ATTACHMENT_BYTES,
-        ),
-    )
-    .await
-    .map_err(|_| ApiError::unavailable())?
-    .map_err(|_| ApiError::invalid())?;
-    if bytes.is_empty()
-        || (media_type.starts_with("image/")
-            && bytes.len() > crate::daemon::attachments::MAX_IMAGE_ATTACHMENT_BYTES)
-    {
-        return Err(ApiError::invalid());
-    }
-    manage(&state, &headers).await?;
-    authorize(&state, &headers, &target).await?;
-    let content = crate::stage::blob::ContentStore::new(state.system.store())
-        .store_source(crate::stage::shared::ACTOR_ID, &bytes)
-        .map_err(stages::failure)?
-        .content;
-    let resource = crate::resources::Resource {
-        id: uuid::Uuid::new_v4().to_string(),
-        name,
-        media_type,
-        content,
-    };
-    resource.validate().map_err(stages::failure)?;
-    let export = uuid::Uuid::new_v4();
-    let local = state
-        .system
-        .store()
-        .stage_local_id()
-        .map_err(stages::failure)?;
-    crate::stage::ledger::StageLedger::attach(state.system.store(), local)
-        .export_control_content(
-            stage,
-            export,
-            &resource.content,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(stages::failure)?;
-    match handle
-        .rpc(Body::ResourceUpload {
-            actor: target.clone(),
-            resource: resource.clone(),
-            export,
-        })
-        .await
-        .map_err(stages::failure)?
-    {
-        Body::ResourceStored {
-            actor,
-            resource: stored,
-        } if actor == target && stored == resource => {}
-        _ => return Err(ApiError::unavailable()),
-    }
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(crate::actors::Attachment {
-            id: resource.id.clone(),
-            name: resource.name,
-            media_type: resource.media_type,
-            size_bytes: resource.content.size,
-            uri: format!(
-                "/v1/stages/{stage}/actors/{}/resources/{}",
-                target.actor_id, resource.id
-            ),
-        }),
     ))
 }
 struct Watch {

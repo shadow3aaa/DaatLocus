@@ -60,11 +60,74 @@ fn core_requires_commit(db: &Connection) -> Result<bool> {
 fn turn_yielded(db: &Connection, actor: &str, message: &str) -> Result<bool> {
     sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__yield' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", params![actor, message], |r|r.get(0)))
 }
-fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
-    if result.error.is_some() {
+fn tool_domain_name(name: &str) -> &str {
+    name.strip_prefix("d_")
+        .filter(|name| {
+            name.len() > 13
+                && name.as_bytes()[..12].iter().all(u8::is_ascii_hexdigit)
+                && name.as_bytes()[12] == b'_'
+        })
+        .and_then(|name| name.get(13..))
+        .unwrap_or(name)
+}
+fn command_outcome(arguments: &Value, payload: &Value) -> Option<Value> {
+    let command = payload
+        .get("session")
+        .and_then(|session| session.get("command"))
+        .and_then(Value::as_str)
+        .or_else(|| arguments.get("command").and_then(Value::as_str))?;
+    // Bounded source fact only; full commands and other arguments remain in scoped details.
+    (command.len() <= 2048).then(|| serde_json::json!({"command": command}))
+}
+fn sudo_target(name: &str, arguments: &Value) -> Option<AgentToolCall> {
+    let name = tool_domain_name(name);
+    if !matches!(name, "sudo__execute" | "sudo__execute_as_admin") {
         return None;
     }
-    let payload = result.payload.as_object()?;
+    let call = AgentToolCall {
+        id: String::new(),
+        name: name.into(),
+        arguments: arguments.clone(),
+    };
+    let (_, invocation) =
+        crate::sudo_app::SudoApp::request(&call, std::path::PathBuf::new()).ok()?;
+    (!tool_domain_name(&invocation.tool).starts_with("sudo__")).then(|| invocation.call(""))
+}
+fn operation_outcome(outcome: Option<Value>, target: Option<&AgentToolCall>) -> Option<Value> {
+    if let Some(target) = target {
+        let mut value = outcome.unwrap_or_else(|| serde_json::json!({}));
+        value["operation"] = target.name.clone().into();
+        Some(value)
+    } else {
+        outcome
+    }
+}
+fn tool_started_outcome(call: &AgentToolCall) -> Option<Value> {
+    let target = sudo_target(&call.name, &call.arguments);
+    let source = target.as_ref().unwrap_or(call);
+    let outcome = (tool_domain_name(&source.name) == "terminal__terminal_exec")
+        .then(|| command_outcome(&source.arguments, &Value::Null))
+        .flatten();
+    operation_outcome(outcome, target.as_ref())
+}
+fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
+    let target = sudo_target(&result.name, &result.arguments);
+    let (name, arguments) = target
+        .as_ref()
+        .map(|call| (call.name.as_str(), &call.arguments))
+        .unwrap_or((&result.name, &result.arguments));
+    operation_outcome(
+        source_outcome(name, arguments, &result.payload, result.error.is_some()),
+        target.as_ref(),
+    )
+}
+fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) -> Option<Value> {
+    if failed {
+        return (tool_domain_name(name) == "terminal__terminal_exec")
+            .then(|| command_outcome(arguments, value))
+            .flatten();
+    }
+    let payload = value.as_object()?;
     if payload
         .get("approval")
         .and_then(|value| value.get("decision"))
@@ -73,16 +136,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
     {
         return Some(serde_json::json!({"approval": payload["approval"]}));
     }
-    let domain_name = result
-        .name
-        .strip_prefix("d_")
-        .filter(|name| {
-            name.len() > 13
-                && name.as_bytes()[..12].iter().all(u8::is_ascii_hexdigit)
-                && name.as_bytes()[12] == b'_'
-        })
-        .and_then(|name| name.get(13..))
-        .unwrap_or(&result.name);
+    let domain_name = tool_domain_name(name);
     if domain_name
         .split_once("__")
         .is_some_and(|(app, _)| crate::mcp::is_mcp_id(app))
@@ -93,13 +147,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             .map(|app| serde_json::json!({"app":app}));
     }
     if domain_name == "terminal__terminal_exec" {
-        let command = payload
-            .get("session")
-            .and_then(|session| session.get("command"))
-            .and_then(Value::as_str)
-            .or_else(|| result.arguments.get("command").and_then(Value::as_str))?;
-        // Preserve a small source fact; lengthy commands remain in scoped details.
-        return (command.len() <= 2048).then(|| serde_json::json!({"command": command}));
+        return command_outcome(arguments, value);
     }
     let keys: &[&str] = match domain_name {
         "artifacts__present" => &[
@@ -115,6 +163,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         | "actors__stop"
         | "actors__import_conversation"
         | "actors__message"
+        | "actors__report"
         | "actors__archive"
         | "actors__unarchive" => &[
             "id",
@@ -126,7 +175,6 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
             "status",
             "kind",
             "reply_to",
-            "show_to_user",
             "cancelled_count",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
@@ -135,6 +183,10 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         _ => return None,
     };
     let mut output = serde_json::Map::new();
+    if payload.get("sent_message").is_some() {
+        // Body stays in authorized result detail, never the incremental stream.
+        output.insert("sent_message".into(), true.into());
+    }
     for key in keys {
         if let Some(value) = payload.get(*key) {
             output.insert((*key).into(), value.clone());
@@ -153,7 +205,7 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
         // device argument still identifies the original host after replication.
         let stage = payload
             .get("stage_id")
-            .or_else(|| result.arguments.get("stage_id"))
+            .or_else(|| arguments.get("stage_id"))
             .and_then(Value::as_str)
             .and_then(|id| uuid::Uuid::parse_str(id).ok());
         let actor = payload
@@ -1697,6 +1749,7 @@ impl ActorStore {
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 payload: Value::Null,
+                output_schema: None,
                 model_content: String::new(),
                 summary: String::new(),
                 error: None,
@@ -1714,6 +1767,7 @@ impl ActorStore {
                     message_id: message_id.into(),
                     call_id: call.id.clone(),
                     name: call.name.clone(),
+                    outcome: tool_started_outcome(call),
                 },
             )?;
             self.commit(tx)?;
@@ -1741,6 +1795,7 @@ impl ActorStore {
             summary,
             error,
             None,
+            None,
         )
     }
     /// Only the common App-result adapter can certify a completed native result.
@@ -1756,6 +1811,7 @@ impl ActorStore {
         summary: &str,
         error: Option<&str>,
         native_result_id: Option<&str>,
+        output_schema: Option<Value>,
     ) -> Result<String> {
         database_io(|| {
             let mut db = self.db.lock();
@@ -1778,6 +1834,7 @@ impl ActorStore {
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                     payload: Value::Null,
+                    output_schema: None,
                     model_content: String::new(),
                     summary: String::new(),
                     error: None,
@@ -1791,6 +1848,7 @@ impl ActorStore {
                 );
             }
             result.payload = payload;
+            result.output_schema = output_schema;
             result.model_content = model_content.into();
             result.summary = summary.chars().take(1000).collect();
             result.error = error.map(str::to_owned);
@@ -1822,8 +1880,6 @@ impl ActorStore {
                     result_id: result.id.clone(),
                     summary: result.summary.clone(),
                     error: result.error.clone(),
-                    started_at_ms: result.started_at_ms,
-                    finished_at_ms: result.finished_at_ms,
                     outcome: tool_outcome(&result),
                 },
             )?;
@@ -1886,8 +1942,6 @@ impl ActorStore {
                     summary: result.summary,
                     outcome,
                     error: result.error,
-                    started_at_ms: result.started_at_ms,
-                    finished_at_ms: result.finished_at_ms,
                 });
             }
             let next_cursor = if items.len() > limit {
@@ -2435,6 +2489,97 @@ impl ActorStore {
 mod outcome_tests {
     use super::*;
 
+    #[test]
+    fn sudo_observations_keep_target_identity_and_domain_facts_without_changing_the_effect_record()
+    {
+        let arguments = |tool: &str, target: Value| serde_json::json!({"tool":tool,"arguments_json":target.to_string(),"reason":"Authorized maintenance", "restart_native":false,"approval_id":null});
+        let mut result = ToolResultRecord {
+            id: "result".into(),
+            actor_id: "actor".into(),
+            message_id: "request".into(),
+            call_id: "call".into(),
+            name: "sudo__execute_as_admin".into(),
+            arguments: arguments(
+                "terminal__terminal_exec",
+                serde_json::json!({"command":"repair-service","private":"PRIVATE_ARGUMENT"}),
+            ),
+            payload: serde_json::json!({"session":{"command":"repair-service"},"output":"original stdout","sudo":{"approval_id":"PRIVATE_APPROVAL"}}),
+            output_schema: Some(
+                schemars::schema_for!(crate::terminal_app::TerminalToolResult).to_value(),
+            ),
+            model_content: "PRIVATE_PROTOCOL".into(),
+            summary: "Repaired service".into(),
+            error: None,
+            started_at_ms: Some(1),
+            finished_at_ms: Some(2),
+        };
+        let call = AgentToolCall {
+            id: "call".into(),
+            name: result.name.clone(),
+            arguments: result.arguments.clone(),
+        };
+        let expected =
+            serde_json::json!({"operation":"terminal__terminal_exec","command":"repair-service"});
+        assert_eq!(tool_started_outcome(&call), Some(expected.clone()));
+        assert_eq!(tool_outcome(&result), Some(expected.clone()));
+        result.error = Some("Command failed".into());
+        assert_eq!(tool_outcome(&result), Some(expected));
+        assert_eq!(result.name, "sudo__execute_as_admin");
+        assert_eq!(result.payload["output"], "original stdout");
+        assert!(result.output_schema.is_some());
+        result.error = None;
+        result.name = "d_0123456789ab_sudo__execute".into();
+        result.arguments = arguments("files__edit_file", serde_json::json!({"path":"file.rs"}));
+        result.payload =
+            serde_json::json!({"path":"file.rs","change":{"added_lines":2,"removed_lines":1}});
+        assert_eq!(
+            tool_outcome(&result),
+            Some(
+                serde_json::json!({"operation":"files__edit_file","path":"file.rs","added_lines":2,"removed_lines":1})
+            )
+        );
+        let nested = arguments("sudo__execute", serde_json::json!({}));
+        assert!(sudo_target("sudo__execute", &nested).is_none());
+        assert!(
+            sudo_target(
+                "sudo__execute",
+                &serde_json::json!({"arguments_json":"invalid"})
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_start_fact_preserves_the_command_without_streaming_other_arguments() {
+        let arguments = serde_json::json!({"command":"Get-Content 文件.rs | Select-Object -First 54", "environment":{"token":"PRIVATE_SENTINEL"}, "workdir":"PRIVATE_WORKSPACE"});
+        let event = ActorEvent::ToolStarted {
+            message_id: "request".into(),
+            call_id: "call".into(),
+            name: "terminal__terminal_exec".into(),
+            outcome: command_outcome(&arguments, &Value::Null),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(
+            value["outcome"],
+            serde_json::json!({"command":arguments["command"]})
+        );
+        assert!(!value.to_string().contains("PRIVATE_"));
+        assert!(
+            command_outcome(
+                &serde_json::json!({"command":"x".repeat(2049)}),
+                &Value::Null
+            )
+            .is_none()
+        );
+        assert!(command_outcome(&serde_json::json!({"command":42}), &Value::Null).is_none());
+        assert_eq!(
+            tool_domain_name("d_0123456789ab_terminal__terminal_exec"),
+            "terminal__terminal_exec"
+        );
+        let old:ActorEvent=serde_json::from_value(serde_json::json!({"type":"tool_started","message_id":"request","call_id":"call","name":"terminal__terminal_exec"})).unwrap();
+        assert!(matches!(old, ActorEvent::ToolStarted { outcome: None, .. }));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn blocked_transaction_and_waiting_reader_leave_control_tasks_runnable() {
         let directory = tempfile::tempdir().unwrap();
@@ -2519,6 +2664,7 @@ mod outcome_tests {
             name: "actors__message".into(),
             arguments: serde_json::json!({"stage_id":stage,"actor_id":"child","content":"private input"}),
             payload: serde_json::json!({"actor_id":"child","conversation_url":"/actors/child"}),
+            output_schema: None,
             model_content: "private model transcript".into(),
             summary: "summary".into(),
             error: None,
@@ -2547,6 +2693,7 @@ mod outcome_tests {
             name: "d_abcdef123456_terminal__terminal_exec".into(),
             arguments: serde_json::json!({"command":"argument command","environment":{"TOKEN":"private"}}),
             payload: serde_json::json!({"session":{"command":"cargo check","cwd":"private directory"},"output":"heavy output"}),
+            output_schema: None,
             model_content: "private model transcript".into(),
             summary: "summary".into(),
             error: None,
@@ -2565,6 +2712,9 @@ mod outcome_tests {
             Some(serde_json::json!({"command":"argument command"}))
         );
         result.error = Some("failed".into());
-        assert!(tool_outcome(&result).is_none());
+        assert_eq!(
+            tool_outcome(&result),
+            Some(serde_json::json!({"command":"argument command"}))
+        );
     }
 }

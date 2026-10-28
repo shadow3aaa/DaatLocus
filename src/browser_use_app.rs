@@ -458,7 +458,8 @@ impl App for BrowserUseApp {
                 "Browser page",
                 payload.clone(),
                 Some(payload.to_string()),
-            );
+            )
+            .with_output_schema::<crate::app::output::GuiOutput>();
             result.model_images = images;
             Ok(result)
         })();

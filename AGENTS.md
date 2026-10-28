@@ -21,7 +21,10 @@ client are connected.
   transient image bytes rather than Actor resources. Viewing never creates or
   reconfigures screens, reconnects privileged transports, requests permissions or
   grants input control. Stop refreshing while the view is closed or backgrounded.
-- Use a rounded multiline composer with attachments, a model selector
+- Only Core accepts Owner conversation input. Other Actor pages are observation
+  views; they expose no composer or direct Owner message/attachment endpoints.
+  Actor-to-Actor messages and delegation remain available.
+- Core uses a rounded multiline composer with attachments, a model selector
   and send/cancel controls. Preserve drafts when a send or upload fails.
 - Derive local message/activity views from semantic events. Fetch heavy details
   on expansion and reconnect streams from the last consumed event cursor.
@@ -137,11 +140,11 @@ client are connected.
   The relay uses one portable WSS protocol on Cloudflare Workers/DO or an ordinary
   public server; it is transport infrastructure, not an execution authority.
 - Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
-  compact task links, decisions and outcomes; it excludes intermediate model
-  text and tool pipelines. Other Actors use plain work prose, chronological
-  collapsible activity and independent outcomes. Use a muted elapsed-time disclosure
-  with a thin separator, followed by interleaved prose and compact icon/text tool
-  groups. Activity lists flow in the conversation, without a nested scrolling box
+  decisions and outcomes; it excludes intermediate model
+  text and tool pipelines. Other Actors interleave message bubbles, compact
+  collapsible groups of consecutive tools and independent outcomes in chronological
+  order. There is no elapsed-time bar or outer per-input activity disclosure.
+  Activity lists flow in the conversation, without a nested scrolling box
   or fade mask. Actor popups never change this
   identity-based presentation. Keep no session list, Actor sidebar or multi-page Dashboard.
   Show outcomes and failures in their conversation; keep no separate new-update
@@ -199,9 +202,8 @@ Sandbox expansion uses the unified review/application path.
   its own authority, origin, reply target and delivery references. Related-message
   IDs express correlation only, never authorization. Never promote Actor prose to
   Owner approval or let a restricted input borrow another input's authority.
-  Core must explicitly choose show_to_user on each message: show meaningful task
-  links to the Owner, and keep routine internal coordination out of the Core transcript.
-  This choice never changes delivery timing, execution, authority or result correlation.
+  Actor communications use clickable bubbles with sender/recipient captions; creation
+  and status queries use ordinary tool rows. Core hides Actor communications and tools.
 - Core handles short coordination turns. Explicit durable deliveries can precede
   turn completion; yielding waits for the current tool protocol group to settle.
   Completing an input does not complete its delegated work. Progress and results

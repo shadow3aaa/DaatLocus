@@ -102,7 +102,7 @@ function seed(): void {
       tool: {
         name: "actors__message",
         summary: "检查消息滚动与输入框布局",
-        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。", show_to_user: true },
+        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。" },
         payload: {
           path: ".",
           entries: [
@@ -113,7 +113,7 @@ function seed(): void {
           next_cursor: null,
         },
         model_content: "README.md\nsrc/\npackage.json",
-        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局", show_to_user: true },
+        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" },
       },
     },
     {
@@ -185,8 +185,6 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
 
     if (exchange.tool) {
       const callId = newId();
-      const startedAt = replyStarted + 500;
-      const finishedAt = replyStarted + 1_500;
       emitEvent(actorId, {
         type: "tool_started",
         message_id: reply.id,
@@ -201,8 +199,6 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
         name: exchange.tool.name,
         summary: exchange.tool.summary,
         error: null,
-        started_at_ms: startedAt,
-        finished_at_ms: finishedAt,
         outcome: exchange.tool.outcome,
         actor_id: actorId,
         arguments: exchange.tool.arguments,
@@ -217,8 +213,6 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
         result_id: resultId,
         summary: exchange.tool.summary,
         error: null,
-        started_at_ms: startedAt,
-        finished_at_ms: finishedAt,
         outcome: exchange.tool.outcome,
       });
     }

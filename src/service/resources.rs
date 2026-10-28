@@ -11,11 +11,11 @@ use futures_util::stream;
 
 pub(super) async fn upload(
     State(state): State<ServiceState>,
-    Path(actor): Path<String>,
     request: Request,
 ) -> ApiResult<(StatusCode, Json<Attachment>)> {
+    let actor = crate::stage::shared::ACTOR_ID;
     let headers = request.headers().clone();
-    access_actor(&state, &headers, &actor, true).await?;
+    access_actor(&state, &headers, actor, true).await?;
     let raw_name = headers
         .get("x-file-name")
         .and_then(|v| v.to_str().ok())
@@ -75,9 +75,9 @@ pub(super) async fn upload(
     {
         return Err(ApiError::invalid());
     }
-    access_actor(&state, &headers, &actor, true).await?;
+    access_actor(&state, &headers, actor, true).await?;
     let id = uuid::Uuid::new_v4().to_string();
-    let base = state.system.actor_data_dir(&actor);
+    let base = state.system.actor_data_dir(actor);
     let dir = base.join("uploads");
     crate::file_io::ensure_directory(&crate::sandbox::RuntimeSandboxPolicy::disabled(), &dir)
         .map_err(|_| ApiError::internal())?;
@@ -103,13 +103,13 @@ pub(super) async fn upload(
         size_bytes: bytes.len() as u64,
         uri: uri.clone(),
     };
-    if let Err(error) = access_actor(&state, &headers, &actor, true).await {
+    if let Err(error) = access_actor(&state, &headers, actor, true).await {
         let _ = tokio::fs::remove_file(&path).await;
         return Err(error);
     }
     if let Err(error) = state.system.store().register_resource(StoredResource {
         id,
-        actor_id: actor,
+        actor_id: actor.to_owned(),
         path: path.clone(),
         name: attachment.name.clone(),
         media_type: attachment.media_type.clone(),

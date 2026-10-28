@@ -12,12 +12,9 @@ use serde_json::{Value, json};
 
 pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
-        .route("/v1/actors/{actor}/messages/{message}/edit", post(edit))
-        .route(
-            "/v1/actors/{actor}/messages/{message}/withdraw",
-            post(withdraw),
-        )
-        .route("/v1/actors/{actor}/queue/clear", post(clear))
+        .route("/v1/core/messages/{message}/edit", post(edit))
+        .route("/v1/core/messages/{message}/withdraw", post(withdraw))
+        .route("/v1/core/queue/clear", post(clear))
         .route("/v1/actors/{actor}/queue", get(queue))
         .route(
             "/v1/actors/{actor}/messages/{message}/activity",
@@ -91,10 +88,11 @@ async fn queue(
 async fn edit(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Path((actor, message)): Path<(String, String)>,
+    Path(message): Path<String>,
     Json(input): Json<Edit>,
 ) -> ApiResult<Json<Value>> {
-    access_actor(&state, &headers, &actor, true).await?;
+    let actor = crate::stage::shared::ACTOR_ID;
+    access_actor(&state, &headers, actor, true).await?;
     if input.content.len() > 64 * 1024
         || input.content.trim().is_empty() && input.attachments.is_empty()
         || input.expected_updated_at_ms < 0
@@ -104,7 +102,7 @@ async fn edit(
     if let Some(original) = super::remote::core_read(
         &state,
         &headers,
-        &actor,
+        actor,
         super::ConversationRead::Message {
             id: message.clone(),
         },
@@ -124,7 +122,7 @@ async fn edit(
         let value = super::remote::core_control(
             &state,
             &headers,
-            &actor,
+            actor,
             crate::stage::protocol::ConversationAction::Amend {
                 message,
                 expected: input.expected_updated_at_ms,
@@ -135,13 +133,13 @@ async fn edit(
         .ok_or_else(ApiError::unavailable)?;
         return Ok(Json(value));
     }
-    reject_import_edit(&state, &actor, &message)?;
+    reject_import_edit(&state, actor, &message)?;
     let mut attachments = Vec::new();
     for id in input.attachments {
         let resource = state
             .system
             .store()
-            .resource(&actor, &id)
+            .resource(actor, &id)
             .map_err(ApiError::from_report)?;
         attachments.push(Attachment {
             id: resource.id,
@@ -151,9 +149,7 @@ async fn edit(
             uri: resource.uri,
         });
     }
-    if actor == crate::stage::shared::ACTOR_ID
-        && let Some(core) = state.system.shared_core()
-    {
+    if let Some(core) = state.system.shared_core() {
         let original = state
             .system
             .store()
@@ -174,7 +170,7 @@ async fn edit(
         .system
         .store()
         .amend_queued_user(
-            &actor,
+            actor,
             &message,
             input.expected_updated_at_ms,
             input.content,
@@ -203,13 +199,12 @@ fn reject_import_edit(state: &ServiceState, actor: &str, message: &str) -> ApiRe
 async fn withdraw(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Path((actor, message)): Path<(String, String)>,
+    Path(message): Path<String>,
     Json(input): Json<Withdraw>,
 ) -> ApiResult<Json<Value>> {
-    access_actor(&state, &headers, &actor, true).await?;
-    if actor == crate::stage::shared::ACTOR_ID
-        && let Some(core) = state.system.shared_core()
-    {
+    let actor = crate::stage::shared::ACTOR_ID;
+    access_actor(&state, &headers, actor, true).await?;
+    if let Some(core) = state.system.shared_core() {
         let record = core
             .amend(&message, input.expected_updated_at_ms, None)
             .await
@@ -222,7 +217,7 @@ async fn withdraw(
         .system
         .store()
         .amend_queued_user(
-            &actor,
+            actor,
             &message,
             input.expected_updated_at_ms,
             String::new(),
@@ -234,15 +229,10 @@ async fn withdraw(
     redact(&mut value, &state.system.config());
     Ok(Json(value))
 }
-async fn clear(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path(actor): Path<String>,
-) -> ApiResult<Json<Value>> {
-    access_actor(&state, &headers, &actor, true).await?;
-    if actor == crate::stage::shared::ACTOR_ID
-        && let Some(core) = state.system.shared_core()
-    {
+async fn clear(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let actor = crate::stage::shared::ACTOR_ID;
+    access_actor(&state, &headers, actor, true).await?;
+    if let Some(core) = state.system.shared_core() {
         let count = core
             .clear_queue()
             .await
@@ -252,7 +242,7 @@ async fn clear(
     let count = state
         .system
         .store()
-        .clear_queued_users(&actor)
+        .clear_queued_users(actor)
         .map_err(ApiError::from_report)?;
     Ok(Json(json!({"cancelled_count":count})))
 }

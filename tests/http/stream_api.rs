@@ -185,7 +185,7 @@ async fn owner_stream_rechecks_rotated_credentials_and_unconfigured_service_stay
     );
     assert_eq!(
         unconfigured
-            .owner(reqwest::Method::POST, "/v1/actors/root/messages")
+            .owner(reqwest::Method::POST, "/v1/core/messages")
             .json(&json!({"content": "hello", "attachments": []}))
             .send()
             .await

@@ -1,7 +1,7 @@
 import type { JsonValue, MessageRecord } from "../src/lib/actor-api";
 import { addMessage, addTool, emitEvent, newId, now, setActorStatus, store, touchMessage, type ActorStore } from "./state";
 
-type Action = { name: string; summary: string; arguments: JsonValue; outcome: JsonValue; payload: JsonValue };
+type Action = { name: string; summary: string; arguments: JsonValue; start?: JsonValue; outcome: JsonValue; payload: JsonValue };
 type Preview = { actor: ActorStore; input: MessageRecord; generation: number; phase: number; overflow?: boolean; pending?: { call: string; action: Action } };
 let preview: Preview | null = null;
 
@@ -11,7 +11,7 @@ function text(state: Preview, channel: "assistant" | "reasoning", content: strin
 }
 function start(state: Preview, action: Action) {
   const call = newId();
-  emitEvent(state.actor.summary.id, {type:"tool_started",message_id:state.input.id,call_id:call,name:action.name});
+  emitEvent(state.actor.summary.id, {type:"tool_started",message_id:state.input.id,call_id:call,name:action.name,outcome:action.start});
   state.pending = {call, action};
 }
 function finish(state: Preview) {
@@ -19,15 +19,15 @@ function finish(state: Preview) {
   if (!pending) return;
   const {call, action} = pending;
   const id = newId();
-  addTool(state.actor, {id,actor_id:state.actor.summary.id,message_id:state.input.id,call_id:call,name:action.name,summary:action.summary,error:null,started_at_ms:now()-800,finished_at_ms:now(),arguments:action.arguments,model_content:action.summary,outcome:action.outcome,payload:action.payload});
-  emitEvent(state.actor.summary.id, {type:"tool_finished",message_id:state.input.id,call_id:call,name:action.name,result_id:id,summary:action.summary,error:null,started_at_ms:now()-800,finished_at_ms:now(),outcome:action.outcome});
+  addTool(state.actor, {id,actor_id:state.actor.summary.id,message_id:state.input.id,call_id:call,name:action.name,summary:action.summary,error:null,arguments:action.arguments,model_content:action.summary,outcome:action.outcome,payload:action.payload});
+  emitEvent(state.actor.summary.id, {type:"tool_finished",message_id:state.input.id,call_id:call,name:action.name,result_id:id,summary:action.summary,error:null,outcome:action.outcome});
   delete state.pending;
 }
 function read(path: string): Action {
   return {name:"files__read_file",summary:`Read ${path}`,arguments:{path},outcome:{path},payload:{path,content:"export const layout = { preserveReadingPosition: true, overlayComposer: true };\n",start_line:1,end_line:1,total_lines:1}};
 }
 function command(value: string): Action {
-  return {name:"terminal__terminal_exec",summary:value,arguments:{command:value},outcome:{command:value,exit_code:0},payload:{command:value,stdout:["webui/src/components/conversation-content.tsx | 49 +++++---", "webui/src/lib/work-timeline.ts               | 26 ++++++", "webui/src/locales/en-US.json                 |  5 +", "webui/src/locales/zh-CN.json                 |  5 +", "", "106 pass", "0 fail", "Type checking completed.", "Build completed."].join("\n"),stderr:"",exit_code:0}};
+  return {name:"terminal__terminal_exec",summary:value,arguments:{command:value},start:{command:value},outcome:{command:value,exit_code:0},payload:{command:value,stdout:["webui/src/components/conversation-content.tsx | 49 +++++---", "webui/src/lib/work-timeline.ts               | 26 ++++++", "webui/src/locales/en-US.json                 |  5 +", "webui/src/locales/zh-CN.json                 |  5 +", "", "106 pass", "0 fail", "Type checking completed.", "Build completed."].join("\n"),stderr:"",exit_code:0}};
 }
 function edit(file: string): Action {
   const path = `webui/src/${file}`;
@@ -60,9 +60,9 @@ export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
   const actions: Action[] = [
     {name:"web__run",summary:"检查消息区和活动记录的预览状态",arguments:{open:[{ref_id:"http://127.0.0.1:5177/",offset:null,source:"rendered",view:null,refresh:false}],click:null,find:null,response_length:"medium"},outcome:{url:"http://127.0.0.1:5177/"},payload:{results:[{operation:"open",result:{ref_id:"web:preview",title:"工作活动 · 分步演示",url:"http://127.0.0.1:5177/",offset:0,next_offset:null,content:"Conversation: Iris\nMessage history\nGrouped activity\nComposer\n\nThe conversation remains readable when the composer grows."}}]}},
     read("webui/src/components/conversation-pane.tsx"),
-    read("webui/src/components/work-round.tsx"),
+    read("webui/src/components/work-activity.tsx"),
     command("rg -n 'padding|gap|overflow' webui/src/index.css"),
-    ...["components/work-round.tsx","components/conversation-content.tsx","index.css"].map(edit),
+    ...["components/work-activity.tsx","components/conversation-content.tsx","index.css"].map(edit),
     command("bun x tsc -p tsconfig.json --noEmit"),
     command("bun test tests/visual-conversation.test.tsx"),
   ];

@@ -385,7 +385,7 @@ async fn wait_requests(provider: &ReplayProvider, count: usize) {
 }
 
 #[tokio::test]
-async fn core_explicitly_selects_task_link_visibility_without_changing_message_delivery() {
+async fn actor_messages_retain_bodies_in_detail_and_only_references_in_events() {
     let (_directory, system, _) = paused_runtime().await;
     system.install_local_core().unwrap();
     system
@@ -397,24 +397,23 @@ async fn core_explicitly_selects_task_link_visibility_without_changing_message_d
     let mut apps =
         crate::builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
     let mut call = AgentToolCall {
-        id: "missing-choice".into(),
+        id: "send".into(),
         name: "actors__message".into(),
         arguments: json!({"stage_id":null,"actor_id":"root","reply_to":null,"content":"Coordinate"}),
     };
-    assert!(apps.validate_tool_call(&call, &context).is_err());
-    assert!(
-        system
-            .store()
-            .messages("root", None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    for (id, show) in [("initial-delegation", true), ("internal-followup", false)] {
+    assert!(apps.validate_tool_call(&call, &context).is_ok());
+    for id in ["initial-delegation", "internal-followup"] {
         call.id = id.into();
-        call.arguments["show_to_user"] = json!(show);
         call.arguments["content"] = json!(id);
         let result = apps.execute_tool(&call, &context).await.unwrap();
+        assert_eq!(result.payload["sent_message"]["content"], id);
+        assert!(
+            !result
+                .model_content
+                .as_ref()
+                .unwrap()
+                .contains("sent_message")
+        );
         system
             .store()
             .tool_finished(
@@ -434,10 +433,11 @@ async fn core_explicitly_selects_task_link_visibility_without_changing_message_d
         .unwrap()
         .items;
     assert_eq!(summaries.len(), 2);
-    for (summary, expected) in summaries.iter().zip([true, false]) {
+    for summary in &summaries {
         assert!(summary.error.is_none(), "{:?}", summary.error);
         let outcome = summary.outcome.as_ref().unwrap();
-        assert_eq!(outcome["show_to_user"], json!(expected));
+        assert_eq!(outcome["sent_message"], json!(true));
+        assert!(outcome.get("content").is_none());
         let delivered = system
             .store()
             .message(outcome["message_id"].as_str().unwrap())
@@ -457,12 +457,12 @@ async fn core_explicitly_selects_task_link_visibility_without_changing_message_d
                 outcome: Some(outcome),
                 ..
             } => outcome
-                .get("show_to_user")
+                .get("sent_message")
                 .and_then(serde_json::Value::as_bool),
             _ => None,
         })
         .collect();
-    assert_eq!(choices, vec![true, false]);
+    assert_eq!(choices, vec![true, true]);
     system.shutdown().await;
 }
 
@@ -995,8 +995,15 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
         stage_id: net_b.host.local,
         actor_id: "root".into(),
     };
-    let original = a
-        .send_stage_user(target.clone(), "Remote original".into(), "original")
+    let original = Deliveries::new(a.store(), net_a.host.local)
+        .queue(
+            &a.core_device_actor().unwrap(),
+            None,
+            target.clone(),
+            ("Remote original".into(), vec![]),
+            chrono::Utc::now().timestamp_millis(),
+            "original",
+        )
         .unwrap();
     wait_requests(&target_model, 1).await;
     let source = a.core_device_actor().unwrap();

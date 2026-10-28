@@ -9,6 +9,77 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn owner_inputs_target_only_core_and_cannot_enter_hosted_actors() {
+    let fixture = Fixture::new().await;
+    let child = fixture.child("observation").await;
+    let before = fixture
+        .system
+        .store()
+        .messages(&child, None, 100)
+        .unwrap()
+        .items
+        .len();
+    for (path, expected) in [
+        (
+            format!("/v1/actors/{child}/messages"),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            format!("/v1/actors/{child}/attachments"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/v1/actors/{child}/queue/clear"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            fixture
+                .owner(reqwest::Method::POST, &path)
+                .json(&json!({"content":"direct input", "attachments":[]}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    assert_eq!(
+        fixture
+            .system
+            .store()
+            .messages(&child, None, 100)
+            .unwrap()
+            .items
+            .len(),
+        before
+    );
+    assert_eq!(
+        fixture
+            .owner(
+                reqwest::Method::GET,
+                &format!("/v1/actors/{child}/messages")
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let response = fixture
+        .owner(reqwest::Method::POST, "/v1/core/messages")
+        .json(&json!({"content":"Coordinate this work", "attachments":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["code"],
+        "core_not_ready"
+    );
+}
+
+#[tokio::test]
 async fn initial_message_page_includes_the_active_input_outside_its_history_window() {
     let fixture = Fixture::new().await;
     let active = fixture
@@ -106,22 +177,22 @@ async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_mutate_running_wor
     let send = |content: &str| {
         fixture
             .system
-            .send_user("root", content.into(), vec![], None)
+            .send_user("core", content.into(), vec![], None)
             .unwrap()
     };
     let active = send("active");
-    fixture.system.store().claim_next("root").unwrap().unwrap();
+    fixture.system.store().claim_next("core").unwrap().unwrap();
     let first = send("queued one");
     let second = send("queued two");
-    let edited = fixture.owner(reqwest::Method::POST, &format!("/v1/actors/root/messages/{}/edit",first.id)).json(&json!({"content":"updated request","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap();
+    let edited = fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/edit",first.id)).json(&json!({"content":"updated request","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap();
     assert_eq!(edited.status(), StatusCode::OK);
     let edited = edited.json::<Value>().await.unwrap();
     assert_eq!(edited["content"], "updated request");
     assert_eq!(edited["source"]["kind"], "user");
-    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/actors/root/messages/{}/edit",first.id)).json(&json!({"content":"stale overwrite","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap().status(), StatusCode::CONFLICT);
-    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/actors/root/messages/{}/withdraw",active.id)).json(&json!({"expected_updated_at_ms":fixture.system.store().message(&active.id).unwrap().updated_at_ms})).send().await.unwrap().status(),StatusCode::CONFLICT);
+    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/edit",first.id)).json(&json!({"content":"stale overwrite","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/withdraw",active.id)).json(&json!({"expected_updated_at_ms":fixture.system.store().message(&active.id).unwrap().updated_at_ms})).send().await.unwrap().status(),StatusCode::CONFLICT);
     let cleared = fixture
-        .owner(reqwest::Method::POST, "/v1/actors/root/queue/clear")
+        .owner(reqwest::Method::POST, "/v1/core/queue/clear")
         .send()
         .await
         .unwrap()
@@ -140,7 +211,7 @@ async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_mutate_running_wor
         fixture
             .owner(
                 reqwest::Method::GET,
-                &format!("/v1/actors/root/messages/{}/activity?limit=1", first.id)
+                &format!("/v1/actors/core/messages/{}/activity?limit=1", first.id)
             )
             .send()
             .await
@@ -201,7 +272,7 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
         .send().await.unwrap();
     assert_eq!(
         edit_actor.status(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "displaying collaborator inputs in the queue must not allow rewriting their source"
     );
     assert_eq!(

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from "@/components/ui/empty";
 import { Composer, type ComposerModel } from "@/components/composer";
+import type { SendOrigin } from "@/components/sent-bubble";
 import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTranscript, WorkTranscript } from "@/components/conversation-turns";
@@ -30,6 +31,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
   const openActor = (id: string) => onActor(actorId.includes("~") && !id.includes("~") ? `${actorId.split("~")[0]}~${id}` : id);
   const chat = useActorConversation(actorId, { onAccessRevoked, sessionKey: accessKey(access), includeActivity: !primaryView });
   const [searchQuery, setSearchQuery] = useState("");
+  const [sendOrigin, setSendOrigin] = useState<SendOrigin>();
   const search = useConversationSearch(actorId, searchQuery, searchOpen);
   const filtering = searchOpen && Boolean(searchQuery.trim());
   const resultsId = useId();
@@ -208,7 +210,8 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       normalView.current = {top: 0, follow: true};
       onSearchOpenChange?.(false);
     }
-    void chat.send().catch(() => {});
+    const bounds = footer.current?.querySelector(".dl-composer")?.getBoundingClientRect();
+    void chat.send(undefined, undefined, message => { if (bounds) setSendOrigin({messageId:message.id,left:bounds.left,top:bounds.top,width:bounds.width,height:bounds.height}); }).catch(() => {});
   }
   async function earlier() {
     const node = visibleAnchor();
@@ -230,14 +233,14 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           {!filtering && !chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
             {primaryView && <img src="/logo-mark.svg" alt="" className="dl-empty-logo dl-brand-mark" />}
             <EmptyTitle>{!connecting && !ready ? t("conversation_pane.set_up_model") : primaryView ? "Daat Locus" : name}</EmptyTitle>
-            {!connecting && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
+            {primaryView && !connecting && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
           </EmptyHeader>{!connecting && !ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
           {chat.loading && <div className="dl-loading-messages"><Skeleton className="h-24 w-4/5 rounded-3xl" /><Skeleton className="ml-auto h-14 w-3/5 rounded-3xl" /><Skeleton className="h-32 w-4/5 rounded-3xl" /></div>}
           {!filtering && chat.hasMore && <Button variant="ghost" size="sm" className="dl-load-history" disabled={chat.loadingOlder} onClick={() => { void earlier(); }}>{t("conversation_pane.load_earlier_messages")}</Button>}
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
-          {primaryView ? <PrimaryTranscript messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
+          {primaryView ? <PrimaryTranscript sendOrigin={sendOrigin} messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
           <div className="dl-conversation-bottom" />
         </div>
       </div>
@@ -247,7 +250,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
-        <Composer key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} working={Boolean(active)} onStop={() => { if (active) void chat.cancel(active.id).catch(() => {}); }} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />
+        {primaryView && <Composer key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
       </div>
   </section>;
 }

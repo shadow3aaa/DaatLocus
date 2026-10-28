@@ -1,3 +1,4 @@
+import { t } from "../src/lib/i18n";
 import { expect, test } from "bun:test";
 import { conversationReducer, initialConversation } from "../src/hooks/use-actor-conversation";
 import { activityTools, extendActivityHistory, mergeActivity, workActivityTimeline } from "../src/lib/work-timeline";
@@ -15,6 +16,23 @@ const later = [
   ...Array.from({length:400},(_,index)=>record(index+8,{type:"generation_delta",message_id:"request",generation:7,channel:"reasoning",text:"Checking.\n\n"})),
   started(408,"second"),finished(409,"second"),
 ];
+
+test("running terminal commands survive live reduction and historical replay without decoding tool arguments",()=>{
+  const command="Get-Content src/actors/store.rs | Select-Object -Skip 247 -First 54";
+  for(const name of ["terminal__terminal_exec","d_0123456789ab_terminal__terminal_exec"]) {
+    const start=record(2,{type:"tool_started",message_id:message.id,call_id:"terminal",name,outcome:{command}});
+    const state=conversationReducer(initialConversation("worker"),{type:"event",record:start});
+    const live=activityTools(state.events,message,state.tools)[0];
+    const restored=activityTools([start],message,[])[0];
+    for(const tool of [live,restored]) {
+      expect(tool.status).toBe("running");expect(tool.outcome).toEqual({command});
+      expect(activityLabel(tool)).toEqual({label:t("tool_presentation.running"),detail:command});
+    }
+    const end=record(3,{type:"tool_finished",message_id:message.id,call_id:"terminal",name,result_id:"finished",summary:"Done",error:null,outcome:{command}});
+    const finished=activityTools([start,end],message,[])[0];
+    expect(finished.status).toBe("completed");expect(activityLabel(finished).label).not.toBe(t("tool_presentation.running"));
+  }
+});
 
 test("a live approval rejection keeps its reason after history replaces the event window", () => {
   const outcome = {approval:{decision:"denied",reason:"The task does not authorize this file",approval_id:"approval",stage_id:"source"}};

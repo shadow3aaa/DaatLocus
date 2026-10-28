@@ -6,13 +6,9 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
     let fixture = Fixture::new().await;
-    let a = fixture.child("alpha").await;
     let b = fixture.child("beta").await;
     let unicode = fixture
-        .owner(
-            reqwest::Method::POST,
-            &format!("/v1/actors/{a}/attachments"),
-        )
+        .owner(reqwest::Method::POST, "/v1/core/attachments")
         .header("x-file-name", "%E8%B0%83%E7%A0%94%E6%8A%A5%E5%91%8A.txt")
         .header("x-file-name-encoding", "utf-8-percent")
         .header("content-type", "text/plain")
@@ -28,10 +24,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
     for name in ["%2Fprivate.txt", "%FF.txt", "incomplete%2"] {
         assert_eq!(
             fixture
-                .owner(
-                    reqwest::Method::POST,
-                    &format!("/v1/actors/{a}/attachments")
-                )
+                .owner(reqwest::Method::POST, "/v1/core/attachments")
                 .header("x-file-name", name)
                 .header("x-file-name-encoding", "utf-8-percent")
                 .body("invalid name")
@@ -43,10 +36,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
         );
     }
     let upload = fixture
-        .owner(
-            reqwest::Method::POST,
-            &format!("/v1/actors/{a}/attachments"),
-        )
+        .owner(reqwest::Method::POST, "/v1/core/attachments")
         .header("x-file-name", "report.html")
         .header("content-type", "text/html")
         .body("<script>fetch('/v1/config')</script>")
@@ -97,11 +87,11 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
             .await
             .unwrap()
             .status(),
-        StatusCode::NOT_FOUND
+        StatusCode::METHOD_NOT_ALLOWED
     );
     assert_eq!(
         fixture
-            .owner(reqwest::Method::POST, &format!("/v1/actors/{a}/messages"))
+            .owner(reqwest::Method::POST, "/v1/core/messages")
             .json(&json!({"content": "no", "attachments": [{"path": "C:/private"}]}))
             .send()
             .await
@@ -110,10 +100,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let upload = fixture
-        .owner(
-            reqwest::Method::POST,
-            &format!("/v1/actors/{a}/attachments"),
-        )
+        .owner(reqwest::Method::POST, "/v1/core/attachments")
         .header("x-file-name", "large.bin")
         .header("content-type", "application/octet-stream")
         .body(vec![7u8; 2 * 1024 * 1024])

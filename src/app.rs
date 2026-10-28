@@ -12,6 +12,7 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
     schema_utils::{validate_model_facing_schema, validate_value_against_schema},
 };
+pub mod output;
 
 #[model_schema(transparent)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
@@ -103,6 +104,9 @@ pub struct AppToolExecutionResult {
     pub failure: Option<String>,
     pub summary: String,
     pub payload: Value,
+    /// Derived from the serialized Rust output type, never from a tool-name registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
     pub model_content: Option<String>,
     /// Set by app tools whose output the model can obtain again from its
     /// source, so an over-budget rendering points at the source instead of a
@@ -122,11 +126,29 @@ impl AppToolExecutionResult {
             failure: None,
             summary: summary.into(),
             payload,
+            output_schema: None,
             model_content,
             overflow_continuation: None,
             model_images: Vec::new(),
             sandbox: None,
         }
+    }
+
+    pub fn structured<T: Serialize + JsonSchema>(
+        summary: impl Into<String>,
+        output: &T,
+        model_content: Option<String>,
+    ) -> Result<Self> {
+        let payload = serde_json::to_value(output)
+            .map_err(|error| miette!("App output serialization failed: {error}"))?;
+        let mut result = Self::new(summary, payload, model_content);
+        result.output_schema = Some(schemars::schema_for!(T).to_value());
+        Ok(result)
+    }
+
+    pub fn with_output_schema<T: JsonSchema>(mut self) -> Self {
+        self.output_schema = Some(schemars::schema_for!(T).to_value());
+        self
     }
 }
 
@@ -162,6 +184,9 @@ impl AppToolExecutionContext {
 
 #[async_trait]
 pub trait App: Send + Sync {
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
     fn managed_revision(&self) -> Option<u64> {
         None
     }
@@ -358,11 +383,15 @@ impl AppManager {
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
         let (id, app_call) = self.schema_dispatch(call, context)?;
-        self.apps
+        let app = self
+            .apps
             .get_mut(&id)
-            .ok_or_else(|| miette!("App is missing"))?
-            .execute_tool(&app_call, context)
-            .await
+            .ok_or_else(|| miette!("App is missing"))?;
+        let mut result = app.execute_tool(&app_call, context).await?;
+        if result.output_schema.is_none() {
+            result.output_schema = app.output_schema();
+        }
+        Ok(result)
     }
 
     pub fn validate_tool_call(
@@ -407,7 +436,11 @@ impl AppManager {
             .apps
             .get_mut(app_id)
             .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
-        app.execute_tool(&app_call, context).await
+        let mut result = app.execute_tool(&app_call, context).await?;
+        if result.output_schema.is_none() {
+            result.output_schema = app.output_schema();
+        }
+        Ok(result)
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
