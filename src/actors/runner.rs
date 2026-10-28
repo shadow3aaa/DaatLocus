@@ -209,6 +209,10 @@ fn take_apps(apps: &mut AppManager) -> AppManager {
     )
 }
 
+type NestedExecution = std::pin::Pin<
+    Box<dyn std::future::Future<Output = (Result<Option<String>>, AppManager)> + Send + 'static>,
+>;
+
 /// Box the nested execution so its future is finite and `Send` across the
 /// recursive steering boundary. Keeping the future concrete would make the
 /// compiler prove a recursive `Send` cycle for every nested input.
@@ -218,9 +222,7 @@ fn execute_message_owned(
     message: MessageRecord,
     control: ActorControl,
     mut apps: AppManager,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = (Result<Option<String>>, AppManager)> + Send + 'static>,
-> {
+) -> NestedExecution {
     Box::pin(async move {
         let result = execute_message(&system, &actor, &message, &control, &mut apps).await;
         (result, apps)
