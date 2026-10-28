@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicUsize;
 
 fn core_stop_context(system: &ActorSystem, template: &MessageRecord) -> AppToolExecutionContext {
     system.install_local_core().unwrap();
@@ -815,6 +816,81 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
         assert_eq!(observations, ["first-effect", "second-effect"]);
     }
     system.shutdown().await;
+}
+
+#[test]
+fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_directory, system, provider) = paused_runtime().await;
+        const INCOMING: usize = 150;
+        {
+            let mut replies = provider.replies.lock();
+            replies.push_back(MockReply::Calls(vec![AgentToolCall {
+                id: "blocked-effect".into(),
+                name: "boundary__effect".into(),
+                arguments: json!({}),
+            }]));
+            for _ in 0..INCOMING {
+                replies.push_back(MockReply::Answer("Incoming input processed"));
+            }
+            replies.push_back(MockReply::Answer("Original input processed"));
+        }
+
+        let original = system
+            .send_user("root", "Run the blocked effect".into(), vec![], None)
+            .unwrap();
+        let message = system.store().claim_next("root").unwrap().unwrap();
+        assert_eq!(message.id, original.id);
+        let actor = system.execution_actor(&message).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let mut apps = AppManager::new(vec![Box::new(BoundaryApp {
+            entered: entered.clone(),
+            release: release.clone(),
+            effects: effects.clone(),
+        })])
+        .unwrap();
+        let worker_system = system.clone();
+        let control = ActorControl::default();
+        let execution = tokio::spawn(async move {
+            execute_message(&worker_system, &actor, &message, &control, &mut apps).await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the blocked effect did not start");
+        let mut incoming = Vec::with_capacity(INCOMING);
+        for index in 0..INCOMING {
+            incoming.push(
+                system
+                    .send_user("root", format!("Incoming {index}"), vec![], None)
+                    .unwrap(),
+            );
+        }
+        release.notify_one();
+
+        let reply = tokio::time::timeout(Duration::from_secs(120), execution)
+            .await
+            .expect("queued steering inputs stalled the worker")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.as_deref(), Some("Original input processed"));
+        for item in incoming {
+            assert_eq!(
+                wait_completed(&system, &item.id).await.reply.as_deref(),
+                Some("Incoming input processed")
+            );
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        system.shutdown().await;
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

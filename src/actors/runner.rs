@@ -200,6 +200,65 @@ fn check_interruption(
     }
 }
 
+/// Move the Actor's Apps into a nested execution task. The parent is suspended
+/// while the task runs, so it must not observe the temporary empty manager.
+fn take_apps(apps: &mut AppManager) -> AppManager {
+    std::mem::replace(
+        apps,
+        AppManager::new(Vec::new()).expect("an empty AppManager is valid"),
+    )
+}
+
+/// Box the nested execution so its future is finite and `Send` across the
+/// recursive steering boundary. Keeping the future concrete would make the
+/// compiler prove a recursive `Send` cycle for every nested input.
+fn execute_message_owned(
+    system: ActorSystem,
+    actor: ActorRecord,
+    message: MessageRecord,
+    control: ActorControl,
+    mut apps: AppManager,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = (Result<Option<String>>, AppManager)> + Send + 'static>,
+> {
+    Box::pin(async move {
+        let result = execute_message(&system, &actor, &message, &control, &mut apps).await;
+        (result, apps)
+    })
+}
+
+/// Abort a nested execution task if the awaiting frame is dropped. This keeps
+/// cancellation semantics aligned with awaiting the future inline.
+struct AbortOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn wait(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        let handle = self.handle.take().expect("task handle");
+        let mut guard = Self {
+            handle: Some(handle),
+        };
+        let result = guard.handle.as_mut().expect("task handle").await;
+        guard.handle = None;
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 async fn refresh_apps(
     system: &ActorSystem,
     actor: &ActorRecord,
@@ -983,18 +1042,27 @@ async fn receive_incoming(
     let mut received = false;
     while let Some(input) = system.store().claim_incoming(&actor.id, &current.id)? {
         received = true;
-        let result = async {
+        let result = {
             let incoming_actor = system.execution_actor(&input)?;
-            Box::pin(execute_message(
-                system,
-                &incoming_actor,
-                &input,
-                control,
-                apps,
-            ))
-            .await
-        }
-        .await;
+            // Keep the suspended input future and its App state on the heap.
+            // Polling a nested execute_message future inline would add a native
+            // stack frame for every steering input and eventually overflow the
+            // Tokio worker stack.
+            let task = tokio::spawn(execute_message_owned(
+                system.clone(),
+                incoming_actor,
+                input.clone(),
+                control.clone(),
+                take_apps(apps),
+            ));
+            match AbortOnDrop::new(task).wait().await {
+                Ok((result, returned_apps)) => {
+                    *apps = returned_apps;
+                    result
+                }
+                Err(error) => Err(miette!("Actor input execution task failed: {error}")),
+            }
+        };
         if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
             return Err(miette!("Core worker no longer owns execution"));
         }
