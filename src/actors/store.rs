@@ -251,6 +251,47 @@ fn read_actor(db: &Connection, id: &str) -> Result<ActorRecord> {
     .ok_or_else(|| missing("Actor"))?;
     account_actor(db, decode(record)?)
 }
+fn account_actor_ids_db(
+    db: &Connection,
+    sender: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let bound: bool = sql(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='stage_account_actors')",
+        [],
+        |row| row.get(0),
+    ))?;
+    let query = if bound {
+        "WITH RECURSIVE ownership(actor,account) AS (
+            SELECT actor,account FROM stage_account_actors
+            UNION ALL SELECT a.id,o.account FROM actors a JOIN ownership o ON a.parent_id=o.actor
+            WHERE NOT EXISTS(SELECT 1 FROM stage_account_actors explicit WHERE explicit.actor=a.id)
+        ) SELECT a.id FROM actors a LEFT JOIN ownership o ON o.actor=a.id
+        WHERE o.account IS (SELECT account FROM ownership WHERE actor=?1)"
+    } else {
+        "SELECT id FROM actors WHERE ?1 IS NOT NULL"
+    };
+    let mut statement = sql(db.prepare(query))?;
+    sql(sql(statement.query_map([sender], |row| row.get::<_, String>(0)))?.collect())
+}
+fn validate_new_actor_name_db(db: &Connection, parent: &str, name: &str) -> Result<()> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return Err(ActorError::Invalid("Actor name must not be empty".into()).into());
+    }
+    let mut names =
+        sql(db.prepare("SELECT json_extract(record, '$.config.name') FROM actors WHERE id=?1"))?;
+    for id in account_actor_ids_db(db, parent)? {
+        let existing: String = sql(names.query_row([id], |row| row.get(0)))?;
+        if existing.trim().to_lowercase() == name {
+            return Err(ActorError::Conflict(
+                "Actor name is already in use. List existing Actors and choose a different name"
+                    .into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 fn account_actor(_db: &Connection, actor: ActorRecord) -> Result<ActorRecord> {
     Ok(actor)
 }
@@ -582,6 +623,15 @@ impl ActorStore {
             self.commit(tx)
         })
     }
+    pub(crate) fn account_actor_ids(
+        &self,
+        sender: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        database_io(|| account_actor_ids_db(&self.db.lock(), sender))
+    }
+    pub(crate) fn validate_new_actor_name(&self, parent: &str, name: &str) -> Result<()> {
+        database_io(|| validate_new_actor_name_db(&self.db.lock(), parent, name))
+    }
     pub(crate) fn save_created_actor(
         &self,
         actor: &ActorRecord,
@@ -612,6 +662,11 @@ impl ActorStore {
                     ActorError::Forbidden("Initial authorization target changed".into()).into(),
                 );
             }
+            let parent = actor
+                .parent_id
+                .as_deref()
+                .ok_or_else(|| ActorError::Invalid("Created Actor requires a parent".into()))?;
+            validate_new_actor_name_db(&tx, parent, &actor.config.name)?;
             save_actor(&tx, actor)?;
             if let Some(resource) = resource {
                 save_resource(&tx, resource, None)?;

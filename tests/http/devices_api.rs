@@ -355,14 +355,12 @@ async fn remote_actor_http_transfers_pathless_attachments_and_enforces_source_ac
         format!("/stages/{}/actors/{target}", a.stage.host.local)
     );
     // Actors created through the Core hierarchy need no per-device grants either.
-    let hosted = a
-        .system
-        .create_owned("core", a.system.actor(&target).unwrap().config)
-        .unwrap();
-    let nested = a
-        .system
-        .create_owned(&hosted.id, hosted.config.clone())
-        .unwrap();
+    let mut hosted_config = a.system.actor(&target).unwrap().config;
+    hosted_config.name = "Hosted collaborator".into();
+    let hosted = a.system.create_owned("core", hosted_config).unwrap();
+    let mut nested_config = hosted.config.clone();
+    nested_config.name = "Nested collaborator".into();
+    let nested = a.system.create_owned(&hosted.id, nested_config).unwrap();
     for id in [&hosted.id, &nested.id] {
         let response = b
             .owner(

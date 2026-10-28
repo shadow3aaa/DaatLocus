@@ -901,8 +901,11 @@ impl ActorSystem {
         {
             return Ok(actor);
         }
-        let config = self.hosted_config(config)?;
+        let mut config = self.hosted_config(config)?;
+        config.name = config.name.trim().to_owned();
         self.validate_config(&config)?;
+        self.store()
+            .validate_new_actor_name(&parent.id, &config.name)?;
         crate::file_io::ensure_directory(
             workspace_policy.unwrap_or(&crate::sandbox::RuntimeSandboxPolicy::disabled()),
             &config.workspace,
@@ -995,6 +998,10 @@ impl ActorSystem {
             return Err(forbidden("External requests cannot create Actors"));
         }
         self.validate_config(&config)?;
+        // Imports resolve their stable input identity before checking the name in create.
+        if resource.is_none() {
+            self.store().validate_new_actor_name(sender, &config.name)?;
+        }
         initial_authorization
             .writable_roots
             .push(config.workspace.clone());
@@ -1296,18 +1303,7 @@ impl ActorSystem {
         Ok(())
     }
     fn account_actor_ids(&self, sender: &str) -> Result<std::collections::HashSet<String>> {
-        self.store().stage_transaction(|tx| {
-            let bound: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='stage_account_actors')", [], |row| row.get(0))?;
-            let query = if bound {
-                "WITH RECURSIVE ownership(actor,account) AS (
-                    SELECT actor,account FROM stage_account_actors
-                    UNION ALL SELECT a.id,o.account FROM actors a JOIN ownership o ON a.parent_id=o.actor
-                    WHERE NOT EXISTS(SELECT 1 FROM stage_account_actors explicit WHERE explicit.actor=a.id)
-                ) SELECT a.id FROM actors a LEFT JOIN ownership o ON o.actor=a.id
-                WHERE o.account IS (SELECT account FROM ownership WHERE actor=?1)"
-            } else { "SELECT id FROM actors WHERE ?1 IS NOT NULL" };
-            Ok(tx.prepare(query)?.query_map([sender], |row| row.get::<_, String>(0))?.collect::<std::result::Result<_, _>>()?)
-        }).map_err(|error| miette::miette!("{error}"))
+        self.store().account_actor_ids(sender)
     }
     pub fn record_for_tool(&self, id: &str, call: &ActorCallContext) -> Result<ActorRecord> {
         if call.actor_id != id {
@@ -2512,10 +2508,10 @@ mod tests {
         }
         let before = system.store().actor_count().unwrap();
         let mut parent = root;
-        for _ in 0..10 {
-            let child = system
-                .create_owned(&parent.id, parent.config.clone())
-                .unwrap();
+        for index in 0..10 {
+            let mut config = parent.config.clone();
+            config.name = format!("Descendant {index}");
+            let child = system.create_owned(&parent.id, config).unwrap();
             assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
             assert_eq!(child.depth, parent.depth + 1);
             assert_eq!(child.status, ActorStatus::Idle);
@@ -2622,6 +2618,7 @@ mod tests {
         system.update_config(config).await.unwrap();
         let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         actor.model = Some("custom".into());
+        actor.name = "Custom model worker".into();
         let child = system.create_owned(FIXTURE_ACTOR_ID, actor).unwrap();
         let mut candidate = system.config();
         candidate.models.remove("custom");
@@ -2677,6 +2674,7 @@ mod tests {
         system.update_config(original).await.unwrap();
         let mut actor = system.actor(FIXTURE_ACTOR_ID).unwrap().config;
         actor.model = Some("custom".into());
+        actor.name = "Custom model worker".into();
         let child = system.create_owned(FIXTURE_ACTOR_ID, actor).unwrap();
         let request = system
             .send_user(FIXTURE_ACTOR_ID, "queued work".into(), vec![], None)
@@ -2902,6 +2900,170 @@ mod tests {
             assert_eq!(retained.config.name, actor.config.name);
             assert_eq!(retained.config.apps, actor.config.apps);
         }
+    }
+
+    #[tokio::test]
+    async fn actor_creation_rejects_used_names_and_lists_all_names_in_pages() {
+        use crate::{app::App, model_protocol::AgentToolCall};
+        let (directory, system) = fixture().await;
+        let input = system
+            .send_user("core", "Create workers".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap();
+        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let create = |name: &str| AgentToolCall {
+            id: Uuid::new_v4().to_string(),
+            name: "create".into(),
+            arguments: serde_json::json!({"stage_id":null,"name":name,"workspace":null,
+                "instructions":null,"model":null,"initial_authorization":null}),
+        };
+        let result = app
+            .execute_tool(&create("  Athena  "), &context)
+            .await
+            .unwrap();
+        let athena = system
+            .actor(result.payload["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(athena.config.name, "Athena");
+        system.store().set_archived(&athena.id, true).unwrap();
+        let before = system.store().actor_count().unwrap();
+        for name in [
+            "Athena",
+            "athena",
+            " ATHENA ",
+            &system.actor("core").unwrap().config.name,
+        ] {
+            let error = app.execute_tool(&create(name), &context).await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ActorError>(),
+                Some(ActorError::Conflict(_))
+            ));
+        }
+        for name in ["", " \t\n"] {
+            let error = app.execute_tool(&create(name), &context).await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<ActorError>(),
+                Some(ActorError::Invalid(_))
+            ));
+        }
+        let mut config = athena.config.clone();
+        config.workspace = directory.path().join("must-not-be-created");
+        let error = system
+            .create_owned(FIXTURE_ACTOR_ID, config.clone())
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ActorError>(),
+            Some(ActorError::Conflict(_))
+        ));
+        assert!(!config.workspace.exists());
+        assert_eq!(system.store().actor_count().unwrap(), before);
+
+        // All states and owners are discoverable through the existing bounded tool.
+        let mut cursor = None;
+        let mut names = Vec::new();
+        loop {
+            let result = app
+                .execute_tool(
+                    &AgentToolCall {
+                        id: "names".into(),
+                        name: "list".into(),
+                        arguments: serde_json::json!({"stage_id":null,"cursor":cursor,"limit":1}),
+                    },
+                    &context,
+                )
+                .await
+                .unwrap();
+            for actor in result.payload["actors"].as_array().unwrap() {
+                names.push(actor["name"].as_str().unwrap().to_owned());
+            }
+            cursor = result.payload["next_cursor"].as_u64();
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let mut expected = vec![
+            "Athena".to_owned(),
+            system.actor("core").unwrap().config.name,
+            system.actor(FIXTURE_ACTOR_ID).unwrap().config.name,
+        ];
+        names.sort();
+        expected.sort();
+        assert_eq!(names, expected);
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn actor_name_check_is_atomic_and_scoped_to_the_account() {
+        let (_directory, system) = fixture().await;
+        let parent = system.actor(FIXTURE_ACTOR_ID).unwrap();
+        let mut first = parent.clone();
+        first.id = Uuid::new_v4().to_string();
+        first.parent_id = Some(parent.id.clone());
+        first.config.name = "Hermes".into();
+        let mut second = first.clone();
+        second.id = Uuid::new_v4().to_string();
+        second.config.name = " HERMES ".into();
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = [first, second]
+                .into_iter()
+                .map(|actor| {
+                    let barrier = &barrier;
+                    let store = system.store();
+                    let parent_id = &parent.id;
+                    scope.spawn(move || {
+                        store
+                            .validate_new_actor_name(parent_id, &actor.config.name)
+                            .unwrap();
+                        barrier.wait();
+                        store.save_created_actor(&actor, None, &[], None)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(matches!(
+            outcomes
+                .into_iter()
+                .find_map(Result::err)
+                .unwrap()
+                .downcast_ref::<ActorError>(),
+            Some(ActorError::Conflict(_))
+        ));
+        assert_eq!(system.store().actor_count().unwrap(), 3);
+
+        // A foreign account's retained name cannot reserve names in this account.
+        let hermes = system
+            .list_for_actor(FIXTURE_ACTOR_ID)
+            .unwrap()
+            .into_iter()
+            .find(|actor| actor.config.name.trim().eq_ignore_ascii_case("Hermes"))
+            .unwrap();
+        system.store().stage_transaction(|tx| {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+            tx.execute("INSERT INTO stage_account_actors VALUES(?1,'local-account')", [&parent.id])?;
+            tx.execute("INSERT INTO stage_account_actors VALUES(?1,'foreign-account')", [&hermes.id])?;
+            Ok(())
+        }).unwrap();
+        let mut config = parent.config.clone();
+        config.name = "Hermes".into();
+        let local = system.create_owned(&parent.id, config.clone()).unwrap();
+        // Descendant creators share the same account namespace.
+        assert!(matches!(
+            system
+                .create_owned(&local.id, config)
+                .unwrap_err()
+                .downcast_ref::<ActorError>(),
+            Some(ActorError::Conflict(_))
+        ));
+        system.shutdown().await;
     }
 
     #[tokio::test]

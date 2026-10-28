@@ -584,8 +584,10 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
     let (_dir, mut system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
     let root = system.actor("root").unwrap();
-    for _ in 0..64 {
-        system.create_owned("root", root.config.clone()).unwrap();
+    for index in 0..64 {
+        let mut config = root.config.clone();
+        config.name = format!("Idle worker {index}");
+        system.create_owned("root", config).unwrap();
     }
     assert_eq!(system.resident_workers(), 0);
     assert_eq!(system.store().actor_count().unwrap(), 66);
@@ -675,7 +677,9 @@ async fn reopening_starts_only_queued_actors_and_never_replays_completed_input()
     let (dir, mut system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
     let root = system.actor("root").unwrap();
-    let child = system.create_owned("root", root.config.clone()).unwrap();
+    let mut config = root.config.clone();
+    config.name = "Queued worker".into();
+    let child = system.create_owned("root", config).unwrap();
     let first = system
         .send_user("root", "First".into(), vec![], None)
         .unwrap();
