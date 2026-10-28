@@ -199,7 +199,6 @@ html[data-desktop-platform="windows"] { --dl-caption-height: 36px; --dl-caption-
 .dl-main-view>.dl-conversation { --dl-header-space: calc(52px + var(--dl-safe-top)); }
 .dl-main-view>.dl-conversation>.dl-conversation-heading { top: calc(23px + var(--dl-safe-top)); }
 .dl-main-search { margin-left: auto; color: var(--muted-foreground); }
-.dl-main-search { background: var(--background); }
 html[data-desktop-platform] :is(.dl-main-search,.dl-actor-dialog-actions) { display: none; }
 @media(min-width:768px) {
   html:not([data-mobile-platform]) :is(.dl-main-search,.dl-actor-dialog-actions) { display: none; }
@@ -521,7 +520,7 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-step-mark, .dl-step-error-mark { width: 4px; height: 4px; border-radius: 50%; background: var(--muted-foreground); flex: 0 0 auto; }
 .dl-step-error-mark { background: var(--destructive); }
 .dl-tool-details { --code-background: transparent; --code-foreground: var(--foreground); min-width: 0; overflow-wrap: anywhere; margin: 8px 0 12px; max-width: 100%; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
-.dl-tool-details :is(.dl-code-block,.dl-code-heading,.dl-inline-diff,.dl-inline-diff>header,.dl-artifact) { background: transparent; }
+.dl-tool-details :is(.dl-code-block,.dl-code-heading,.dl-diff-heading,.dl-artifact) { background: transparent; }
 .dl-tool-details .dl-file-details { margin: 0; max-width: 100%; }
 .dl-tool-details .dl-tool-note { margin-inline: 0; }
 .dl-tool-details pre, .dl-approval-details pre { overflow: auto; max-height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; }
@@ -784,11 +783,10 @@ html[data-reduced-motion=true] .dl-primary-composer .dl-composer-textarea { tran
 :root { --change-added: oklch(.59 .17 150); --change-removed: oklch(.6 .2 25); --diff-added-bg: oklch(.97 .035 150); --diff-removed-bg: oklch(.97 .025 25); }
 .dark { --change-added: oklch(.75 .14 150); --change-removed: oklch(.76 .14 25); --diff-added-bg: oklch(.3 .04 150); --diff-removed-bg: oklch(.3 .04 25); }
 .dl-primary-composer .dl-composer-textarea { padding-right: 5px; }
-.dl-inline-diff { display: flex; flex-direction: column; min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin: 8px 0 12px; background: var(--background); }
-.dl-inline-diff>header { display: flex; gap: 8px; align-items: center; background: color-mix(in srgb, var(--foreground) 2%, var(--background)); border-bottom: 1px solid var(--border); padding: 6px 10px; color: var(--muted-foreground); font-size: var(--content-font-size, 16px); }
-.dl-inline-diff>header>span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.dl-inline-diff>header>button { margin-left: auto; }
-.dl-inline-diff>header small { font-size: inherit; white-space: nowrap; }
-.dl-inline-diff>header { flex: none; }
+.dl-diff-heading { display: flex; gap: 8px; align-items: center; background: transparent; padding: 6px 0; color: var(--muted-foreground); font-size: var(--content-font-size, 16px); }
+.dl-diff-heading>span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.dl-diff-heading>button { margin-left: auto; }
+.dl-diff-heading small { font-size: inherit; white-space: nowrap; }
+.dl-diff-heading { flex: none; }
 .dl-diff-lines { min-height: 0; max-height: 380px; overflow: auto; overscroll-behavior: contain; padding: 3px 0; }
 .dl-diff-lines>[data-lazy-page] { position: sticky; left: 0; }
 .dl-diff-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; }
@@ -823,7 +821,6 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-step-label > .dl-step-chevron { width: 14px; height: 14px; opacity: 0; flex-shrink: 0; }
 .dl-step-label:hover > .dl-step-chevron, .dl-step-label:focus-visible > .dl-step-chevron, .dl-step-label[aria-expanded="true"] > .dl-step-chevron { opacity: 1; }
 .dl-step-detail { --tool-code-size: calc(var(--code-font-size, 13px) * 16 / 13); min-width: 0; }
-.dl-step-detail > .dl-inline-diff { margin: 8px 0; }
 .dl-step-detail .dl-diff-lines { max-height: 144px; }
 .dl-tool-output { min-width: 0; max-width: 100%; margin: 8px 0; overflow: hidden; border: 1px solid var(--settings-border); border-radius: 12px; background: color-mix(in srgb, var(--foreground) 4%, var(--background)); color: var(--muted-foreground); }
 .dl-tool-output > header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: var(--content-font-size, 16px); line-height: 1.5; }
@@ -844,18 +841,16 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-outcome-artifact { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 13px; padding: 13px 15px; color: var(--foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); text-decoration: none; max-width: 580px; }
 .dl-outcome-artifact>svg { width: 17px; height: 17px; flex-shrink: 0; }.dl-outcome-artifact>svg:last-child { width: 13px; height: 13px; margin-left: auto; color: var(--muted-foreground); }
 .dl-outcome-artifact span { min-width: 0; overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 3px; }.dl-outcome-artifact small { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }
-.dl-changed-files { border: 1px solid var(--border); border-radius: 15px; padding: 13px 15px 10px; }
-.dl-changed-files>header { display: flex; align-items: flex-start; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.dl-changed-files>header>svg { width: 20px; height: 20px; padding-top: 2px; }.dl-changed-files>header>div { flex: 1; }
-.dl-changed-files strong { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); font-weight: 500; }.dl-changed-files p { margin: 3px 0 0; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
+.dl-changed-files-heading { display: flex; align-items: flex-start; gap: 12px; }
+.dl-changed-files-heading>svg { width: 20px; height: 20px; padding-top: 2px; }.dl-changed-files-heading>div { flex: 1; }
+.dl-changed-files-heading strong { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); font-weight: 500; }.dl-changed-files-heading p { margin: 3px 0 0; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-added-count { color: var(--change-added); }.dl-removed-count { color: var(--change-removed); }
-.dl-changed-files li { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 10px 0 2px; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }
-.dl-changed-files li button { border: 0; background: transparent; color: inherit; padding: 0; text-align: left; overflow-wrap: anywhere; }
+.dl-changed-files-list li { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 10px 0 2px; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }
+.dl-changed-files-list li button { border: 0; background: transparent; color: inherit; padding: 0; text-align: left; overflow-wrap: anywhere; }
 .dl-change-dialog { --dl-dialog-width: 920px; display: flex; flex-direction: column; width: min(920px,calc(100vw - 32px)); max-width: 920px; max-height: calc(100dvh - 32px); border-radius: 18px; }
 .dl-change-dialog>[data-slot=dialog-header], .dl-change-picker { flex-shrink: 0; }
 .dl-change-picker { display: flex; gap: 5px; flex-wrap: wrap; max-height: 110px; overflow: auto; }.dl-change-content { min-height: 0; max-height: 65dvh; overflow: auto; overscroll-behavior: contain; }
 .dl-change-picker>[data-slot=button] { min-width: 0; max-width: 100%; }
-.dl-change-content .dl-inline-diff { max-height: 60dvh; }
 .dl-change-content .dl-diff-lines { max-height: none; }
 @keyframes dl-breathe { 50% { opacity: .25; } }
 @media(max-width:700px) {
@@ -1382,7 +1377,7 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
   .dl-usage-heading { flex-wrap: wrap; }
 }
 
-.dl-changed-files li button:focus-visible, .dl-actor-message:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.dl-changed-files-list li button:focus-visible, .dl-actor-message:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .dl-actor-message { cursor: pointer; }
 .dl-actor-message-caption { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; margin-bottom: 6px; }
 .dl-actor-message-caption span { min-width: 0; overflow-wrap: anywhere; }
