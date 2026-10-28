@@ -316,7 +316,7 @@ async fn authorize(
         _ => Err(ApiError::forbidden()),
     }
 }
-async fn read(
+pub(super) async fn read(
     state: &ServiceState,
     headers: &HeaderMap,
     target: ActorAddress,

@@ -1,3 +1,4 @@
+import type { ContactFocus } from "@/lib/contacts";
 import { motionScrollBehavior } from "@/lib/appearance";
 import { t } from "@/lib/i18n";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -21,8 +22,8 @@ import { matchingConversationMessages, matchesConversationText } from "@/lib/con
 import { FloatingSearchBar } from "@/components/floating-search";
 import { LazyPage } from "@/components/lazy-page";
 
-export function ConversationPane({ connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
-  connectionMessage?: ConversationConnectionMessage | null;
+export function ConversationPane({ focus, connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
+  focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null;
   actorId: string; access: Access; onActor(id: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
   compact?: boolean; refreshVersion?: number; searchOpen?: boolean; onSearchOpenChange?(open: boolean): void; onActorLoaded?(actor: ActorDetail): void;
   onConfigureModels?(): void;
@@ -104,6 +105,23 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
       area.removeEventListener("keydown", keyDown);
     };
   }, [actorId]);
+  useEffect(()=>{
+    if(!focus||focus.actorId!==actorId||chat.loading)return;
+    const controller=new AbortController();
+    follow.current=false;
+    let found=false;
+    const seek=()=>{
+      if(found)return;
+      const article=scroll.current?.querySelector<HTMLElement>(`#${CSS.escape(`message-${actorId}-${focus.message_id}`)}`);
+      const target=focus.result_id?scroll.current?.querySelector<HTMLElement>(`[data-result-id="${CSS.escape(focus.result_id)}"]`):focus.generation!=null?scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focus.message_id)}"][data-generation="${focus.generation}"]`):scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focus.message_id)}"][data-message-side="${focus.kind}"]`)??article?.querySelector<HTMLElement>(`[data-message-side="${focus.kind}"]`);
+      if(!target)return;
+      found=true;target.scrollIntoView({block:"center",behavior:"instant"});target.classList.add("dl-contact-focus");
+    };
+    const observer=new MutationObserver(seek);
+    if(scroll.current)observer.observe(scroll.current,{childList:true,subtree:true});
+    void chat.revealMessage(focus.message_id,controller.signal).then(()=>requestAnimationFrame(seek)).catch(()=>{if(!controller.signal.aborted)setLocalError(t("lazy_page.load_failed"));});
+    return()=>{controller.abort();observer.disconnect();};
+  },[focus,actorId,chat.loading,chat.revealMessage]);
   useLayoutEffect(() => {
     const section = pane.current;
     const controls = footer.current;
@@ -240,7 +258,7 @@ export function ConversationPane({ connectionMessage, actorId, access, onActor, 
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
-          {primaryView ? <PrimaryTranscript sendOrigin={sendOrigin} messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
+          {primaryView ? <PrimaryTranscript sendOrigin={sendOrigin} messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript focus={focus} messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
           <div className="dl-conversation-bottom" />
         </div>
       </div>

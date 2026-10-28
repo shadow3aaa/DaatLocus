@@ -13,10 +13,12 @@ client are connected.
 - Core has the fixed IM presentation; every other Actor has the work presentation,
   including when opened in the main window. Reuse data/control hooks, not a
   container-dependent rendering mode. A narrow app navigation rail contains Home,
-  Apps, the native shared Browser workspace, device-local Virtual Displays on Windows/Android, and the account menu;
+  Apps, Contacts, the native shared Browser workspace, device-local Virtual Displays on Windows/Android, and the account menu;
   mobile uses a modal navigation drawer. There is one Core
   entry, no session/chat catalog or permanent Actor sidebar. Actor references
-  open a conversation dialog. Settings use full-page categories.
+  open a conversation dialog. Contacts is a separate observation page for account Actors,
+  with name and visible-bubble search; it exposes no Actor configuration or input.
+  Settings use full-page categories.
 - Virtual Displays is an Owner-only observation of existing device outputs, with
   transient image bytes rather than Actor resources. Viewing never creates or
   reconfigures screens, reconnects privileged transports, requests permissions or

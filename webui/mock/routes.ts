@@ -1,3 +1,4 @@
+import { contactsPage } from "./contacts";
 import { systemPromptRoute } from "./system-prompt";
 import { examplesForScene } from "./tool-showcase";
 import { prepareToolPreviewRead } from "./tool-showcase-state";
@@ -263,7 +264,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const id=url.searchParams.get("scene")??"conversation";
     if(!activateScenario(id,url.searchParams.get("case") ?? undefined)) return invalidRequest("Unknown preview scenario or tool example");
     const scene=scenarios.find(item=>item.id===id)!;
-    return new Response(null,{status:303,headers:{Location:scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
+    return new Response(null,{status:303,headers:{Location:scene.id.startsWith("contacts")?"/contacts":scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
   }
   if(path==="/__mock/scenario" && method==="POST") {const body=await jsonBody(req);if(typeof body?.id!=="string"||!activateScenario(body.id))return invalidRequest("Unknown preview scenario");return json({id:previewState.id});}
   if (path === "/__mock/health" && method === "GET") return json({ ok: true });
@@ -360,6 +361,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   }
 
   { const prompt = await systemPromptRoute(req, url); if (prompt) return prompt; }
+
+  if(path==="/v1/contacts"&&method==="GET"){if(!previewState.authenticated)return json({code:"unauthorized"},401);return contactsPage(url);}
 
   // ---- actors -------------------------------------------------------------
   if (path === "/v1/actors" && method === "GET") {

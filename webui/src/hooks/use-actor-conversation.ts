@@ -401,6 +401,16 @@ export function useActorConversation(actorId: string | null, options: Conversati
         setLoadingOlder(false);
     }
   }, [actorId, loadingOlder, valid, loadTools]);
+  const revealMessage = useCallback(async (id:string, signal:AbortSignal) => {
+    if(!actorId)return;
+    const generation=epoch.current;
+    const lifecycle=controller.current?.signal;
+    const requestSignal=lifecycle?AbortSignal.any([signal,lifecycle]):signal;
+    const message=await api.getMessage(actorId,id,{signal:requestSignal});
+    if(requestSignal.aborted||!valid(generation))return;
+    dispatch({type:"message",message});
+    await loadTools(id);
+  },[actorId,valid,loadTools]);
   const refreshActor = useCallback(async () => {
     if (!actorId)
       return;
@@ -487,7 +497,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   const current = state.actorId === actorId && enabled;
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
     draft: current ? draft : acceptsInput ? draftEntry().text : "", setDraft, attachments: current ? attachments : acceptsInput ? draftEntry().attachments : [], uploading, addAttachments, removeAttachment,
-    loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder,
+    loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder, revealMessage,
     sending, send, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
     loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {} };
 }

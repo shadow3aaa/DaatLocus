@@ -4,6 +4,7 @@ mod approvals;
 mod apps;
 mod auth;
 mod computer_use;
+mod contacts;
 mod conversation;
 mod imports;
 mod prompt;
@@ -111,6 +112,7 @@ pub fn router(state: ServiceState) -> Router {
             get(|| async { Json(json!({"protocol": 1, "version": env!("CARGO_PKG_VERSION")})) }),
         )
         .route("/v1/actors", get(list_actors))
+        .route("/v1/contacts", get(contacts::list))
         .route(
             "/v1/actors/{actor}",
             get(get_actor).patch(patch_actor_preferences),

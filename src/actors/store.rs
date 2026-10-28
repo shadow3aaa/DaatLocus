@@ -11,6 +11,8 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod approval_appeals;
+mod contacts;
+pub use contacts::{ActorContact, ContactMessage, ContactPage};
 #[cfg(test)]
 #[path = "store/history_handoff_tests.rs"]
 mod history_handoff_tests;

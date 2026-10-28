@@ -1494,6 +1494,23 @@ Background browser/device refreshes preserve the loaded page depth and serialize
 appends so they cannot discard a newly loaded tail. Older conversation pages preserve
 the current reading anchor and are requested only when their upper edge is visible.
 
+### Actor contacts
+
+`/contacts` is a shared navigation page, not a conversation catalog or management
+surface. `/v1/contacts` returns bounded name-ordered Actor pages and up to three
+matching original bubble bodies per Actor. Cursor continuation walks authenticated
+account devices using the existing immutable observation-content protocol. Each
+source enforces account ownership; the account Core appears only once. Unavailable
+devices remain explicit rather than blocking other sources.
+
+Search covers visible inputs, replies, sent Actor messages and assistant prose
+assembled from semantic deltas. It excludes reasoning, tool output and Core's
+internal coordination. Clients generate excerpts and highlights from original text.
+Selecting a hit fetches its exact scoped message and loads bounded activity pages
+until its bubble is available, without sending input or changing Actor configuration.
+Contacts uses the existing floating search and automatic scroll boundary; Actor
+references keep the desktop dialog/mobile full-page conversation presentation.
+
 ### Conversation import
 
 Local Codex sessions and archived sessions are discovered through a private filesystem

@@ -9,6 +9,8 @@ mod apps;
 mod computer_use;
 #[path = "http/configuration_api.rs"]
 mod configuration;
+#[path = "http/contacts_api.rs"]
+mod contacts;
 #[path = "http/conversation_api.rs"]
 mod conversation;
 #[path = "http/devices_api.rs"]

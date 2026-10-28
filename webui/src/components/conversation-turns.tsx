@@ -1,3 +1,4 @@
+import type { ContactFocus } from "@/lib/contacts";
 import { isInternalNotification } from "@/lib/conversation-messages";
 import { importedConversation, messageDisplayText } from "@/lib/conversation-import";
 import { ImportConversationBubble } from "@/components/import-conversation";
@@ -20,7 +21,7 @@ import { matchesConversationText } from "@/lib/conversation-search";
 import { MessageContextMenu } from "@/components/message-context-menu";
 
 type Chat = ReturnType<typeof useActorConversation>;
-type Props = { message: MessageRecord; chat: Chat; access: Access; onActor(id: string, messageId?: string): void; searchQuery?: string };
+type Props = { focus?:ContactFocus|null; message: MessageRecord; chat: Chat; access: Access; onActor(id: string, messageId?: string): void; searchQuery?: string };
 function OutcomeStatus({ message }: { message: MessageRecord }) {
   if (message.status === "failed") return <p role="status" className="dl-operation-error">{conversationFailureMessage(message.error)}</p>;
   if (message.status === "cancelled" || message.status === "interrupted") return <p role="status" className="dl-operation-note">{message.started_at_ms == null ? t("conversation_turns.queued_message_withdrawn") : t("conversation_turns.task_stopped_completed_actions_are_retained")}</p>;
@@ -52,10 +53,10 @@ export const PrimaryTurn = forwardRef<HTMLElement, Props & { receiptMessageId?: 
   return <motion.article ref={ref} layout="position" {...bubbleMotion} initial={sendOrigin ? false : bubbleMotion.initial} className="dl-message-turn dl-primary-turn" data-first-side={input ? "user" : "assistant"} data-last-side={response ? "assistant" : "user"} id={`message-${message.actor_id}-${message.id}`}>
     <AnimatePresence initial={false}>
     {input && <motion.div key="input" {...disclosureMotion} className="dl-primary-inputs">
-    {user && <div className="dl-message dl-message-user"><MessageContextMenu content={messageDisplayText(message)}><div className="dl-primary-bubble-row"><SentBubble origin={sendOrigin}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</SentBubble><CopyMessage content={messageDisplayText(message)} /></div></MessageContextMenu><AnimatePresence initial={false}>{(!receiptMessageId || receiptMessageId === message.id) && <motion.div key="receipt" {...disclosureMotion} className="dl-receipt-presence"><MessageReceipt message={message} /></motion.div>}</AnimatePresence></div>}
+    {user && <div className="dl-message dl-message-user" data-message-side="input"><MessageContextMenu content={messageDisplayText(message)}><div className="dl-primary-bubble-row"><SentBubble origin={sendOrigin}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{message.content && <p className="dl-user-text">{message.content}</p>}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</SentBubble><CopyMessage content={messageDisplayText(message)} /></div></MessageContextMenu><AnimatePresence initial={false}>{(!receiptMessageId || receiptMessageId === message.id) && <motion.div key="receipt" {...disclosureMotion} className="dl-receipt-presence"><MessageReceipt message={message} /></motion.div>}</AnimatePresence></div>}
     </motion.div>}
     {response && <motion.div key="response" {...disclosureMotion} className="dl-primary-response">
-    {reply && <div className="dl-message dl-message-assistant"><MessageContextMenu content={message.reply || ""}><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></div></MessageContextMenu></div>}
+    {reply && <div className="dl-message dl-message-assistant" data-message-side="reply"><MessageContextMenu content={message.reply || ""}><div className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></div></MessageContextMenu></div>}
     {!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0) && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
     {!filtering && user && <OutcomeStatus message={message} />}
     </motion.div>}
@@ -88,7 +89,7 @@ export function WorkTranscript({ messages, ...props }: Omit<Props, "message"> & 
     return <WorkTurn key={key} {...props} {...turn} anchor={first} />;
   })}</>;
 }
-function WorkTurn({ message, parts, anchor, chat, onActor, searchQuery }: Props & { parts: WorkTranscriptPart[]; anchor: boolean }) {
+function WorkTurn({ focus, message, parts, anchor, chat, onActor, searchQuery }: Props & { parts: WorkTranscriptPart[]; anchor: boolean }) {
   const user = isUserSource(message);
   const actorReply = message.reply_to.kind === "actor" || message.reply_to.kind === "remote" && !message.reply_to.user;
   const internal = isInternalNotification(message);
@@ -98,10 +99,10 @@ function WorkTurn({ message, parts, anchor, chat, onActor, searchQuery }: Props 
   const tools = chat.tools.filter(tool => tool.message_id === message.id);
   return <article className="dl-message-turn dl-work-turn" id={anchor ? `message-${message.actor_id}-${message.id}` : undefined}>
     {parts.map(part => <Fragment key={`${part.kind}:${part.kind === "activity" ? part.range.start : ""}`}>
-    {part.kind === "input" && inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={messageDisplayText(message)}><div className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><ActorMessageBubble message={message} direction="incoming" messages={chat.messages} onActor={onActor} className={cn("dl-work-prompt", user ? "dl-bubble-user" : "dl-bubble-peer")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</ActorMessageBubble>{message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
-    {part.kind === "activity" && !searchMode && <WorkActivity message={message} range={part.range} events={chat.events} tools={tools} onActor={onActor} />}
+    {part.kind === "input" && inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={messageDisplayText(message)}><div data-message-id={message.id} data-message-side="input" className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><ActorMessageBubble message={message} direction="incoming" messages={chat.messages} onActor={onActor} className={cn("dl-work-prompt", user ? "dl-bubble-user" : "dl-bubble-peer")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</ActorMessageBubble>{message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</div></MessageContextMenu>}
+    {part.kind === "activity" && !searchMode && <WorkActivity focus={focus?.message_id===message.id?focus:null} message={message} range={part.range} events={chat.events} tools={tools} onActor={onActor} />}
     {part.kind === "outcome" && <>
-      {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div className={cn("dl-work-final", actorReply && "dl-work-actor-reply")}><ActorMessageBubble message={message} direction="outgoing" messages={chat.messages} onActor={onActor} className={actorReply ? "dl-bubble-actor" : "dl-bubble-assistant"}><Markdown content={message.reply} onActor={onActor} /></ActorMessageBubble><CopyMessage content={message.reply} /></div></MessageContextMenu>}
+      {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div data-message-id={message.id} data-message-side="reply" className={cn("dl-work-final", actorReply && "dl-work-actor-reply")}><ActorMessageBubble message={message} direction="outgoing" messages={chat.messages} onActor={onActor} className={actorReply ? "dl-bubble-actor" : "dl-bubble-assistant"}><Markdown content={message.reply} onActor={onActor} /></ActorMessageBubble><CopyMessage content={message.reply} /></div></MessageContextMenu>}
       {!searchMode && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
       {!searchMode && <OutcomeStatus message={message} />}
     </>}

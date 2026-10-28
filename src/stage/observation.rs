@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Query {
+    Contacts {
+        text: String,
+        after: Option<String>,
+        limit: u8,
+    },
     InvocationMessage {
         id: String,
     },
@@ -53,6 +58,16 @@ pub enum Query {
 impl Query {
     pub fn validate(&self) -> Result<()> {
         let (id, limit) = match self {
+            Self::Contacts { text, after, limit } => {
+                if text.len() > 512
+                    || after
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 128)
+                {
+                    return Err(StageError::Invalid("Invalid contacts query"));
+                }
+                (None, Some(*limit))
+            }
             Self::Actor => (None, None),
             Self::Messages { limit, .. }
             | Self::Approvals { limit, .. }
@@ -108,6 +123,14 @@ pub fn read(
         };
     let fail = |_| StageError::Unavailable("Observation is unavailable");
     let mut value=match query {
+        Query::Contacts {text,after,limit}=>{
+            if actor.actor_id!=super::shared::ACTOR_ID || !StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)? {
+                return Err(StageError::Forbidden("Contacts require account ownership"));
+            }
+            let mut page=system.store().contacts(&actor.actor_id,text,after.as_deref(),*limit as usize).map_err(fail)?;
+            page.items.retain(|item|item.actor.id!=super::shared::ACTOR_ID);
+            serde_json::to_value(page)
+        },
         Query::InvocationMessage {id}=>{
             let id=uuid::Uuid::parse_str(id).map_err(|_|StageError::Invalid("Invalid invocation identifier"))?;
             let receipt=StageLedger::attach(system.store(),local).result(peer,id,now)?;

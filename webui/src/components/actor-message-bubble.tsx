@@ -90,5 +90,5 @@ export function SentActorMessage({ actorId, resultId, onActor }: { actorId: stri
     return () => abort.abort();
   }, [actorId, resultId, retry]);
   if (!message) return failed ? <div className="dl-client-error" role="alert"><span>{t("conversation_content.could_not_load_details_try_again")}</span><Button variant="ghost" size="sm" onClick={() => setRetry(value => value+1)}>{t("app.retry")}</Button></div> : <Skeleton className="h-20 w-64 max-w-full rounded-2xl" />;
-  return <MessageContextMenu content={message.content}><div className="dl-work-final dl-work-actor-reply"><CommunicationBubble actorId={message.actor} direction="outgoing" className="dl-bubble-actor" onActor={onActor}><Markdown content={message.content} onActor={onActor} /></CommunicationBubble><CopyMessage content={message.content} /></div></MessageContextMenu>;
+  return <MessageContextMenu content={message.content}><div data-result-id={resultId} className="dl-work-final dl-work-actor-reply"><CommunicationBubble actorId={message.actor} direction="outgoing" className="dl-bubble-actor" onActor={onActor}><Markdown content={message.content} onActor={onActor} /></CommunicationBubble><CopyMessage content={message.content} /></div></MessageContextMenu>;
 }

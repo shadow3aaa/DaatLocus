@@ -17,7 +17,7 @@ function deferred<T>() {
 }
 
 test("navigation exposes virtual displays only when the device supports them", () => {
-  const render = (supported: boolean) => renderToStaticMarkup(<TooltipProvider><NavigationRail access={{ kind: "owner", manage: true }} settings={false} apps={false} virtualDisplays virtualDisplaysSupported={supported} onApps={() => {}} onHome={() => {}} onSettings={() => {}} onLogout={() => {}} /></TooltipProvider>);
+  const render = (supported: boolean) => renderToStaticMarkup(<TooltipProvider><NavigationRail access={{ kind: "owner", manage: true }} settings={false} apps={false} virtualDisplays virtualDisplaysSupported={supported} onContacts={() => {}} onApps={() => {}} onHome={() => {}} onSettings={() => {}} onLogout={() => {}} /></TooltipProvider>);
   const label = `aria-label="${i18n.t("virtual_displays.title")}"`;
   expect(render(false)).not.toContain(label);
   const html = render(true);

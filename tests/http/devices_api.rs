@@ -361,6 +361,37 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
     let mut nested_config = hosted.config.clone();
     nested_config.name = "Nested collaborator".into();
     let nested = a.system.create_owned(&hosted.id, nested_config).unwrap();
+    // Contacts traverse the same authenticated account channels and retain host-qualified links.
+    let mut after: Option<String> = None;
+    let mut found = false;
+    loop {
+        let mut request = b
+            .owner(reqwest::Method::GET, "/v1/contacts")
+            .query(&[("q", "Hosted collaborator"), ("limit", "1")]);
+        if let Some(cursor) = &after {
+            request = request.query(&[("after", cursor)]);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = response.json::<Value>().await.unwrap();
+        for item in page["items"].as_array().unwrap() {
+            if item["actor"]["id"] == hosted.id {
+                assert_eq!(
+                    item["actor"]["conversation_url"],
+                    format!("/stages/{}/actors/{}", a.stage.host.local, hosted.id)
+                );
+                found = true;
+            }
+        }
+        after = page["next_cursor"].as_str().map(str::to_owned);
+        if after.is_none() {
+            break;
+        }
+    }
+    assert!(
+        found,
+        "a hosted account Actor must be discoverable across devices"
+    );
     for id in [&hosted.id, &nested.id] {
         let response = b
             .owner(

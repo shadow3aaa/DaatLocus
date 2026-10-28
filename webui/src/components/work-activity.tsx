@@ -1,3 +1,4 @@
+import type { ContactFocus } from "@/lib/contacts";
 import { t } from "@/lib/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { EventRecord, MessageRecord } from "@/lib/actor-api";
@@ -11,11 +12,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LazyPage } from "@/components/lazy-page";
 
-export function WorkActivity({ message, range, events, tools, onActor }: { message: MessageRecord; range: ActivityRange; events: EventRecord[]; tools: ToolRef[]; onActor(id: string): void }) {
+export function WorkActivity({ focus, message, range, events, tools, onActor }: { focus?:ContactFocus|null; message: MessageRecord; range: ActivityRange; events: EventRecord[]; tools: ToolRef[]; onActor(id: string): void }) {
   const { live } = range;
   const [history, setHistory] = useState<EventRecord[]>([]);
   const [cursor, setCursor] = useState<number | null | undefined>(undefined);
   const through = useRef(0);
+  const paging=useRef(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -48,20 +50,31 @@ export function WorkActivity({ message, range, events, tools, onActor }: { messa
   }, [records, message, history, cursor, complete, live]);
   const activity = useMemo(() => activityTools(records, message, tools, complete), [records, message, tools, complete]);
   async function more(signal: AbortSignal) {
-    if (loading || cursor == null) return;
-    const page = await listMessageActivity(message.actor_id, message.id, { after: cursor, limit: 100, signal });
-    if (signal.aborted) return;
-    setHistory(old => mergeActivity(old, page.items, message.actor_id, message.id));
-    through.current = page.next_cursor ?? Math.max(through.current, page.event_cursor ?? 0, ...page.items.map(record => record.seq));
-    setCursor(page.next_cursor);
+    if (loading || cursor == null || paging.current) return;
+    paging.current=true;
+    try {
+      const page = await listMessageActivity(message.actor_id, message.id, { after: cursor, limit: 100, signal });
+      if (signal.aborted) return;
+      setHistory(old => mergeActivity(old, page.items, message.actor_id, message.id));
+      through.current = page.next_cursor ?? Math.max(through.current, page.event_cursor ?? 0, ...page.items.map(record => record.seq));
+      setCursor(page.next_cursor);
+    } finally {paging.current=false;}
   }
+  useEffect(()=>{
+    if(!focus||loading||cursor==null||error)return;
+    const resultFound=focus.result_id&&history.some(record=>record.event.type==="tool_finished"&&record.event.result_id===focus.result_id);
+    const generationFound=focus.generation!=null&&history.flatMap(record=>record.event.type==="generation_delta"&&record.event.channel==="assistant"&&record.event.generation===focus.generation?[record.event.text]:[]).join("").length>=focus.content.length;
+    if(resultFound||generationFound||!focus.result_id&&focus.generation==null)return;
+    const controller=new AbortController();void more(controller.signal).catch(()=>{if(!controller.signal.aborted)setError(t("work_activity.could_not_load_activity"));});
+    return()=>controller.abort();
+  },[focus,loading,cursor,history,error]);
   if (message.status === "queued") return null;
   return <>
     {loading && !segments.length && <Skeleton className="h-14 w-full" />}
     {segments.map(segment => segment.kind === "message" ? <SentActorMessage key={segment.seq} actorId={message.actor_id} resultId={segment.resultId} onActor={onActor} /> : segment.kind === "text" ?
-      <div className="dl-work-final dl-work-actor-reply" key={segment.seq}><div className="dl-bubble dl-bubble-actor"><Markdown content={segment.content} onActor={onActor} /></div><CopyMessage content={segment.content} /></div> :
+      <div data-message-id={message.id} data-generation={segment.generation} className="dl-work-final dl-work-actor-reply" key={segment.seq}><div className="dl-bubble dl-bubble-actor"><Markdown content={segment.content} onActor={onActor} /></div><CopyMessage content={segment.content} /></div> :
       <Activities key={segment.seq} actorId={message.actor_id} tools={activity.filter(tool => segment.callIds.includes(tool.call_id))} thinking={segment.thinking} onActor={onActor} />)}
     {!complete && cursor != null && <LazyPage cursor={cursor} onLoad={more} errorMessage={t("work_activity.could_not_load_more_activity")} />}
-    {error && <div className="dl-client-error" role="alert"><span>{error}</span><Button variant="ghost" size="sm" disabled={loading} onClick={() => { setRetry(value => value + 1); }}>{t("app.retry")}</Button></div>}
+    {error && <div className="dl-client-error" role="alert"><span>{error}</span><Button variant="ghost" size="sm" disabled={loading} onClick={() => { setError(""); setCursor(undefined); setRetry(value => value + 1); }}>{t("app.retry")}</Button></div>}
   </>;
 }

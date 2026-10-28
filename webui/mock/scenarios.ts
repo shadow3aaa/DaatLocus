@@ -9,6 +9,8 @@ import { resetStore } from "./fixtures";
 import { addApproval, addMessage, addTool, configHolder, createActor, emitEvent, newId, now, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
 
 export const scenarios = [
+  {id:"contacts", label:"通讯录 · 名称与消息搜索", actor:ROOT_ACTOR_ID},
+  {id:"contacts-many", label:"通讯录 · 滚动分页", actor:ROOT_ACTOR_ID},
   {id:"imports", label:"导入 · 本机会话选择", actor:ROOT_ACTOR_ID},
   {id:"imports-unsupported", label:"导入 · 不支持的设备隐藏入口", actor:ROOT_ACTOR_ID},
   {id:"import-running", label:"导入 · Core 正在准备 Actor", actor:ROOT_ACTOR_ID},
@@ -95,6 +97,22 @@ export function activateScenario(id: string, exampleId?: string): boolean {
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
   if (examples.length || id === "actor-messages") createActor({id:"atlas",name:"Atlas",parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
   if (examples.length) { clear(work); seedToolExamples(work,exampleId ? examples.filter(example=>example.id===exampleId) : examples); }
+  if(id.startsWith("contacts")){
+    for(const [index,name] of ["Athena","Atlas","Iris","Hermes"].entries()){
+      const actor=createActor({id:name.toLowerCase(),name,parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+      const input=addMessage(actor,{source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:"contacts-task"},kind:"request",content:["请核对 Atlas 提交的浏览器修复，确认下载菜单可以自然滚动。","检查浏览器下载菜单的滚动和窄屏布局。","请和 Atlas 协作检查手机上的消息气泡。","整理已经完成的界面检查记录。"][index],status:"completed"});
+      touchMessage(input,{reply:["已经核对 Atlas 的修改，下载菜单和历史记录正常。","Atlas 已完成下载菜单检查，手机上也可以直接滚动加载。","已把检查结果发送给 Atlas。","已归档本轮布局检查结论。"][index],started_at_ms:now()-30000,finished_at_ms:now()-1000,final_generation:2});
+      if(name==="Hermes")setActorStatus(actor,"archived");
+      if(name==="Iris"){
+        const example=examplesForScene("tools-actors").find(item=>item.id==="actor-message")!;
+        const result={...toolExampleResult(example,actor.summary.id),message_id:input.id,payload:{message_id:"contacts-sent",sent_message:{conversation_url:"/actors/atlas",content:"Atlas，请复查手机上下载菜单的滚动。"}}};
+        addTool(actor,result);
+        const record=emitEvent(actor.summary.id,{type:"tool_finished",message_id:input.id,call_id:result.call_id,name:result.name,result_id:result.id,summary:"Message delivered",error:null,outcome:{sent_message:true}});
+        if(record)record.created_at_ms=input.started_at_ms!+100;
+      }
+    }
+    if(id==="contacts-many")for(let index=0;index<60;index++)createActor({id:`atlas-${index}`,name:`Atlas ${String(index+1).padStart(2,"0")}`,parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+  }
   if (id === "actor-messages") {
     clear(work);
     const clock = now();

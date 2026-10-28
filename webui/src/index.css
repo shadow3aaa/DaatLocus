@@ -1380,3 +1380,33 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 .dl-actor-message-caption { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; margin-bottom: 6px; }
 .dl-actor-message-caption span { min-width: 0; overflow-wrap: anywhere; }
 .dl-actor-message-caption svg { width: 13px; height: 13px; flex-shrink: 0; margin-left: auto; opacity: .65; }
+
+/* Account contacts share the shell navigation and floating conversation search. */
+.dl-contacts-page { --contact-inset-start: max(32px,var(--dl-safe-left)); --contact-inset-end: max(32px,var(--dl-safe-right)); position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; background: var(--background); border-radius: 16px 0 0 16px; padding-top: calc(12px + var(--dl-safe-top)); }
+.dl-contacts-page>.dl-apps-header { flex: none; min-height: 56px; margin-inline: var(--contact-inset-start) var(--contact-inset-end); }
+.dl-contacts-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 0 40px; transition: padding-top .22s ease; }
+.dl-contacts-page[data-search-open=true]>.dl-contacts-scroll { padding-top: 40px; }
+.dl-contact-list { list-style: none; padding: 0; margin: 0; }
+.dl-contact-list>li { padding-bottom: 0; margin-bottom: 0; position: relative; animation: dl-contact-enter .2s ease both; }
+.dl-contact-list>li:not(:last-child)::after { content: ""; display: block; height: 1px; background: var(--border); }
+.dl-contact-heading { display: flex; align-items: center; gap: 14px; width: 100%; padding: 12px var(--contact-inset-end) 12px var(--contact-inset-start); text-align: left; transition: background .15s; }
+.dl-contact-heading:hover,.dl-contact-matches>button:hover { background: var(--muted); }
+.dl-contact-heading>[data-slot=avatar] { width: 44px; height: 44px; }
+.dl-contact-heading>span:not([data-slot=avatar]) { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
+.dl-contact-heading strong { font-weight: 550; overflow-wrap: anywhere; }
+.dl-contact-heading small,.dl-contact-matches small { color: var(--muted-foreground); font-size: 12px; }
+.dl-contact-heading>svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+.dl-contact-matches { display: grid; gap: 6px; padding-bottom: 16px; }
+.dl-contact-matches>button { text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 10px var(--contact-inset-end) 10px calc(var(--contact-inset-start) + 58px); transition: background .15s; min-width: 0; }
+.dl-contact-matches>button>span { font-size: var(--content-font-size,16px); line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
+.dl-contact-list mark { color: inherit; background: color-mix(in srgb,var(--ring) 25%,transparent); border-radius: 3px; }
+.dl-contact-heading:focus-visible,.dl-contact-matches>button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+@keyframes dl-contact-enter { from {opacity:0;transform:translateY(4px)} to {opacity:1;transform:none} }
+@media (max-width:767px) { .dl-contacts-page { --contact-inset-start: max(16px,var(--dl-safe-left)); --contact-inset-end: max(16px,var(--dl-safe-right)); border-radius: 0; } .dl-contact-matches>button { padding-left: var(--contact-inset-start); } .dl-contacts-page[data-search-open=true]>.dl-contacts-scroll { padding-top: 32px; } }
+@media (prefers-reduced-motion:reduce) { .dl-contact-list>li { animation: none; } .dl-contacts-scroll { transition: none; } }
+
+.dl-contact-focus.dl-bubble,.dl-contact-focus .dl-bubble { animation: dl-contact-focus 2s ease-out; }
+@keyframes dl-contact-focus { from { box-shadow: 0 0 0 3px var(--ring); } to { box-shadow: 0 0 0 0 transparent; } }
+
+.dl-contacts-page[data-search-open=true]>.dl-apps-header>button { visibility: hidden; }
+@media (max-width:767px) { .dl-contacts-page[data-search-open=true]>.dl-apps-header { visibility: hidden; } }
