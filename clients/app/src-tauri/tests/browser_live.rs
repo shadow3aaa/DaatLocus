@@ -2,10 +2,12 @@
 #![cfg(all(any(windows, target_os = "macos"), feature = "web-contract"))]
 
 use serde_json::{Value, json};
+#[cfg(windows)]
+use std::process::Stdio;
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

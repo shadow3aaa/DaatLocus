@@ -838,6 +838,7 @@ pub fn probe(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + S
                         tab,
                         state_id,
                         input,
+                        ..
                     } = &mut command
                         && let Some(observation) = observations.get(tab)
                     {

@@ -111,9 +111,13 @@ impl ImageView {
         // A clamped one-pixel short edge must not make extreme aspect ratios
         // exceed a caller's smaller total-pixel budget.
         if output_width >= output_height {
-            output_width = output_width.min(resolution.max_pixels / output_height).max(1);
+            output_width = output_width
+                .min(resolution.max_pixels / output_height)
+                .max(1);
         } else {
-            output_height = output_height.min(resolution.max_pixels / output_width).max(1);
+            output_height = output_height
+                .min(resolution.max_pixels / output_width)
+                .max(1);
         }
         Ok(Self {
             source_width: width,
@@ -557,8 +561,19 @@ mod tests {
                 }
             }
         }
-        let tiny = ImageView::plan(1,64000,None,Some(ImageResolution{width:1,height:1568,max_pixels:1}),false).unwrap();
-        assert_eq!((tiny.width,tiny.height),(1,1));
+        let tiny = ImageView::plan(
+            1,
+            64000,
+            None,
+            Some(ImageResolution {
+                width: 1,
+                height: 1568,
+                max_pixels: 1,
+            }),
+            false,
+        )
+        .unwrap();
+        assert_eq!((tiny.width, tiny.height), (1, 1));
     }
     #[test]
     fn wire_budget_counts_images_across_turns_and_never_retries_oversized_payloads() {

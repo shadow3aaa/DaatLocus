@@ -322,7 +322,8 @@ async fn role_prompt_files_match_sources_and_reject_stale_or_invalid_reads() {
         ),
         (
             "others",
-            include_str!("../../src/prompts/actors.md").to_owned(),
+            include_str!("../../src/prompts/actors.md")
+                .replace("{{models}}", r#"[{"model":"mock","capabilities":""}]"#),
         ),
     ] {
         let list: Value = fixture
