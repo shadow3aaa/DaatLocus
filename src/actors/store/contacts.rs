@@ -1,6 +1,43 @@
 //! Contact reads derive visible bubbles from their original domain records.
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactSort {
+    #[default]
+    Alphabetical,
+    Recent,
+}
+#[derive(Serialize, serde::Deserialize)]
+struct ContactCursor {
+    sort: ContactSort,
+    key: (u8, i64, String, String),
+}
+impl ContactSort {
+    fn key(self, actor: &ActorSummary) -> (u8, i64, String, String) {
+        (
+            u8::from(self != Self::Recent || actor.status != ActorStatus::Running),
+            if self == Self::Recent {
+                actor.updated_at_ms.saturating_neg()
+            } else {
+                0
+            },
+            actor.name.to_ascii_lowercase(),
+            actor.id.clone(),
+        )
+    }
+    pub(crate) fn compare(self, a: &ActorSummary, b: &ActorSummary) -> std::cmp::Ordering {
+        self.key(a).cmp(&self.key(b))
+    }
+    pub(crate) fn cursor(self, actor: &ActorSummary) -> Result<String> {
+        serde_json::to_string(&ContactCursor {
+            sort: self,
+            key: self.key(actor),
+        })
+        .into_diagnostic()
+    }
+}
+
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct ContactMessage {
     pub message_id: String,
@@ -284,36 +321,56 @@ impl ActorStore {
         query: &str,
         after: Option<&str>,
         limit: usize,
+        sort: ContactSort,
     ) -> Result<ContactPage> {
         database_io(|| {
             let text = query.trim();
             if text.len() > 512
-                || after.is_some_and(|id| id.is_empty() || id.len() > 128)
+                || after.is_some_and(|cursor| cursor.is_empty() || cursor.len() > 2048)
                 || limit == 0
                 || limit > 32
             {
                 return Err(ActorError::Invalid("Invalid contacts query".into()).into());
             }
+            if let Some(cursor) = after {
+                let cursor: ContactCursor = serde_json::from_str(cursor)
+                    .map_err(|_| ActorError::Invalid("Invalid contacts cursor".into()))?;
+                if cursor.sort != sort {
+                    return Err(ActorError::Invalid(
+                        "Contacts cursor uses a different sort".into(),
+                    )
+                    .into());
+                }
+            }
             let db = self.db.lock();
             let allowed = account_actor_ids_db(&db, owner)?;
-            if after.is_some_and(|id| !allowed.contains(id)) {
-                return Err(ActorError::Invalid("Invalid contacts cursor".into()).into());
-            }
             let scope = serde_json::to_string(&allowed).into_diagnostic()?;
-            let statement=format!("{BUBBLES} SELECT a.record FROM actors a WHERE a.id IN (SELECT value FROM json_each(?1))
-                AND (?2 IS NULL OR (lower(json_extract(a.record,'$.config.name')),a.id) >
-                    (SELECT lower(json_extract(record,'$.config.name')),id FROM actors WHERE id=?2))
+            let statement=format!("{BUBBLES}, contacts AS (
+                SELECT a.record,a.id,lower(json_extract(a.record,'$.config.name')) name,
+                    CASE WHEN ?5 AND json_extract(a.record,'$.status')='running' THEN 0 ELSE 1 END priority,
+                    CASE WHEN ?5 THEN -json_extract(a.record,'$.updated_at_ms') ELSE 0 END recency
+                FROM actors a WHERE a.id IN (SELECT value FROM json_each(?1))
                 AND (?3='' OR instr(lower(json_extract(a.record,'$.config.name')),lower(?3))>0
-                    OR EXISTS(SELECT 1 FROM bubbles b WHERE b.actor_id=a.id AND instr(lower(b.content),lower(?3))>0))
-                ORDER BY lower(json_extract(a.record,'$.config.name')),a.id LIMIT ?4");
+                    OR EXISTS(SELECT 1 FROM bubbles b WHERE b.actor_id=a.id AND instr(lower(b.content),lower(?3))>0)))
+                SELECT record FROM contacts WHERE ?2 IS NULL OR (priority,recency,name,id) >
+                    (json_extract(?2,'$.key[0]'),json_extract(?2,'$.key[1]'),json_extract(?2,'$.key[2]'),json_extract(?2,'$.key[3]'))
+                ORDER BY priority,recency,name,id LIMIT ?4");
             let mut statement = sql(db.prepare(&statement))?;
-            let mut actors = sql(statement
-                .query_map(params![scope, after, text, (limit + 1) as i64], |row| {
-                    row.get::<_, String>(0)
-                }))?
+            let mut actors = sql(statement.query_map(
+                params![
+                    scope,
+                    after,
+                    text,
+                    (limit + 1) as i64,
+                    sort == ContactSort::Recent
+                ],
+                |row| row.get::<_, String>(0),
+            ))?
             .map(|row| decode::<ActorRecord>(sql(row)?))
             .collect::<Result<Vec<_>>>()?;
-            let next_cursor = (actors.len() > limit).then(|| actors[limit - 1].id.clone());
+            let next_cursor = (actors.len() > limit)
+                .then(|| sort.cursor(&actors[limit - 1].summary()))
+                .transpose()?;
             actors.truncate(limit);
             let mut items = Vec::new();
             let mut matches=sql(db.prepare(&format!("{BUBBLES} SELECT message_id,kind,content,result_id,generation FROM bubbles
@@ -380,19 +437,35 @@ mod tests {
             tx.execute_batch("CREATE TABLE stage_account_actors(actor TEXT PRIMARY KEY,account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('core','account-a'),('foreign','account-b');")?;Ok(())
         }).unwrap();
         let config = crate::config::Config::default();
-        let page = store.contacts(&config, "core", "", None, 24).unwrap();
+        let page = store
+            .contacts(&config, "core", "", None, 24, ContactSort::Alphabetical)
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].actor.id, "core");
         assert!(
             store
-                .contacts(&config, "core", "foreign", None, 24)
+                .contacts(
+                    &config,
+                    "core",
+                    "foreign",
+                    None,
+                    24,
+                    ContactSort::Alphabetical
+                )
                 .unwrap()
                 .items
                 .is_empty()
         );
         assert!(
             store
-                .contacts(&config, "core", "", Some("foreign"), 24)
+                .contacts(
+                    &config,
+                    "core",
+                    "",
+                    Some("foreign"),
+                    24,
+                    ContactSort::Alphabetical
+                )
                 .is_err()
         );
     }

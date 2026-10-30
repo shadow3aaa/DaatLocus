@@ -1,9 +1,71 @@
 use crate::support::Fixture;
 use daat_locus::{
-    actors::{ActorEvent, MessageStatus},
+    actors::{ActorEvent, ActorStatus, MessageStatus},
     model_protocol::AgentToolCall,
 };
 use serde_json::{Value, json};
+
+#[tokio::test]
+async fn contacts_sort_before_pagination_and_prioritize_running_actors() {
+    let fixture = Fixture::new().await;
+    let alpha = fixture.child("Sort Alpha").await;
+    let beta = fixture.child("Sort Beta").await;
+    let zeta = fixture.child("Sort Zeta").await;
+    for (id, status, at) in [
+        (&alpha, ActorStatus::Idle, 900),
+        (&beta, ActorStatus::Running, 100),
+        (&zeta, ActorStatus::Running, 200),
+    ] {
+        let mut actor = fixture.system.actor(id).unwrap();
+        actor.status = status;
+        actor.updated_at_ms = at;
+        fixture.system.store().save_actor(&actor).unwrap();
+    }
+    for (sort, expected) in [
+        ("alphabetical", vec![&alpha, &beta, &zeta]),
+        ("recent", vec![&zeta, &beta, &alpha]),
+    ] {
+        let mut after: Option<String> = None;
+        let mut ids = Vec::new();
+        loop {
+            let mut request = fixture.owner(reqwest::Method::GET, "/v1/contacts").query(&[
+                ("sort", sort),
+                ("q", "Sort "),
+                ("limit", "1"),
+            ]);
+            if let Some(cursor) = after.as_ref() {
+                request = request.query(&[("after", cursor)]);
+            }
+            let response = request.send().await.unwrap();
+            assert!(
+                response.status().is_success(),
+                "{}",
+                response.text().await.unwrap()
+            );
+            let page: Value = response.json().await.unwrap();
+            assert!(page["items"].as_array().unwrap().len() <= 1);
+            ids.extend(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["actor"]["id"].as_str().unwrap().to_owned()),
+            );
+            after = page["next_cursor"].as_str().map(str::to_owned);
+            if after.is_none() {
+                break;
+            }
+            assert!(ids.len() <= 3, "pagination must terminate");
+        }
+        assert_eq!(ids, expected.into_iter().cloned().collect::<Vec<_>>());
+    }
+    let response = fixture
+        .owner(reqwest::Method::GET, "/v1/contacts?sort=invalid")
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error());
+}
 
 #[tokio::test]
 async fn contacts_report_the_effective_model_after_preferences_and_model_removal() {

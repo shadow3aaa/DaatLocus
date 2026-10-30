@@ -1,11 +1,28 @@
-import type { ContactMessage, ActorContact } from "../src/lib/contacts";
+import type { ContactMessage, ActorContact, ContactSort } from "../src/lib/contacts";
+import type { ActorSummary } from "../src/lib/actor-api";
 import { isInternalNotification } from "../src/lib/conversation-messages";
 import { configHolder, store } from "./state";
 
+type ContactKey = [number,number,string,string];
+const contactKey=(actor:ActorSummary,sort:ContactSort):ContactKey=>[
+  Number(sort!=="recent"||actor.status!=="running"),sort==="recent"?-actor.updated_at_ms:0,
+  actor.name.replace(/[A-Z]/g,letter=>letter.toLowerCase()),actor.id,
+];
+function compare(a:ContactKey,b:ContactKey){
+  for(let index=0;index<a.length;index++){if(a[index]<b[index])return -1;if(a[index]>b[index])return 1;}return 0;
+}
 export function contactsPage(url:URL) {
   const query=(url.searchParams.get("q")??"").trim().toLowerCase(),after=url.searchParams.get("after");
+  const sort=url.searchParams.get("sort")??"alphabetical";
   const limit=Number(url.searchParams.get("limit")??24);
-  if(query.length>512||limit<1||limit>32)return Response.json({code:"invalid_request"},{status:422});
+  const invalid=()=>Response.json({code:"invalid_request"},{status:422});
+  if(query.length>512||!Number.isInteger(limit)||limit<1||limit>32||(sort!=="alphabetical"&&sort!=="recent"))return invalid();
+  let position:ContactKey|null=null;
+  if(after){try{
+    const cursor=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(after.replace(/-/g,"+").replace(/_/g,"/")),char=>char.charCodeAt(0))));
+    if(cursor.sort!==sort||!Array.isArray(cursor.key)||cursor.key.length!==4||!cursor.key.every((value:unknown,index:number)=>typeof value===(index<2?"number":"string")))return invalid();
+    position=cursor.key;
+  }catch{return invalid();}}
   const items:ActorContact[]=[];
   for(const actor of store.actors.values()) {
     const bubbles:ContactMessage[]=[];
@@ -32,8 +49,9 @@ export function contactsPage(url:URL) {
     const model=config.models.some(model=>model.name===name)?name??null:null;
     if(!query||actor.summary.name.toLowerCase().includes(query)||messages.length)items.push({actor:actor.summary,model,messages});
   }
-  items.sort((a,b)=>a.actor.name.toLowerCase().localeCompare(b.actor.name.toLowerCase())||a.actor.id.localeCompare(b.actor.id));
-  const start=after?items.findIndex(item=>item.actor.id===after)+1:0;
-  const page=items.slice(start,start+limit);
-  return Response.json({items:page,next_cursor:items.length>start+limit?page.at(-1)!.actor.id:null,event_cursor:store.catalogSeq,unavailable_devices:[]});
+  items.sort((a,b)=>compare(contactKey(a.actor,sort),contactKey(b.actor,sort)));
+  const remaining=position?items.filter(item=>compare(contactKey(item.actor,sort),position!)>0):items;
+  const page=remaining.slice(0,limit);
+  const next=remaining.length>limit?btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify({sort,key:contactKey(page.at(-1)!.actor,sort)})))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""):null;
+  return Response.json({items:page,next_cursor:next,event_cursor:store.catalogSeq,unavailable_devices:[]});
 }

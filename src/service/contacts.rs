@@ -1,8 +1,9 @@
 //! Account contacts are bounded reads of each authoritative device, not a replica catalog.
 use super::*;
-use crate::stage::{ActorAddress, StageId, ledger::StageLedger};
+use crate::actors::store::{ActorContact, ContactPage, ContactSort};
+use crate::stage::{ActorAddress, ledger::StageLedger};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,11 +11,8 @@ pub(super) struct Query {
     q: Option<String>,
     after: Option<String>,
     limit: Option<usize>,
-}
-#[derive(Serialize, Deserialize)]
-struct Cursor {
-    stage: StageId,
-    after: Option<String>,
+    #[serde(default)]
+    sort: ContactSort,
 }
 
 pub(super) async fn list(
@@ -50,26 +48,25 @@ pub(super) async fn list(
                 .filter(|id| *id != local),
         );
     }
-    let cursor = match query.after {
-        Some(value) if value.len() <= 1024 => serde_json::from_slice::<Cursor>(
-            &URL_SAFE_NO_PAD
-                .decode(value)
-                .map_err(|_| ApiError::invalid())?,
-        )
-        .map_err(|_| ApiError::invalid())?,
+    let after = match query.after {
+        Some(value) if value.len() <= 4096 => Some(
+            String::from_utf8(
+                URL_SAFE_NO_PAD
+                    .decode(value)
+                    .map_err(|_| ApiError::invalid())?,
+            )
+            .map_err(|_| ApiError::invalid())?,
+        ),
         Some(_) => return Err(ApiError::invalid()),
-        None => Cursor {
-            stage: local,
-            after: None,
-        },
+        None => None,
     };
-    let index = sources
-        .iter()
-        .position(|id| *id == cursor.stage)
-        .ok_or_else(ApiError::invalid)?;
     let mut unavailable = Vec::new();
-    let mut page = if cursor.stage == local {
-        serde_json::to_value(
+    let mut items: Vec<ActorContact> = Vec::new();
+    let mut more = false;
+    // Each device supplies at most one bounded page beyond the same sort key.
+    // Merging those pages gives a global order without loading the Actor catalog.
+    for stage in sources {
+        let page: ContactPage = if stage == local {
             state
                 .system
                 .store()
@@ -77,55 +74,50 @@ pub(super) async fn list(
                     &state.system.config(),
                     crate::stage::shared::ACTOR_ID,
                     &text,
-                    cursor.after.as_deref(),
+                    after.as_deref(),
                     limit,
+                    query.sort,
                 )
-                .map_err(ApiError::from_report)?,
-        )
-        .map_err(|_| ApiError::internal())?
-    } else {
-        match remote::read(
-            &state,
-            &headers,
-            ActorAddress {
-                stage_id: cursor.stage,
-                actor_id: crate::stage::shared::ACTOR_ID.into(),
-            },
-            ConversationRead::Contacts {
-                text: text.clone(),
-                after: cursor.after.clone(),
-                limit: limit as u8,
-            },
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(error) if error.status != StatusCode::UNAUTHORIZED => {
-                unavailable.push(cursor.stage.to_string());
-                json!({"items":[],"next_cursor":null})
+                .map_err(ApiError::from_report)?
+        } else {
+            match remote::read(
+                &state,
+                &headers,
+                ActorAddress {
+                    stage_id: stage,
+                    actor_id: crate::stage::shared::ACTOR_ID.into(),
+                },
+                ConversationRead::Contacts {
+                    text: text.clone(),
+                    after: after.clone(),
+                    limit: limit as u8,
+                    sort: query.sort,
+                },
+            )
+            .await
+            {
+                Ok(value) => serde_json::from_value(value).map_err(|_| ApiError::internal())?,
+                Err(error) if error.status != StatusCode::UNAUTHORIZED => {
+                    unavailable.push(stage.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
-        }
-    };
-    let next = if let Some(after) = page["next_cursor"].as_str() {
-        Some(Cursor {
-            stage: cursor.stage,
-            after: Some(after.into()),
-        })
-    } else {
-        sources.get(index + 1).map(|stage| Cursor {
-            stage: *stage,
-            after: None,
-        })
-    };
-    page["next_cursor"] = match next {
-        Some(next) => json!(
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&next).map_err(|_| ApiError::internal())?)
-        ),
-        None => Value::Null,
-    };
-    page["unavailable_devices"] = json!(unavailable);
-    page["event_cursor"] = json!(event_cursor);
+        };
+        more |= page.next_cursor.is_some();
+        items.extend(page.items);
+    }
+    items.sort_by(|a, b| query.sort.compare(&a.actor, &b.actor));
+    more |= items.len() > limit;
+    items.truncate(limit);
+    let next = items
+        .last()
+        .filter(|_| more)
+        .map(|item| query.sort.cursor(&item.actor))
+        .transpose()
+        .map_err(ApiError::from_report)?
+        .map(|cursor| URL_SAFE_NO_PAD.encode(cursor));
+    let mut page = json!({"items":items,"next_cursor":next,"unavailable_devices":unavailable,"event_cursor":event_cursor});
     redact(&mut page, &state.system.config());
     Ok(Json(page))
 }

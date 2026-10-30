@@ -1507,9 +1507,12 @@ the current reading anchor and are requested only when their upper edge is visib
 ### Actor contacts
 
 `/contacts` is a shared navigation page, not a conversation catalog or management
-surface. `/v1/contacts` returns bounded name-ordered Actor pages and up to three
-matching original bubble bodies per Actor. Cursor continuation walks authenticated
-account devices using the existing immutable observation-content protocol. Each
+surface. `/v1/contacts` returns bounded Actor pages ordered by `sort=alphabetical`
+(the API default) or `sort=recent` (working Actors first, then descending activity
+time), and up to three matching original bubble bodies per Actor. The client
+defaults to recent activity and remembers the local sorting preference.
+Cursor continuation merges bounded queries from authenticated account devices
+using one shared sort key and the existing immutable observation-content protocol. Each
 source enforces account ownership; the account Core appears only once. Unavailable
 devices remain explicit rather than blocking other sources.
 Each contact includes its effective configured model name, resolved on the

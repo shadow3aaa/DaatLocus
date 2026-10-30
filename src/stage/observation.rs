@@ -10,6 +10,8 @@ pub enum Query {
         text: String,
         after: Option<String>,
         limit: u8,
+        #[serde(default)]
+        sort: crate::actors::store::ContactSort,
     },
     InvocationMessage {
         id: String,
@@ -58,11 +60,13 @@ pub enum Query {
 impl Query {
     pub fn validate(&self) -> Result<()> {
         let (id, limit) = match self {
-            Self::Contacts { text, after, limit } => {
+            Self::Contacts {
+                text, after, limit, ..
+            } => {
                 if text.len() > 512
                     || after
                         .as_ref()
-                        .is_some_and(|id| id.is_empty() || id.len() > 128)
+                        .is_some_and(|id| id.is_empty() || id.len() > 2048)
                 {
                     return Err(StageError::Invalid("Invalid contacts query"));
                 }
@@ -123,12 +127,19 @@ pub fn read(
         };
     let fail = |_| StageError::Unavailable("Observation is unavailable");
     let mut value=match query {
-        Query::Contacts {text,after,limit}=>{
+        Query::Contacts {text,after,limit,sort}=>{
             if actor.actor_id!=super::shared::ACTOR_ID || !StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)? {
                 return Err(StageError::Forbidden("Contacts require account ownership"));
             }
-            let mut page=system.store().contacts(&system.config(),&actor.actor_id,text,after.as_deref(),*limit as usize).map_err(fail)?;
-            page.items.retain(|item|item.actor.id!=super::shared::ACTOR_ID);
+            let mut page=system.store().contacts(&system.config(),&actor.actor_id,text,after.as_deref(),*limit as usize,*sort).map_err(fail)?;
+            if let Some(index)=page.items.iter().position(|item|item.actor.id==super::shared::ACTOR_ID) {
+                page.items.remove(index);
+                if let Some(after)=page.next_cursor.as_deref() {
+                    let tail=system.store().contacts(&system.config(),&actor.actor_id,text,Some(after),1,*sort).map_err(fail)?;
+                    page.items.extend(tail.items);
+                    page.next_cursor=tail.next_cursor;
+                }
+            }
             serde_json::to_value(page)
         },
         Query::InvocationMessage {id}=>{

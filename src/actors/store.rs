@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 mod approval_appeals;
 mod contacts;
-pub use contacts::{ActorContact, ContactMessage, ContactPage};
+pub use contacts::{ActorContact, ContactMessage, ContactPage, ContactSort};
 #[cfg(test)]
 #[path = "store/history_handoff_tests.rs"]
 mod history_handoff_tests;

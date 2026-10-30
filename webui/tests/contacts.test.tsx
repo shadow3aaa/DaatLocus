@@ -3,10 +3,11 @@ import { expect,test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { HighlightedText } from "../src/components/highlighted-text";
 import { NavigationRail } from "../src/components/app-navigation";
+import { ContactsPage } from "../src/components/contacts-page";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { contactExcerpt } from "../src/lib/contacts";
 import { activateScenario } from "../mock/scenarios";
-import { addMessage,store } from "../mock/state";
+import { addMessage,setActorStatus,store } from "../mock/state";
 import { handle } from "../mock/routes";
 
 test("contacts are a sidebar page, with no selected Home entry",()=>{
@@ -44,4 +45,33 @@ test("contact pages continue from an opaque cursor without duplicating actors",a
     after=page.next_cursor;
   }while(after);
   expect(seen.size).toBe(store.actors.size);
+});
+
+test("contacts expose both sort choices and default to recent activity",()=>{
+  const html=renderToStaticMarkup(<ContactsPage onNavigation={()=>{}} onActor={()=>{}} onAccessRevoked={()=>{}}/>);
+  expect(html).toContain('aria-label="Sort contacts"');
+  expect(html).toMatch(/aria-checked="false"[^>]*>Alphabetical<\/button>/);
+  expect(html).toMatch(/aria-checked="true"[^>]*>Recently active<\/button>/);
+});
+
+test("recent contacts put working Actors first and paginate the entire sorted search",async()=>{
+  activateScenario("contacts-many");
+  const atlas=store.actors.get("atlas")!,athena=store.actors.get("athena")!,iris=store.actors.get("iris")!;
+  setActorStatus(atlas,"running");setActorStatus(iris,"running");
+  atlas.summary.updated_at_ms=10;iris.summary.updated_at_ms=20;athena.summary.updated_at_ms=Date.now()+100000;
+  for(const sort of ["alphabetical","recent"]){
+    let after:string|null=null;const items:{actor:{id:string;name:string;status:string;updated_at_ms:number}}[]=[];
+    do{
+      const params=new URLSearchParams({sort,limit:"2",q:"a"});if(after)params.set("after",after);
+      const response=await handle(new Request(`http://127.0.0.1/v1/contacts?${params}`));
+      expect(response.status).toBe(200);const page=await response.json();
+      expect(page.items.length).toBeLessThanOrEqual(2);items.push(...page.items);after=page.next_cursor;
+    }while(after);
+    expect(new Set(items.map(item=>item.actor.id)).size).toBe(items.length);
+    expect(items.length).toBeGreaterThan(24);
+    if(sort==="recent")expect(items.slice(0,3).map(item=>item.actor.id)).toEqual(["iris","atlas","athena"]);
+    else expect(items[0].actor.id).toBe("athena");
+  }
+  const invalid=await handle(new Request("http://127.0.0.1/v1/contacts?sort=invalid"));
+  expect(invalid.status).toBe(422);
 });

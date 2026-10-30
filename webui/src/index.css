@@ -1419,6 +1419,8 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 /* Account contacts share the shell navigation and floating conversation search. */
 .dl-contacts-page { --contact-inset-start: max(32px,var(--dl-safe-left)); --contact-inset-end: max(32px,var(--dl-safe-right)); position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; background: var(--background); border-radius: 16px 0 0 16px; padding-top: calc(12px + var(--dl-safe-top)); }
 .dl-contacts-page>.dl-apps-header { flex: none; min-height: 56px; margin-inline: var(--contact-inset-start) var(--contact-inset-end); }
+.dl-contacts-sort { flex: none; margin: 8px var(--contact-inset-end) 0 var(--contact-inset-start); }
+.dl-contacts-page[data-search-open=true]>.dl-contacts-sort { margin-top: 20px; }
 .dl-contacts-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 0 40px; transition: padding-top .22s ease; }
 .dl-contacts-page[data-search-open=true]>.dl-contacts-scroll { padding-top: 40px; }
 .dl-contact-list { list-style: none; padding: 0; margin: 0; }

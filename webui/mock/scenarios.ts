@@ -103,6 +103,7 @@ export function activateScenario(id: string, exampleId?: string): boolean {
       const input=addMessage(actor,{source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:"contacts-task"},kind:"request",content:["请核对 Atlas 提交的浏览器修复，确认下载菜单可以自然滚动。","检查浏览器下载菜单的滚动和窄屏布局。","请和 Atlas 协作检查手机上的消息气泡。","整理已经完成的界面检查记录。"][index],status:"completed"});
       touchMessage(input,{reply:["已经核对 Atlas 的修改，下载菜单和历史记录正常。","Atlas 已完成下载菜单检查，手机上也可以直接滚动加载。","已把检查结果发送给 Atlas。","已归档本轮布局检查结论。"][index],started_at_ms:now()-30000,finished_at_ms:now()-1000,final_generation:2});
       if(name==="Hermes")setActorStatus(actor,"archived");
+      if(name==="Atlas")setActorStatus(actor,"running");
       if(name==="Iris"){
         const example=examplesForScene("tools-actors").find(item=>item.id==="actor-message")!;
         const result={...toolExampleResult(example,actor.summary.id),message_id:input.id,payload:{message_id:"contacts-sent",sent_message:{conversation_url:"/actors/atlas",content:"Atlas，请复查手机上下载菜单的滚动。"}}};

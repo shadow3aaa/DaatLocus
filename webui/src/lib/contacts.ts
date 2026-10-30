@@ -4,8 +4,9 @@ export type ContactMessage = {message_id:string;kind:"input"|"reply"|"sent"|"ass
 export type ActorContact = {actor:ActorSummary;model:string|null;messages:ContactMessage[]};
 export type ContactFocus = ContactMessage & {actorId:string};
 export type ContactPage = Page<ActorContact,string> & {unavailable_devices:string[]};
-export function listContacts(query:string, options:FetchOptions & {after?:string}={}) {
-  const params=new URLSearchParams({q:query,limit:"24"});
+export type ContactSort = "alphabetical" | "recent";
+export function listContacts(query:string, options:FetchOptions & {after?:string;sort?:ContactSort}={}) {
+  const params=new URLSearchParams({q:query,limit:"24",sort:options.sort??"alphabetical"});
   if(options.after)params.set("after",options.after);
   return request<ContactPage>(`/v1/contacts?${params}`,options);
 }
