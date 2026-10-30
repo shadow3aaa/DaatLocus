@@ -125,15 +125,10 @@ impl SystemPrompt {
     }
 
     fn platform(os: &str) -> Self {
-        let mut prompt = match os {
+        match os {
             "windows" => prompt!("os/windows-patch.md"),
-            "linux" => prompt!("os/linux-patch.md"),
-            "macos" => prompt!("os/macos-patch.md"),
-            "android" => prompt!("os/android-patch.md"),
             _ => Self::default(),
-        };
-        prompt.files.retain(|file| !file.content.trim().is_empty());
-        prompt
+        }
     }
 
     pub async fn load(
@@ -248,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_assembly_omits_empty_and_unknown_sources() {
+    fn platform_assembly_omits_platforms_without_guidance() {
         let windows = SystemPrompt::platform("windows");
         assert_eq!(windows.files[0].name, "os/windows-patch.md");
         assert!(windows.render().contains("MSIX"));

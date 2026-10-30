@@ -5,4 +5,5 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 Source: https://github.com/openai/codex
 Revision: 89461ea6833832b0551ce24ee32205824d5c108d
 Adaptations: parameterized DL scope/deny policy, DL process lifecycle and private
-transport protections; platform profiles are bundled in src/sandbox/seatbelt_*.sbpl.
+transport protections; platform profiles are bundled in
+crates/daat-locus-sandbox/src/seatbelt_*.sbpl.

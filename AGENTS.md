@@ -1,8 +1,7 @@
 # Daat Locus Agent Guidelines
 
 This file defines the repository's product and engineering boundaries.
-[docs/architecture.md](docs/architecture.md) records architecture and interface
-contracts; the contribution guides cover development, validation and packaging.
+The contribution guides cover development, validation and packaging.
 
 ## System Boundaries
 
@@ -159,8 +158,8 @@ client are connected.
   authentication, configuration, persistence, delivery, diagnostics, and access
   control as infrastructure. Do not introduce another skill execution engine.
 
-Keep implementation contracts in [docs/architecture.md](docs/architecture.md)
-consistent with these boundaries. Resource lifecycle, distribution and
+Keep implementation and contract tests consistent with these boundaries.
+Resource lifecycle, distribution and
 profile-local daemon management are infrastructure, not separate business systems.
 
 ## Execution And Approval
@@ -544,8 +543,9 @@ schemas; do not silently repair them through provider-specific normalization.
   Language changes update existing views. Preserve user text and original source content.
 - Use `tests/http_api.rs` with contract suites in `tests/http` and reusable isolated
   account/server fixtures in `tests/support`. Do not restore the simulated UI example.
-- Stable implementation contracts belong in `docs/architecture.md`; development,
+- Keep implementation contracts in code and behavior tests. Development,
   validation and packaging instructions belong in CONTRIBUTING documents.
-  Remove task journals, screenshot handoff records and progress checklists;
-  preserve release changelogs. The repository needs no Git submodules.
+  Keep architecture documents, task journals, screenshot handoff records,
+  progress checklists and release-log Markdown out of the repository. Publish
+  release notes on GitHub Releases. The repository needs no Git submodules.
 
