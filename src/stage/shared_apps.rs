@@ -33,7 +33,8 @@ struct CreateArgs {
     /// Additional absolute read/write roots. The working directory is included automatically; Core grants these device scopes without review.
     initial_authorization: Option<crate::actor_app::InitialAuthorizationGroup>,
     instructions: Option<String>,
-    model: Option<String>,
+    /// Exact configured model name from the available models list; never inherited.
+    model: String,
 }
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
@@ -42,6 +43,8 @@ struct ImportArgs {
     stage_id: String,
     resource_id: String,
     name: String,
+    /// Exact configured model name from the available models list.
+    model: String,
     instructions: String,
 }
 #[model_schema]

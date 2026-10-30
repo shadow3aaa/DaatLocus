@@ -13,7 +13,7 @@ import { Choices, errorText, Picker, StatusNote, TextField } from "./controls";
 
 const PROVIDER_KINDS: { value: ProviderConfig["kind"]; label: string }[] = [
   { value: "openai", label: "OpenAI" }, { value: "openai_compatible", label: "OpenAI Compatible" },
-  { value: "anthropic_compatible", label: "Anthropic Compatible" }, { value: "openai_codex_oauth", label: "Codex OAuth" },
+  { value: "anthropic_compatible", label: "Anthropic Compatible" }, { value: "codex", label: "Codex Compatible" },
   { value: "github_copilot", label: "GitHub Copilot" }, { value: "ollama", label: "Ollama" },
   { value: "ollama_cloud", label: "Ollama Cloud" }, { value: "open_code_console", label: "OpenCode" },
   { value: "open_code_go", label: "OpenCode Go" },
@@ -23,7 +23,7 @@ export function providerKindLabel(kind: ProviderConfig["kind"]) {
   if(kind === "openai_compatible") return t("provider_editor.openai_compatible");
   if(kind === "anthropic_compatible") return t("provider_editor.anthropic_compatible");
   if(kind === "ollama_cloud") return t("provider_editor.ollama_cloud");
-  if(kind === "openai_codex_oauth") return t("provider_editor.codex_oauth");
+  if(kind === "codex") return t("provider_editor.codex_compatible");
   return PROVIDER_KINDS.find(option=>option.value===kind)?.label ?? kind;
 }
 
@@ -37,11 +37,12 @@ export function ProviderEditor({ provider, onChange, disabled }: {
   const [flow, setFlow] = useState<ProviderAuthStart | null>(null);
   const [copied, setCopied] = useState(false);
   const locked = disabled || Boolean(busy);
-  const codex = provider.kind === "openai_codex_oauth";
+  const codex = provider.kind === "codex";
   const github = provider.kind === "github_copilot";
   const opencode = isOpenCodeProvider(provider.kind);
-  const method = codex ? (provider.codex_auth_method ?? "browser_login") : github ? (provider.github_auth_method ?? "manual_token") : opencode ? (provider.opencode_auth_method ?? "device_login") : "api_key";
+  const method = codex ? (provider.codex_auth_method ?? "api_key") : github ? (provider.github_auth_method ?? "manual_token") : opencode ? (provider.opencode_auth_method ?? "device_login") : "api_key";
   const methods = codex ? [
+    { value: "api_key", label: t("provider_editor.api_key") },
     { value: "browser_login", label: t("provider_editor.browser_sign_in") },
     { value: "device_login", label: t("provider_editor.device_code") },
     { value: "import_local_codex", label: t("provider_editor.import_local_codex") },
@@ -82,15 +83,15 @@ export function ProviderEditor({ provider, onChange, disabled }: {
     catch (cause) { setError(errorText(cause)); }
   }
 
-  const showKey = !codex && !opencode && method !== "device_login";
-  const baseRequired = provider.kind === "openai_compatible" || provider.kind === "anthropic_compatible";
+  const showKey = (codex ? method === "api_key" : !opencode) && method !== "device_login";
+  const baseRequired = provider.kind === "openai_compatible" || provider.kind === "anthropic_compatible" || codex && method === "api_key";
   return <div className="dl-settings-editor">
     <FieldGroup>
       <TextField id="dl-provider-name" label={t("account_editor.name")} value={provider.name} disabled={locked} onChange={(event) => edit({ name: event.target.value })} />
       <Picker id="dl-provider-kind" label={t("provider_editor.provider_type")} value={provider.kind} options={PROVIDER_KINDS.map(option => ({...option,label: providerKindLabel(option.value)}))} disabled={locked}
         onChange={(value) => edit(changeProviderKind(provider, value as ProviderConfig["kind"]))} />
       {(codex || github || opencode) ? <Choices id="dl-provider-auth-method" label={t("provider_editor.authentication")} value={method} options={methods} disabled={locked}
-        onChange={(value) => edit(codex ? { codex_auth_method: value as ProviderConfig["codex_auth_method"] } : github ? { github_auth_method: value as ProviderConfig["github_auth_method"] } : { opencode_auth_method: value as ProviderConfig["opencode_auth_method"] })} /> : null}
+        onChange={(value) => edit(codex ? { codex_auth_method: value as ProviderConfig["codex_auth_method"], api_key: null, codex_auth_file: null, credential_configured: false } : github ? { github_auth_method: value as ProviderConfig["github_auth_method"] } : { opencode_auth_method: value as ProviderConfig["opencode_auth_method"] })} /> : null}
       {!github ? <TextField id="dl-provider-url" label={t("provider_editor.base_url")} type="url" required={baseRequired} value={provider.base_url ?? ""} disabled={locked} placeholder={opencode ? provider.kind === "open_code_go" ? "https://opencode.ai/inference/go/openai/v1" : "https://opencode.ai/inference/openai/v1" : baseRequired ? "https://…" : t("model_editor.default")} onChange={(event) => edit({ base_url: event.target.value || null })} /> : null}
       {showKey ? <TextField id="dl-provider-key" label={method === "env_token" ? t("provider_editor.token_environment_variable") : github ? t("provider_editor.access_token") : t("provider_editor.api_key")}
         type={method === "env_token" ? "text" : "password"} autoComplete="off" value={provider.api_key ?? ""} disabled={locked}
@@ -98,7 +99,7 @@ export function ProviderEditor({ provider, onChange, disabled }: {
         onChange={(event) => edit({ api_key: event.target.value || null })} /> : null}
       {codex && ["import_auth_file", "existing_auth_file"].includes(method) ? <TextField id="dl-provider-auth-file" label={t("provider_editor.auth_file_path")} value={provider.codex_auth_file ?? ""} disabled={locked} onChange={(event) => edit({ codex_auth_file: event.target.value || null })} /> : null}
       {provider.kind === "ollama" ? <TextField id="dl-provider-keep-alive" label={t("provider_editor.keep_alive")} value={provider.keep_alive ?? ""} disabled={locked} onChange={(event) => edit({ keep_alive: event.target.value || null })} /> : null}
-      {(codex || opencode || (github && method === "device_login")) ? <div className="dl-settings-actions"><Button type="button" variant="outline" disabled={locked} onClick={() => void authorize()}>{busy === "auth" ? <Spinner data-icon="inline-start" /> : <ExternalLinkIcon data-icon="inline-start" />}{method === "device_login" ? t("provider_editor.start_authorization") : method === "browser_login" ? t("provider_editor.sign_in_with_browser") : t("provider_editor.read_auth_file")}</Button></div> : null}
+      {(codex && method !== "api_key" || opencode || (github && method === "device_login")) ? <div className="dl-settings-actions"><Button type="button" variant="outline" disabled={locked} onClick={() => void authorize()}>{busy === "auth" ? <Spinner data-icon="inline-start" /> : <ExternalLinkIcon data-icon="inline-start" />}{method === "device_login" ? t("provider_editor.start_authorization") : method === "browser_login" ? t("provider_editor.sign_in_with_browser") : t("provider_editor.read_auth_file")}</Button></div> : null}
       <StatusNote text={error} error /><StatusNote text={notice} />
       {flow ? <div className="dl-settings-auth-flow">
         <div className="flex items-center gap-2"><code>{flow.user_code}</code><Button type="button" variant="ghost" size="icon-sm" aria-label={t("provider_editor.copy_device_code")} onClick={() => void copyCode()}>{copied ? <CheckIcon /> : <CopyIcon />}</Button></div>

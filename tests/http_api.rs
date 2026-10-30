@@ -5,6 +5,8 @@ mod account;
 mod approvals;
 #[path = "http/apps_api.rs"]
 mod apps;
+#[path = "http/codex_api.rs"]
+mod codex;
 #[path = "http/computer_use_api.rs"]
 mod computer_use;
 #[path = "http/configuration_api.rs"]

@@ -59,8 +59,8 @@ type RefreshLockMap = HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>;
 static REFRESH_LOCKS_BY_AUTH_FILE: LazyLock<parking_lot::Mutex<RefreshLockMap>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
 
-pub struct CodexOAuthClient {
-    auth_file: PathBuf,
+pub struct CodexClient {
+    auth_file: Option<PathBuf>,
     auth_client: reqwest::Client,
     cached: tokio::sync::Mutex<Option<CodexOAuthAccess>>,
     inner: tokio::sync::Mutex<CodexResponsesClient>,
@@ -74,6 +74,7 @@ struct CodexResponsesClient {
     base_url: String,
     extra_headers: reqwest::header::HeaderMap,
     model: String,
+    max_output_tokens: Option<usize>,
     thinking_budget: Option<String>,
     rpm: Option<usize>,
     request_timeout: Duration,
@@ -192,6 +193,7 @@ impl CodexResponsesClient {
             base_url: base_url.clone(),
             extra_headers: reqwest::header::HeaderMap::new(),
             model: model_config.model_id.clone(),
+            max_output_tokens: None,
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
@@ -809,17 +811,28 @@ fn codex_responses_http_client_builder() -> reqwest::ClientBuilder {
         .tcp_keepalive(Duration::from_secs(CODEX_HTTP_TCP_KEEPALIVE_SECS))
 }
 
-impl CodexOAuthClient {
+impl CodexClient {
     pub(crate) fn new(
         auth_file: PathBuf,
         base_url: Option<&str>,
         model_config: &ModelConfig,
     ) -> Self {
+        let base_url = base_url.unwrap_or(CODEX_RESPONSES_BASE_URL);
+        let inner = CodexResponsesClient::new(base_url, model_config);
+        Self::from_inner(inner, Some(auth_file))
+    }
+
+    pub(crate) fn with_api_key(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
+        let mut inner = CodexResponsesClient::new(base_url, model_config);
+        inner.set_auth(api_key.to_owned(), reqwest::header::HeaderMap::new());
+        inner.max_output_tokens = Some(model_config.max_completion_tokens());
+        Self::from_inner(inner, None)
+    }
+
+    fn from_inner(inner: CodexResponsesClient, auth_file: Option<PathBuf>) -> Self {
         let auth_client = codex_http_client_builder(Duration::from_secs(15))
             .build()
             .expect("failed to build OpenAI Codex auth http client");
-        let base_url = base_url.unwrap_or(CODEX_RESPONSES_BASE_URL);
-        let inner = CodexResponsesClient::new(base_url, model_config);
         let request_budget_limits = inner.request_budget_limits();
         let model = inner.model.clone();
         Self {
@@ -833,6 +846,9 @@ impl CodexOAuthClient {
     }
 
     async fn ensure_auth(&self) -> Result<()> {
+        let Some(auth_file) = self.auth_file.as_deref() else {
+            return Ok(());
+        };
         {
             let cached = self.cached.lock().await;
             if let Some(access) = cached.as_ref()
@@ -844,12 +860,12 @@ impl CodexOAuthClient {
             }
         }
 
-        let access = codex_oauth_access_from_file_with_client(&self.auth_file, &self.auth_client)
+        let access = codex_oauth_access_from_file_with_client(auth_file, &self.auth_client)
             .await
             .map_err(|err| {
                 miette!(
                     "OpenAI Codex auth at {} is unavailable: {err}",
-                    self.auth_file.display()
+                    auth_file.display()
                 )
             })?;
 
@@ -886,7 +902,7 @@ impl CodexOAuthClient {
 }
 
 #[async_trait]
-impl ModelProvider for CodexOAuthClient {
+impl ModelProvider for CodexClient {
     async fn complete_json(
         &self,
         request: PromptRequest,
@@ -1003,6 +1019,9 @@ fn base_responses_payload(
             "x-codex-installation-id": client.installation_id,
         },
     });
+    if let Some(limit) = client.max_output_tokens {
+        payload["max_output_tokens"] = json!(limit);
+    }
     if let Some(identity) = request_identity {
         payload["prompt_cache_key"] = json!(prompt_cache_key(identity, request_kind));
         payload["client_metadata"][CODEX_WINDOW_ID_HEADER] = json!(identity.window_id);

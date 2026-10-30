@@ -368,7 +368,7 @@ mod tests {
         let call = AgentToolCall {
             id: "import".into(),
             name: "import_conversation".into(),
-            arguments: json!({"stage_id":null,"resource_id":resource.id,"name":"Athena","instructions":"UI layout project context."}),
+            arguments: json!({"stage_id":null,"resource_id":resource.id,"name":"Athena","model":"fixture","instructions":"UI layout project context."}),
         };
         let result = app.execute_tool(&call, &context).await.unwrap();
         let id = result.payload["id"].as_str().unwrap();

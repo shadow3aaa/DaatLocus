@@ -214,7 +214,7 @@ export type EventRecord = {
   created_at_ms: number;
   event: ActorEvent;
 };
-export type ProviderKind = "openai" | "anthropic_compatible" | "openai_compatible" | "openai_codex_oauth" | "open_code_console" | "open_code_go" | "github_copilot" | "ollama" | "ollama_cloud";
+export type ProviderKind = "openai" | "anthropic_compatible" | "openai_compatible" | "codex" | "open_code_console" | "open_code_go" | "github_copilot" | "ollama" | "ollama_cloud";
 export type ProviderConfig = {
   kind: ProviderKind;
   name: string;
@@ -223,12 +223,13 @@ export type ProviderConfig = {
   credential_name?: string | null;
   base_url?: string | null;
   keep_alive?: string | null;
-  codex_auth_method?: "browser_login" | "device_login" | "import_local_codex" | "import_auth_file" | "existing_auth_file" | null;
+  codex_auth_method?: "api_key" | "browser_login" | "device_login" | "import_local_codex" | "import_auth_file" | "existing_auth_file" | null;
   codex_auth_file?: string | null;
   opencode_auth_method?: "device_login" | "existing_auth_file" | null;
   github_auth_method?: "device_login" | "manual_token" | "env_token" | null;
 };
 export type ModelConfig = {
+  capabilities?: string | null;
   name: string;
   provider_name: string;
   model_id: string;

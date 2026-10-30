@@ -34,7 +34,7 @@ pub(crate) use copilot::copilot_base_url_from_session_token;
 mod codex_oauth;
 pub(crate) use codex_oauth::codex_oauth_headers;
 pub use codex_oauth::{
-    CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
+    CodexClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
     codex_oauth_client_version, codex_oauth_default_base_url, import_codex_cli_oauth_file,
     imported_codex_oauth_auth_file, write_codex_oauth_tokens,
 };
@@ -1421,14 +1421,31 @@ pub fn build_model_provider(
             let resolved = resolve_env_reference(github_token);
             Box::new(CopilotClient::new(&resolved, model_config))
         }
-        ProviderConfig::OpenaiCodexOauth {
+        ProviderConfig::Codex {
             base_url,
             auth_file,
-        } => Box::new(CodexOAuthClient::new(
-            auth_file.into(),
-            base_url.as_deref(),
-            model_config,
-        )),
+            api_key,
+        } => match api_key {
+            Some(key) => {
+                if !auth_file.is_empty() {
+                    return Err(miette!("Conflicting Codex credentials"));
+                }
+                let base = base_url
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| miette!("Custom Codex API requires a base URL"))?;
+                Box::new(CodexClient::with_api_key(
+                    &resolve_env_reference(key),
+                    base,
+                    model_config,
+                ))
+            }
+            None => Box::new(CodexClient::new(
+                auth_file.into(),
+                base_url.as_deref(),
+                model_config,
+            )),
+        },
         ProviderConfig::OpenCodeConsoleOauth {
             base_url,
             auth_file,

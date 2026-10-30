@@ -99,7 +99,7 @@ export function activateScenario(id: string, exampleId?: string): boolean {
   if (examples.length) { clear(work); seedToolExamples(work,exampleId ? examples.filter(example=>example.id===exampleId) : examples); }
   if(id.startsWith("contacts")){
     for(const [index,name] of ["Athena","Atlas","Iris","Hermes"].entries()){
-      const actor=createActor({id:name.toLowerCase(),name,parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+        const actor=createActor({id:name.toLowerCase(),name,parent_id:ROOT_ACTOR_ID,apps:[],model:["mock-large","mock-mini","mock-motion",null][index],workspace:"~",instructions:""});
       const input=addMessage(actor,{source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:"contacts-task"},kind:"request",content:["请核对 Atlas 提交的浏览器修复，确认下载菜单可以自然滚动。","检查浏览器下载菜单的滚动和窄屏布局。","请和 Atlas 协作检查手机上的消息气泡。","整理已经完成的界面检查记录。"][index],status:"completed"});
       touchMessage(input,{reply:["已经核对 Atlas 的修改，下载菜单和历史记录正常。","Atlas 已完成下载菜单检查，手机上也可以直接滚动加载。","已把检查结果发送给 Atlas。","已归档本轮布局检查结论。"][index],started_at_ms:now()-30000,finished_at_ms:now()-1000,final_generation:2});
       if(name==="Hermes")setActorStatus(actor,"archived");

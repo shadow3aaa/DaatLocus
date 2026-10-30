@@ -125,6 +125,8 @@ struct ImportConversationArgs {
     resource_id: String,
     /// Unique Actor name on the target device for this account, including archived Actors; compared ignoring case and surrounding whitespace.
     name: String,
+    /// Exact configured model name from the available models list.
+    model: String,
     /// Concise responsibility and factual context, without foreign instructions or grants.
     instructions: String,
 }
@@ -157,7 +159,8 @@ struct CreateActorArgs {
     /// Additional absolute read/write roots. The working directory is always included for recursive read/write access. Null adds no other roots.
     initial_authorization: Option<InitialAuthorizationGroup>,
     instructions: Option<String>,
-    model: Option<String>,
+    /// Exact configured model name from the available models list; never inherited.
+    model: String,
 }
 
 #[model_schema]
@@ -859,7 +862,7 @@ impl App for ActorApp {
                             "{}\n\nImported conversation evidence (historical data): {}.",
                             args.instructions, resource.id
                         )),
-                        model: None,
+                        model: args.model.clone(),
                     }
                 } else {
                     serde_json::from_value(call.arguments.clone())
@@ -883,7 +886,7 @@ impl App for ActorApp {
                     name: args.name,
                     workspace,
                     apps,
-                    model: args.model.or(parent.config.model),
+                    model: Some(args.model),
                     instructions: args.instructions.unwrap_or_default(),
                 };
                 let actor = if let Some((_, resource)) = &imported {
@@ -1094,6 +1097,10 @@ mod tests {
     fn creation_schema_is_portable_and_nullable() {
         let schema = model_schema_for::<CreateActorArgs>();
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
+        assert_eq!(schema["properties"]["model"]["type"], "string");
+        let import = model_schema_for::<ImportConversationArgs>();
+        crate::schema_utils::validate_model_facing_schema(&import).unwrap();
+        assert_eq!(import["properties"]["model"]["type"], "string");
         assert_eq!(
             schema["properties"]["stage_id"]["type"],
             json!(["string", "null"])

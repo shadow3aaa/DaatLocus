@@ -236,7 +236,7 @@ async fn core_creation_initial_authorization_is_shared_persistent_and_never_revi
     let core_input = input(&system, "core");
     let context = system.execution_context(&core, &core_input).unwrap();
     let mut app = crate::actor_app::ActorApp::new(core.id.clone(), system.clone());
-    for cwd in [&project, &nested] {
+    for (index, cwd) in [&project, &nested].into_iter().enumerate() {
         let group = if cwd == &project {
             serde_json::Value::Null
         } else {
@@ -247,8 +247,8 @@ async fn core_creation_initial_authorization_is_shared_persistent_and_never_revi
                 &AgentToolCall {
                     id: Uuid::new_v4().to_string(),
                     name: "create".into(),
-                    arguments: json!({"stage_id":null,"name":"Project worker","workspace":cwd,
-                "instructions":null,"model":null,
+                    arguments: json!({"stage_id":null,"name":format!("Project worker {index}"),"workspace":cwd,
+                "instructions":null,"model":"main",
                 "initial_authorization":group}),
                 },
                 &context,

@@ -910,7 +910,7 @@ async fn remote_core_initial_authorization_survives_new_inputs_without_replay() 
         .push_back(json!({"decision":"approve","reason":"requested workspace"}));
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"remote-create".into(),name:"actors__create".into(),
-            arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":null,"initial_authorization":null})}]),
+            arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":"mock","initial_authorization":null})}]),
         MockReply::Pending,
         MockReply::Answer("Incoming message received"),MockReply::Answer("Original creation completed"),MockReply::PendingOnEveryRequest,
     ]);

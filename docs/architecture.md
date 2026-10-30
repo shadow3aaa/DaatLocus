@@ -1561,7 +1561,28 @@ Agent 初始化。每个终端进程持有独立工具目录，提供真实的�
 使用 ripgrep 参数和匹配语义。工具继承终端既有沙箱与进程树回收，目录在进程回收后释放；
 不安装全局命令，不引入新 App 工具或模型使用说明。
 
+### Codex-compatible providers
+
+The `codex` provider selects either an explicit API key with a required custom
+base URL, or a device-local Codex OAuth file. Both use the shared Codex Responses
+client, including client identity, streaming, tool history and structured output.
+API-key mode never reads or refreshes a local login; discovery sends the same
+Codex identity to the configured `/models` endpoint. Its output budget follows
+the configured maximum, while the OAuth backend retains its parameter constraints.
+The former `openai-codex-oauth` configuration tag remains readable for saved logins.
+Account synchronization retains API keys in private definitions and only reuses
+device-local OAuth files when both old and new configurations select OAuth.
+
 ### Static system instructions
+
+Model definitions carry Owner-written `capabilities` describing task affinities and
+cost guidance. The same registry supplies the `(model, capabilities)` list in
+`actors.md` for execution and context inspection. Actor creation and conversation
+import require an exact model selection; they never inherit the creator's model.
+Core and lightweight internal generation retain direct model selections
+(`main_model` and `approval_model`, respectively); lightweight generation currently
+serves independent automatic permission review. Existing Actors keep their model,
+and removal retains the account-default recovery behavior.
 
 `actors::prompt::SystemPrompt` owns the ordered instruction files and assembles the
 exact system text for execution. Generated Actor metadata, role/platform sources,

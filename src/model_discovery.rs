@@ -108,7 +108,7 @@ fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> O
         // models.dev has no separate ChatGPT Codex provider. The model slugs
         // line up with OpenAI entries for capacity metadata; Codex-specific
         // reasoning defaults are handled separately below.
-        ProviderConfig::OpenaiCodexOauth { .. } => Some("openai".to_string()),
+        ProviderConfig::Codex { .. } => Some("openai".to_string()),
         ProviderConfig::OpenCodeConsoleOauth { .. } | ProviderConfig::OpenCodeGoOauth { .. } => {
             None
         }
@@ -146,7 +146,7 @@ fn catalog_provider_id_for_base_url_and_model(base_url: &str, model_id: &str) ->
 /// Directory suggestions are explicitly separate from live provider availability.
 pub fn catalog_discovery_models(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
     let provider_ids = match provider {
-        ProviderConfig::Openai { base_url: None, .. } | ProviderConfig::OpenaiCodexOauth { .. } => {
+        ProviderConfig::Openai { base_url: None, .. } | ProviderConfig::Codex { .. } => {
             vec!["openai".into()]
         }
         ProviderConfig::GithubCopilot { .. } => vec!["github-copilot".into()],
@@ -206,10 +206,24 @@ pub async fn discover_model_ids(
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base, &api_key).await
         }
-        ProviderConfig::OpenaiCodexOauth {
+        ProviderConfig::Codex {
             base_url,
             auth_file,
+            api_key,
         } => {
+            if let Some(key) = api_key {
+                let base = base_url
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+                    .ok_or_else(|| miette!("Custom Codex API requires a base URL"))?;
+                let url = format!("{}/models", normalize_provider_base_url(base));
+                return fetch_openai_models_path(
+                    &url,
+                    &resolve_env_reference(key),
+                    codex_oauth_headers(&codex_oauth_client_version()),
+                )
+                .await;
+            }
             let base = base_url
                 .as_deref()
                 .unwrap_or(codex_oauth_default_base_url());
@@ -321,10 +335,14 @@ async fn try_fetch_via_session_token(
 
 async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<DiscoveredModel>> {
     let url = format!("{}/models", normalize_provider_base_url(base_url));
-    fetch_openai_models_path(&url, api_key).await
+    fetch_openai_models_path(&url, api_key, reqwest::header::HeaderMap::new()).await
 }
 
-async fn fetch_openai_models_path(url: &str, api_key: &str) -> Result<Vec<DiscoveredModel>> {
+async fn fetch_openai_models_path(
+    url: &str,
+    api_key: &str,
+    headers: reqwest::header::HeaderMap,
+) -> Result<Vec<DiscoveredModel>> {
     let url = url.to_string();
     let client = crate::http_client::builder()
         .timeout(Duration::from_secs(10))
@@ -332,6 +350,7 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Result<Vec<Discov
         .map_err(|err| miette!("fetch_openai_models: failed to build http client: {err}"))?;
     let resp = client
         .get(&url)
+        .headers(headers)
         .header("Authorization", format!("Bearer {api_key}"))
         .send()
         .await
@@ -799,7 +818,7 @@ pub fn reasoning_options_for_prompt(
     }
 
     let provider_defaults = match provider {
-        ProviderConfig::OpenaiCodexOauth { .. } => codex_oauth_reasoning_options(model_id),
+        ProviderConfig::Codex { .. } => codex_oauth_reasoning_options(model_id),
         _ => Vec::new(),
     };
     if !provider_defaults.is_empty() {
@@ -937,7 +956,8 @@ mod tests {
         };
         assert!(sol.iter().any(|value| value == "ultra"));
         assert!(!luna.iter().any(|value| value == "ultra"));
-        let provider = ProviderConfig::OpenaiCodexOauth {
+        let provider = ProviderConfig::Codex {
+            api_key: None,
             base_url: None,
             auth_file: "unused".into(),
         };

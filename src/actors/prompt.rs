@@ -3,6 +3,25 @@ use super::{ActorRecord, ActorSystem};
 use crate::{app::AppToolExecutionContext, openskills::load_openskills_with_policy};
 use miette::{Result, miette};
 
+#[derive(serde::Serialize)]
+struct AvailableModel<'a> {
+    model: &'a str,
+    capabilities: &'a str,
+}
+
+fn available_models(config: &crate::config::Config) -> String {
+    let mut models = config
+        .models
+        .iter()
+        .map(|(name, model)| AvailableModel {
+            model: name,
+            capabilities: &model.capabilities,
+        })
+        .collect::<Vec<_>>();
+    models.sort_by_key(|entry| entry.model);
+    serde_json::to_string(&models).expect("model descriptions serialize")
+}
+
 pub(crate) struct PromptFile {
     pub name: String,
     pub content: String,
@@ -68,7 +87,10 @@ impl SystemPrompt {
                     .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
             prompt = prompt!("core.md" { account_name: &account_name });
         }
-        prompt.files.extend(prompt!("actors.md").files);
+        let models = available_models(&system.config());
+        prompt
+            .files
+            .extend(prompt!("actors.md" { models: &models }).files);
         if !core {
             prompt
                 .files
@@ -168,6 +190,37 @@ impl SystemPrompt {
 #[cfg(test)]
 mod tests {
     use super::{PromptFile, SystemPrompt};
+
+    #[test]
+    fn allocation_prompt_contains_sorted_model_capability_pairs_without_provider_configuration() {
+        let mut config = crate::config::Config::default();
+        for (name, capabilities) in [
+            ("motion", "Animation and visual motion"),
+            ("economy", "Low-cost research"),
+        ] {
+            config.models.insert(
+                name.into(),
+                crate::config::ModelConfig {
+                    capabilities: capabilities.into(),
+                    model_id: "private-provider-id".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let models = super::available_models(&config);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&models).unwrap(),
+            serde_json::json!([
+                {"model":"economy","capabilities":"Low-cost research"},
+                {"model":"motion","capabilities":"Animation and visual motion"},
+            ])
+        );
+        let prompt = prompt!("actors.md" { models: &models }).render();
+        assert!(!prompt.contains("{{models}}"));
+        assert!(!prompt.contains("private-provider-id"));
+        config.models.remove("motion");
+        assert!(!super::available_models(&config).contains("motion"));
+    }
 
     #[test]
     fn file_references_assemble_ordered_sources_and_runtime_templates() {

@@ -1633,7 +1633,7 @@ async fn remote_core_creation_grants_initial_authorization_without_review_on_tar
             id: "create-on-b".into(),
             name: "actors__create".into(),
             arguments: json!({"stage_id":net_b.host.local,"name":"Unapproved project",
-                "workspace":workspace,"instructions":null,"model":null,
+                "workspace":workspace,"instructions":null,"model":"mock",
                 "initial_authorization":{"readable_roots":[additional],"writable_roots":[]}}),
         }]),
         MockReply::Answer("Permission decision received."),
@@ -2356,7 +2356,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     model_a.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
             id: "one-device-effect".into(), name: "actors__create".into(),
-            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":null,"initial_authorization":null}),
+            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":"mock","initial_authorization":null}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-image".into(), name: "actors__read_resource".into(),
@@ -5076,7 +5076,7 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         MockReply::Calls(vec![AgentToolCall {
             id: "create-once-before-new-input".into(),
             name: "actors__create".into(),
-            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":null,"initial_authorization":null}),
+            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":"mock","initial_authorization":null}),
         }]),
         MockReply::Pending,
         MockReply::Answer("Both messages are now considered."),

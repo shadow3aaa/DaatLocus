@@ -153,6 +153,8 @@ pub struct SetupModelRequest {
     pub provider_name: String,
     pub model_id: String,
     #[serde(default)]
+    pub capabilities: Option<String>,
+    #[serde(default)]
     pub context_window_tokens: Option<usize>,
     #[serde(default)]
     pub max_completion_tokens: Option<usize>,
@@ -184,7 +186,8 @@ pub enum SetupProviderKind {
     Openai,
     AnthropicCompatible,
     OpenaiCompatible,
-    OpenaiCodexOauth,
+    #[serde(alias = "openai_codex_oauth")]
+    Codex,
     OpenCodeConsole,
     OpenCodeGo,
     GithubCopilot,
@@ -195,6 +198,7 @@ pub enum SetupProviderKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupCodexAuthMethod {
+    ApiKey,
     BrowserLogin,
     DeviceLogin,
     ImportLocalCodex,
@@ -537,9 +541,7 @@ pub async fn run_setup_provider_auth(
     request: SetupProviderAuthRunRequest,
 ) -> Result<SetupProviderAuthResponse> {
     match request.provider.kind {
-        SetupProviderKind::OpenaiCodexOauth => {
-            run_codex_setup_provider_auth(&request.provider).await
-        }
+        SetupProviderKind::Codex => run_codex_setup_provider_auth(&request.provider).await,
         SetupProviderKind::GithubCopilot => Err(miette!(
             "GitHub Copilot device login must be started before it can be completed"
         )),
@@ -579,7 +581,14 @@ pub async fn start_setup_provider_auth(
     request: SetupProviderAuthStartRequest,
 ) -> Result<(SetupProviderAuthStartResponse, PendingSetupProviderAuthFlow)> {
     match request.provider.kind {
-        SetupProviderKind::OpenaiCodexOauth => start_codex_device_auth().await,
+        SetupProviderKind::Codex
+            if !matches!(
+                request.provider.codex_auth_method,
+                Some(SetupCodexAuthMethod::ApiKey)
+            ) =>
+        {
+            start_codex_device_auth().await
+        }
         SetupProviderKind::GithubCopilot => start_github_device_auth().await,
         kind @ (SetupProviderKind::OpenCodeConsole | SetupProviderKind::OpenCodeGo) => {
             start_opencode_device_auth(kind).await
@@ -607,13 +616,19 @@ pub async fn complete_setup_provider_auth(
             PendingSetupProviderAuthFlow::GithubDevice { device_code, .. },
         ) => complete_github_device_auth(device_code).await,
         (
-            SetupProviderKind::OpenaiCodexOauth,
+            SetupProviderKind::Codex,
             PendingSetupProviderAuthFlow::CodexDevice {
                 device_auth_id,
                 user_code,
                 ..
             },
-        ) => complete_codex_device_auth(&request.provider, device_auth_id, user_code).await,
+        ) if !matches!(
+            request.provider.codex_auth_method,
+            Some(SetupCodexAuthMethod::ApiKey)
+        ) =>
+        {
+            complete_codex_device_auth(&request.provider, device_auth_id, user_code).await
+        }
         (
             SetupProviderKind::OpenCodeConsole | SetupProviderKind::OpenCodeGo,
             PendingSetupProviderAuthFlow::OpenCodeDevice {
@@ -683,18 +698,23 @@ fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupPro
                 SetupGithubAuthMethod::ManualToken
             }),
         },
-        ProviderConfig::OpenaiCodexOauth {
+        ProviderConfig::Codex {
             base_url,
             auth_file,
+            api_key,
         } => SetupProviderRequest {
-            kind: SetupProviderKind::OpenaiCodexOauth,
+            kind: SetupProviderKind::Codex,
             name: name.to_string(),
             credential_name: Some(name.to_string()),
-            api_key: None,
+            api_key: api_key.clone(),
             base_url: base_url.clone(),
             keep_alive: None,
-            codex_auth_method: Some(SetupCodexAuthMethod::ExistingAuthFile),
-            codex_auth_file: Some(auth_file.clone()),
+            codex_auth_method: Some(if api_key.is_some() {
+                SetupCodexAuthMethod::ApiKey
+            } else {
+                SetupCodexAuthMethod::ExistingAuthFile
+            }),
+            codex_auth_file: (!auth_file.is_empty()).then(|| auth_file.clone()),
             opencode_auth_method: None,
             github_auth_method: None,
         },
@@ -778,6 +798,7 @@ fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest
         name: name.to_string(),
         provider_name: model.provider.clone(),
         model_id: model.model_id.clone(),
+        capabilities: Some(model.capabilities.clone()),
         context_window_tokens: Some(model.context_window_tokens),
         max_completion_tokens: Some(model.max_completion_tokens),
         supports_vision: model.supports_vision,
@@ -916,10 +937,28 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
             base_url: required_string(base_url, "provider.base_url")?,
             api_key: required_string(&api_key, "provider.api_key")?,
         }),
-        SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
-            base_url: optional_normalized_url(base_url),
-            auth_file: required_codex_auth_file(provider)?,
-        }),
+        SetupProviderKind::Codex => {
+            if matches!(
+                provider.codex_auth_method,
+                Some(SetupCodexAuthMethod::ApiKey)
+            ) {
+                Ok(ProviderConfig::Codex {
+                    base_url: Some(
+                        required_string(base_url, "provider.base_url")?
+                            .trim_end_matches('/')
+                            .into(),
+                    ),
+                    api_key: Some(required_string(&api_key, "provider.api_key")?),
+                    auth_file: String::new(),
+                })
+            } else {
+                Ok(ProviderConfig::Codex {
+                    base_url: optional_normalized_url(base_url),
+                    api_key: None,
+                    auth_file: required_codex_auth_file(provider)?,
+                })
+            }
+        }
         SetupProviderKind::OpenCodeConsole => Ok(ProviderConfig::OpenCodeConsoleOauth {
             base_url: optional_normalized_url(base_url),
             auth_file: crate::providers::opencode_auth_file_path()
@@ -975,6 +1014,14 @@ async fn run_codex_setup_provider_auth(
         .codex_auth_method
         .unwrap_or(SetupCodexAuthMethod::ExistingAuthFile)
     {
+        SetupCodexAuthMethod::ApiKey => {
+            provider_from_setup_provider(provider)?;
+            Ok(SetupProviderAuthResponse {
+                api_key: provider.api_key.clone(),
+                auth_file: None,
+                message: "API key is ready".into(),
+            })
+        }
         SetupCodexAuthMethod::BrowserLogin => {
             let tokens = run_codex_oauth_browser_flow().await?;
             let auth_file = write_codex_tokens_for_provider(provider, &tokens).await?;
@@ -1172,7 +1219,7 @@ async fn start_codex_device_auth()
     Ok((
         SetupProviderAuthStartResponse {
             flow_id: flow_id.clone(),
-            provider_kind: SetupProviderKind::OpenaiCodexOauth,
+            provider_kind: SetupProviderKind::Codex,
             verification_url,
             user_code: device.user_code.clone(),
             expires_at_ms,
@@ -1509,6 +1556,12 @@ fn model_from_setup_model(
     Ok(ModelConfig {
         provider: provider_name.to_string(),
         model_id,
+        capabilities: model
+            .capabilities
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .into(),
         temperature: model.temperature.unwrap_or(default.temperature),
         rpm: model.rpm,
         request_timeout_secs: model
@@ -1820,7 +1873,22 @@ fn provider_error(name: &str, provider: &ProviderConfig) -> Option<String> {
         ProviderConfig::GithubCopilot { github_token } => {
             credential_error(name, "github_token", github_token, None)
         }
-        ProviderConfig::OpenaiCodexOauth { auth_file, .. } => {
+        ProviderConfig::Codex {
+            api_key: Some(key),
+            base_url,
+            auth_file,
+        } => {
+            if !auth_file.is_empty() {
+                return Some(format!(
+                    "provider '{name}' has conflicting Codex credentials"
+                ));
+            }
+            if base_url.as_deref().is_none_or(|url| url.trim().is_empty()) {
+                return Some(format!("provider '{name}' needs a custom Codex base_url"));
+            }
+            credential_error(name, "api_key", key, Some("your-api-key"))
+        }
+        ProviderConfig::Codex { auth_file, .. } => {
             let auth_file = PathBuf::from(auth_file);
             if auth_file.exists() {
                 None
@@ -2214,6 +2282,52 @@ fn fill_uuid_random_bytes(bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn codex_api_key_setup_is_independent_of_oauth_and_requires_endpoint_and_key() {
+        let request: SetupProviderRequest = serde_json::from_value(serde_json::json!({
+            "kind":"codex", "name":"gateway", "base_url":"https://gateway.invalid/v1/", "api_key":"test-key", "codex_auth_method":"api_key",
+            "codex_auth_file":"does-not-exist.json"
+        })).unwrap();
+        let provider = provider_from_setup_provider(&request).unwrap();
+        assert!(provider_error("gateway", &provider).is_none());
+        let ProviderConfig::Codex {
+            base_url,
+            api_key,
+            auth_file,
+        } = &provider
+        else {
+            panic!("Codex");
+        };
+        assert_eq!(base_url.as_deref(), Some("https://gateway.invalid/v1"));
+        assert_eq!(api_key.as_deref(), Some("test-key"));
+        assert!(auth_file.is_empty());
+        let restored = setup_provider_from_config("gateway", &provider);
+        assert!(matches!(
+            restored.codex_auth_method,
+            Some(SetupCodexAuthMethod::ApiKey)
+        ));
+        assert!(restored.codex_auth_file.is_none());
+        assert!(matches!(
+            provider_from_setup_provider(&restored).unwrap(),
+            ProviderConfig::Codex {
+                api_key: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            start_setup_provider_auth(SetupProviderAuthStartRequest {
+                provider: request.clone()
+            })
+            .await
+            .is_err()
+        );
+        let mut invalid = request.clone();
+        invalid.base_url = None;
+        assert!(provider_from_setup_provider(&invalid).is_err());
+        invalid = request;
+        invalid.api_key = None;
+        assert!(provider_from_setup_provider(&invalid).is_err());
+    }
     use super::*;
 
     #[test]
@@ -2315,6 +2429,8 @@ mod tests {
             },
         );
         config.models.insert("main".into(), ModelConfig::default());
+        config.models.get_mut("main").unwrap().capabilities =
+            "Complex reasoning and coordination".into();
         config
             .models
             .insert("review".into(), ModelConfig::default());
@@ -2324,6 +2440,10 @@ mod tests {
         let request: SetupConfigRequest = serde_json::from_value(json).unwrap();
         let roundtrip = config_from_setup_request(&request).unwrap();
         assert_eq!(roundtrip.approval_model, config.approval_model);
+        assert_eq!(
+            roundtrip.models["main"].capabilities,
+            "Complex reasoning and coordination"
+        );
         assert!(roundtrip.validate().is_ok());
         config.approval_model = Some("missing-review-model".into());
         let outcome = read_config_readiness_from_str(&toml::to_string(&config).unwrap());
@@ -2419,7 +2539,8 @@ model_id = "gpt-4.1-mini"
 
     #[test]
     fn setup_discovered_unknown_codex_model_exposes_reasoning_fallback() {
-        let provider = ProviderConfig::OpenaiCodexOauth {
+        let provider = ProviderConfig::Codex {
+            api_key: None,
             base_url: None,
             auth_file: "C:/example/codex-auth.json".to_string(),
         };

@@ -245,6 +245,8 @@
     "custom_model": "自定义模型"
   },
   "model_editor": {
+    "capabilities": "能力说明",
+    "capabilities_placeholder": "擅长的任务、适用场景和成本建议",
     "default": "默认",
     "custom": "自定义",
     "custom_value0": "自定义{{value0}}",
@@ -277,7 +279,7 @@
     "openai_compatible": "OpenAI 兼容",
     "anthropic_compatible": "Anthropic 兼容",
     "ollama_cloud": "Ollama 云",
-    "codex_oauth": "Codex 登录",
+    "codex_compatible": "Codex 兼容",
     "browser_sign_in": "浏览器授权",
     "device_code": "设备码授权",
     "import_local_codex": "导入本机 Codex",
@@ -302,6 +304,7 @@
     "i_have_authorized": "我已完成授权"
   },
   "providers_settings": {
+    "available_models": "可用模型",
     "back_to_providers": "返回提供商",
     "add_provider": "添加提供商",
     "edit_provider": "编辑提供商",
@@ -311,8 +314,8 @@
     "remove_model": "删除模型",
     "providers": "提供商",
     "unnamed_model": "未命名模型",
-    "auto_approval_model": "自动批准模型",
-    "default_model": "使用默认模型",
+    "core_model": "主模型",
+    "light_model": "轻量模型",
     "no_providers": "连接模型提供商",
     "add_provider_to_start": "添加提供商，再选择你要使用的模型。",
     "model_required": "添加至少一个模型后即可保存。"

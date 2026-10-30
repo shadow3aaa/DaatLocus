@@ -55,11 +55,14 @@ pub enum ProviderConfig {
     GithubCopilot {
         github_token: String,
     },
-    OpenaiCodexOauth {
+    #[serde(alias = "openai-codex-oauth")]
+    Codex {
         #[serde(default)]
         base_url: Option<String>,
         #[serde(default)]
         auth_file: String,
+        #[serde(default)]
+        api_key: Option<String>,
     },
     /// OpenCode Console OAuth: an OpenAI-compatible gateway (default
     /// `https://opencode.ai/inference/openai/v1`) authenticated with a device-code OAuth
@@ -120,6 +123,8 @@ pub struct ModelConfig {
     pub provider: String,
     /// Model identifier sent to the provider API.
     pub model_id: String,
+    /// Owner-written task affinities and cost guidance for Actor allocation.
+    pub capabilities: String,
     pub temperature: f64,
     pub thinking_budget: Option<ThinkingBudget>,
     pub rpm: Option<u32>,
@@ -152,6 +157,7 @@ impl Default for ModelConfig {
         Self {
             provider: "openai".to_string(),
             model_id: "gpt-4.1".to_string(),
+            capabilities: String::new(),
             temperature: 1.0,
             thinking_budget: None,
             rpm: None,
@@ -235,9 +241,10 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     /// Model definition registry keyed by user-defined names.
     pub models: HashMap<String, ModelConfig>,
-    /// Main model name; key reference into models.
+    /// Core model name; also the recovery default for removed Actor preferences.
     pub main_model: String,
-    /// Independent approval reviewer; null selects main_model in a fresh request.
+    /// Lightweight internal model, currently used for independent approval review.
+    /// Null retains the Core model fallback for an unconfigured selection.
     pub approval_model: Option<String>,
     pub daemon: DaemonConfig,
 }
@@ -566,8 +573,7 @@ model_id = "gpt-5.5"
         )
         .expect("parse config");
 
-        let ProviderConfig::OpenaiCodexOauth { auth_file, .. } = &config.providers["codex-oauth"]
-        else {
+        let ProviderConfig::Codex { auth_file, .. } = &config.providers["codex-oauth"] else {
             panic!("expected Codex OAuth provider");
         };
         assert_eq!(
@@ -576,6 +582,7 @@ model_id = "gpt-5.5"
         );
         let serialized = toml::to_string_pretty(&config).expect("serialize config");
         assert!(serialized.contains("auth_file"));
+        assert!(serialized.contains("type = \"codex\""));
     }
 
     #[test]

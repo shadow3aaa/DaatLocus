@@ -106,7 +106,7 @@ impl Definitions {
     fn from_config(config: &Config, account: String, revision: u64, writer: StageId) -> Self {
         let mut providers = config.providers.clone();
         for provider in providers.values_mut() {
-            if let ProviderConfig::OpenaiCodexOauth { auth_file, .. }
+            if let ProviderConfig::Codex { auth_file, .. }
             | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
             | ProviderConfig::OpenCodeGoOauth { auth_file, .. } = provider
             {
@@ -134,8 +134,16 @@ impl Definitions {
         for (name, provider) in &mut next.providers {
             match (provider, base.providers.get(name)) {
                 (
-                    ProviderConfig::OpenaiCodexOauth { auth_file, .. },
-                    Some(ProviderConfig::OpenaiCodexOauth { auth_file: old, .. }),
+                    ProviderConfig::Codex {
+                        api_key: None,
+                        auth_file,
+                        ..
+                    },
+                    Some(ProviderConfig::Codex {
+                        api_key: None,
+                        auth_file: old,
+                        ..
+                    }),
                 )
                 | (
                     ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
@@ -346,6 +354,82 @@ pub fn persist_device_config(system: &ActorSystem, config: &Config) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_api_key_sync_does_not_restore_an_oauth_file() {
+        let mut sender = Config::default();
+        sender.providers.insert(
+            "codex".into(),
+            ProviderConfig::Codex {
+                base_url: Some("https://gateway.invalid/v1".into()),
+                auth_file: String::new(),
+                api_key: Some("test-key".into()),
+            },
+        );
+        let mut receiver = Config::default();
+        receiver.providers.insert(
+            "codex".into(),
+            ProviderConfig::Codex {
+                base_url: None,
+                auth_file: "receiver-login.json".into(),
+                api_key: None,
+            },
+        );
+        let definitions = Definitions::from_config(&sender, "account".into(), 1, StageId::new());
+        let imported = definitions.materialize(&receiver);
+        let ProviderConfig::Codex {
+            auth_file, api_key, ..
+        } = &imported.providers["codex"]
+        else {
+            panic!("Codex");
+        };
+        assert!(auth_file.is_empty());
+        assert_eq!(api_key.as_deref(), Some("test-key"));
+        let definitions = Definitions::from_config(&receiver, "account".into(), 2, StageId::new());
+        assert!(
+            !serde_json::to_string(&definitions)
+                .unwrap()
+                .contains("receiver-login.json")
+        );
+        assert!(
+            definitions.materialize(&receiver).providers["codex"] == receiver.providers["codex"]
+        );
+    }
+
+    #[test]
+    fn model_affinities_sync_with_core_and_lightweight_selections() {
+        let mut sender = Config {
+            main_model: "reasoner".into(),
+            approval_model: Some("small".into()),
+            ..Default::default()
+        };
+        for (name, capabilities) in [
+            ("reasoner", "Complex coordination"),
+            ("small", "Low-cost short judgments"),
+        ] {
+            sender.models.insert(
+                name.into(),
+                ModelConfig {
+                    capabilities: capabilities.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let definitions = Definitions::from_config(&sender, "account".into(), 1, StageId::new());
+        let wire = serde_json::to_vec(&definitions).unwrap();
+        let restored: Definitions = serde_json::from_slice(&wire).unwrap();
+        let imported = restored.materialize(&Config::default());
+        assert_eq!(imported.main_model, "reasoner");
+        assert_eq!(imported.approval_model.as_deref(), Some("small"));
+        assert_eq!(
+            imported.models["reasoner"].capabilities,
+            "Complex coordination"
+        );
+        assert_eq!(
+            imported.models["small"].capabilities,
+            "Low-cost short judgments"
+        );
+    }
 
     #[test]
     fn opencode_channel_sync_omits_sender_auth_and_retains_receiver_login() {

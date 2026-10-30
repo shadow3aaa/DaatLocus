@@ -1974,8 +1974,11 @@ impl ActorSystem {
                 }
                 ProviderConfig::Ollama {
                     api_key: Some(key), ..
+                }
+                | ProviderConfig::Codex {
+                    api_key: Some(key), ..
                 } => message = redact_secret_text(&message, &resolve_env_reference(key)),
-                ProviderConfig::OpenaiCodexOauth { auth_file, .. }
+                ProviderConfig::Codex { auth_file, .. }
                 | ProviderConfig::OpenCodeConsoleOauth { auth_file, .. }
                 | ProviderConfig::OpenCodeGoOauth { auth_file, .. } => {
                     fn scrub(value: &serde_json::Value, message: &mut String) {
@@ -2808,7 +2811,7 @@ mod tests {
                         name: "create".into(),
                         arguments: serde_json::json!({
                             "stage_id":null,"name":name,"workspace":null,
-                            "instructions":null,"model":null,"initial_authorization":null
+                            "instructions":null,"model":"mock","initial_authorization":null
                         }),
                     },
                     &context,
@@ -2841,7 +2844,7 @@ mod tests {
                     name: "create".into(),
                     arguments: serde_json::json!({
                         "stage_id":null,"name":"Extra","workspace":null,
-                        "instructions":null,"model":null,"initial_authorization":null,"apps":["files"]
+                        "instructions":null,"model":"mock","initial_authorization":null,"apps":["files"]
                     }),
                 },
                 &context
@@ -2868,6 +2871,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actor_creation_requires_an_explicit_model_instead_of_inheriting_core() {
+        use crate::{app::App, model_protocol::AgentToolCall};
+        let (_directory, system) = fixture().await;
+        let mut config = system.config();
+        config
+            .models
+            .insert("motion".into(), config.models["mock"].clone());
+        system.update_config(config).await.unwrap();
+        let input = system
+            .send_user("core", "Create an animation worker".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap();
+        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let mut call = AgentToolCall {
+            id: Uuid::new_v4().to_string(),
+            name: "create".into(),
+            arguments: serde_json::json!({"stage_id":null,"name":"Iris","workspace":null,
+                "instructions":null,"initial_authorization":null}),
+        };
+        let count = system.store().actor_count().unwrap();
+        assert!(app.execute_tool(&call, &context).await.is_err());
+        call.arguments["model"] = serde_json::Value::Null;
+        assert!(app.execute_tool(&call, &context).await.is_err());
+        call.arguments["model"] = serde_json::json!("unknown");
+        assert!(app.execute_tool(&call, &context).await.is_err());
+        assert_eq!(system.store().actor_count().unwrap(), count);
+        call.arguments["model"] = serde_json::json!("motion");
+        let result = app.execute_tool(&call, &context).await.unwrap();
+        let child = system
+            .actor(result.payload["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(child.config.model.as_deref(), Some("motion"));
+        assert_eq!(system.config().main_model, "mock");
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn actor_creation_rejects_used_names_and_lists_all_names_in_pages() {
         use crate::{app::App, model_protocol::AgentToolCall};
         let (directory, system) = fixture().await;
@@ -2883,7 +2926,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             name: "create".into(),
             arguments: serde_json::json!({"stage_id":null,"name":name,"workspace":null,
-                "instructions":null,"model":null,"initial_authorization":null}),
+                "instructions":null,"model":"mock","initial_authorization":null}),
         };
         let result = app
             .execute_tool(&create("  Athena  "), &context)

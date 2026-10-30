@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronDownIcon } from "lucide-react";
 import type { DiscoveredModel, ModelConfig } from "@/lib/actor-api";
 import { reasoningValues } from "@/lib/model-settings";
-import { Choices, TextField } from "./controls";
+import { AreaField, Choices, TextField } from "./controls";
 import { SettingsRow } from "./structure";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -46,7 +46,8 @@ export function ModelEditor({model, metadata, onChange, disabled, onChoose}: {
   return <div className="dl-settings-editor">
     <FieldGroup>
       <TextField id="dl-model-name" label={t("model_editor.configuration_name")} value={model.name} disabled={disabled} onChange={event => edit({name: event.target.value})} />
-      <TextField id="dl-model-id" label={t("model_editor.model_id")} value={model.model_id} disabled={disabled} onChange={event => edit({model_id: event.target.value, name: !model.name || model.name === model.model_id ? event.target.value : model.name})} />
+      <AreaField id="dl-model-capabilities" label={t("model_editor.capabilities")} placeholder={t("model_editor.capabilities_placeholder")} value={model.capabilities ?? ""} disabled={disabled} onChange={event => edit({capabilities: event.target.value})} />
+      <TextField id="dl-model-id" label={t("model_editor.model_id")} value={model.model_id} disabled={disabled} onChange={event => edit({model_id: event.target.value, capabilities: event.target.value === model.model_id ? model.capabilities : "", name: !model.name || model.name === model.model_id ? event.target.value : model.name})} />
       <CatalogField id="dl-model-context" label={t("model_editor.context_window")} numeric value={model.context_window_tokens} disabled={disabled} options={metadata?.context_window_tokens ? [{value: String(metadata.context_window_tokens),label: metadata.context_window_tokens.toLocaleString()}] : []} onChange={value => edit({context_window_tokens: value === null ? null : Number(value)})} />
       <CatalogField id="dl-model-output" label={t("model_editor.maximum_output")} numeric value={model.max_completion_tokens} disabled={disabled} options={metadata?.max_completion_tokens ? [{value: String(metadata.max_completion_tokens),label: metadata.max_completion_tokens.toLocaleString()}] : []} onChange={value => edit({max_completion_tokens: value === null ? null : Number(value)})} />
       <CatalogField id="dl-model-thinking" label={t("model_editor.reasoning")} value={model.thinking_budget} options={reasoningValues(metadata).map(value => ({value, label: reasoningLabel(value)}))} disabled={disabled} onChange={value => edit({thinking_budget: value})} />

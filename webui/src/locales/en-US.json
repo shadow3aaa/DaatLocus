@@ -245,6 +245,8 @@
     "custom_model": "Custom model"
   },
   "model_editor": {
+    "capabilities": "Capabilities",
+    "capabilities_placeholder": "Task strengths and cost guidance",
     "default": "Default",
     "custom": "Custom",
     "custom_value0": "Custom {{value0}}",
@@ -277,7 +279,7 @@
     "openai_compatible": "OpenAI compatible",
     "anthropic_compatible": "Anthropic compatible",
     "ollama_cloud": "Ollama Cloud",
-    "codex_oauth": "Codex OAuth",
+    "codex_compatible": "Codex Compatible",
     "browser_sign_in": "Browser sign-in",
     "device_code": "Device code",
     "import_local_codex": "Import local Codex",
@@ -302,6 +304,7 @@
     "i_have_authorized": "I have authorized"
   },
   "providers_settings": {
+    "available_models": "Available models",
     "back_to_providers": "Back to providers",
     "add_provider": "Add provider",
     "edit_provider": "Edit provider",
@@ -311,8 +314,8 @@
     "remove_model": "Remove model",
     "providers": "Providers",
     "unnamed_model": "Unnamed model",
-    "auto_approval_model": "Auto approval model",
-    "default_model": "Default model",
+    "core_model": "Main model",
+    "light_model": "Lightweight model",
     "no_providers": "Connect a model provider",
     "add_provider_to_start": "Add a provider, then choose a model.",
     "model_required": "Add at least one model to save."

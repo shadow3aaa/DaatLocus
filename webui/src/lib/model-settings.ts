@@ -19,6 +19,7 @@ export function selectDiscoveredModel(model: ModelConfig, found: DiscoveredModel
   return {...model,
     name: !model.name || model.name === model.model_id ? found.id : model.name,
     model_id: found.id, context_window_tokens: found.context_window_tokens ?? null,
+    capabilities: model.model_id === found.id ? model.capabilities : "",
     max_completion_tokens: found.max_completion_tokens ?? null,
     supports_vision: found.supports_vision ?? null, thinking_budget: null,
   };
@@ -48,6 +49,6 @@ export function changeProviderKind(provider: ProviderConfig, kind: ProviderKind)
     return { ...provider, kind, base_url: null };
   }
   return { ...provider, kind, base_url: isOpenCodeProvider(provider.kind) || isOpenCodeProvider(kind) ? null : provider.base_url, api_key: null,
-    credential_configured: false, credential_name: null, codex_auth_method: null,
+    credential_configured: false, credential_name: null, codex_auth_method: kind === "codex" ? "api_key" : null,
     github_auth_method: null, opencode_auth_method: null, codex_auth_file: null };
 }
