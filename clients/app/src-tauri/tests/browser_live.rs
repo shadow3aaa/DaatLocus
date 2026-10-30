@@ -64,6 +64,12 @@ impl Fixture {
                     r#"<!doctype html><html data-native-browser><meta charset="utf-8"><link rel="stylesheet" href="/shell.css"><style>html,body{margin:0;background:transparent}header{height:100px;box-sizing:border-box}button{position:fixed;left:100px;top:200px;width:200px;height:200px;border:0;background:rgba(255,0,0,.5);box-shadow:0 0 20px #0008}.dl-browser-progress{position:fixed;left:0;right:0;top:138px}</style><header class="dl-browser-tabs">Shell</header><div class="dl-browser-progress"></div><div id="viewport" style="position:fixed;left:80px;top:140px;right:0;bottom:0"><div style="position:absolute;left:350px;top:60px;width:100px;height:100px;background:rgba(0,0,255,.5)" onclick="window.tips=(window.tips||0)+1"></div></div><script type="module">import {browserForeground} from "/collector.js";window.DLComposition={browserForeground};</script><button onclick="window.clicks=(window.clicks||0)+1">Overlay</button>"#
                 } else if request.starts_with("GET /composition-page ") {
                     r#"<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;background:rgb(0,200,0)}</style><input aria-label="Native field" style="position:fixed;left:600px;top:100px;width:200px;height:40px"><script>document.onclick=()=>window.nativeControlResult=String(Number(window.nativeControlResult||0)+1)</script>"#
+                } else if request.starts_with("GET /owner-focus ") {
+                    // Keep the physical Owner click inside the field even when
+                    // the desktop clamps or resizes the native viewport.
+                    r#"<!doctype html><meta charset="utf-8"><title>Owner focus fixture</title>
+<style>input{position:fixed;left:100px;top:100px;width:400px;height:40px}</style>
+<input aria-label="Owner input">"#
                 } else if request.starts_with("GET /background ") {
                     r#"<!doctype html><meta charset="utf-8"><title>Background fixture</title>
 <style>html,body{margin:0;background:rgb(0,200,0);height:2000px}input{position:fixed;left:10%;top:10%;width:60%;height:40px}canvas{position:fixed;left:55%;top:30%;width:40%;height:40%}</style>
@@ -330,10 +336,11 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
     let mut manifest = json!({
         "output":output,"hidden_browser":false,"relative_points":true,"inspect_tabs":true,
         "panel_steps":{"0":{"x":0,"y":0,"width":1100,"height":800,"scale":1}},
+        "resize_steps":{"1":[[900,700]]},
         "owner_select":{"1":a,"7":b,"8":a},
         "owner_steps":{"2":{"kind":"click","x":200,"y":120,"button":"left","count":1}},
         "browser_steps":[
-            {"action":"open","tab":a,"url":fixture.address},
+            {"action":"open","tab":a,"url":format!("{}owner-focus",fixture.address)},
             {"action":"observe","tab":a},
             {"action":"open","tab":b,"url":format!("{}background",fixture.address)},
             input(&b,json!({"kind":"click","x":0.2,"y":0.13,"button":"left","count":1})),
@@ -413,7 +420,11 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
             "native focus at {index}"
         );
     }
-    assert_eq!(steps[6]["tab_states"][&a]["value"], "UVW");
+    assert_eq!(
+        steps[6]["tab_states"][&a]["value"], "UVW",
+        "Owner page after background input: {}",
+        steps[6]["tab_states"]
+    );
     assert_eq!(steps[6]["tab_states"][&b]["value"], "Agent");
     assert_eq!(steps[8]["tab_states"][&b]["value"], "Agent");
     assert_eq!(
