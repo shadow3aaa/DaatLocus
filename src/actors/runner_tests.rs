@@ -26,6 +26,108 @@ enum MockReply {
 }
 
 #[tokio::test]
+async fn model_preferences_switch_at_the_next_inference_without_restarting_work_or_replaying_tools()
+{
+    let previous = Arc::new(ReplayProvider::new(vec![MockReply::Calls(vec![
+        AgentToolCall {
+            id: "one-write".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":"once.txt","content":"ONE_EFFECT","expected_sha256":null}),
+        },
+    ])]));
+    let next = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Completed with the next model",
+    )]));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *previous.inference_gate.lock() = Some(gate.clone());
+    let dir = crate::sandbox::test_support::scoped_directory();
+    let mut config = runtime_config();
+    config
+        .models
+        .insert("worker".into(), config.models["mock"].clone());
+    config.models.get_mut("mock").unwrap().supports_vision = Some(false);
+    config.models.get_mut("worker").unwrap().supports_vision = Some(true);
+    let system = ActorSystem::open_with_factory(
+        dir.path().join("data"),
+        dir.path().join("work"),
+        config,
+        Arc::new(CoordinatorFactory {
+            core: previous.clone(),
+            worker: next.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    system.seed_test_actor("root");
+    let before = system.actor("root").unwrap();
+    let input = enqueue_root(&system, "Finish this exact request");
+    previous.started.notified().await;
+    let invalid = system
+        .patch_owned_preferences("root", Some(Some("missing".into())))
+        .await;
+    assert!(invalid.is_err());
+    system
+        .patch_owned_preferences("root", Some(Some("worker".into())))
+        .await
+        .unwrap();
+    assert_eq!(
+        system.store().message(&input.id).unwrap().status,
+        MessageStatus::Running
+    );
+    assert_eq!(previous.requests.lock().len(), 1);
+    assert_eq!(next.requests.lock().len(), 0);
+    gate.notify_one();
+    let finished = wait_completed(&system, &input.id).await;
+    assert_eq!(
+        finished.status,
+        MessageStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        finished.reply.as_deref(),
+        Some("Completed with the next model")
+    );
+    assert_eq!(previous.requests.lock().len(), 1);
+    assert_eq!(next.requests.lock().len(), 1);
+    assert!(
+        next.requests.lock()[0].messages.iter().any(
+            |row| matches!(row,AgentMessage::Tool{tool_call_id,..} if tool_call_id=="one-write")
+        )
+    );
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &input.id, None, 8)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(before.config.workspace.join("once.txt")).unwrap(),
+        "ONE_EFFECT"
+    );
+    assert_eq!(
+        system.actor("root").unwrap().created_at_ms,
+        before.created_at_ms
+    );
+    assert!(
+        !previous.requests.lock()[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "files__view_image")
+    );
+    assert!(
+        next.requests.lock()[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "files__view_image")
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn instruction_edits_do_not_interrupt_inference_and_apply_to_the_next_model_turn() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![AgentToolCall {
@@ -2788,6 +2890,7 @@ fn runtime_config() -> crate::config::Config {
         crate::config::ModelConfig {
             provider: "mock".into(),
             model_id: "mock".into(),
+            supports_vision: Some(true),
             ..Default::default()
         },
     );
@@ -2828,7 +2931,8 @@ async fn remote_delegation_retains_readonly_authority() {
     let child = system
         .create_owned("root", project_config(&system, "delegated worker"))
         .unwrap();
-    let mut host = DeviceIdentity::generate().unwrap();
+    let mut host =
+        DeviceIdentity::generate_for_stage(system.store().public_stage_id().unwrap()).unwrap();
     let remote = DeviceIdentity::generate().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let root = host.initialize_group(now, now + 600000).unwrap();
@@ -3091,8 +3195,8 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-progress".into(),
-            name: "actors__report".into(),
-            arguments: json!({"content":"The file is written; checking the result."}),
+            name: "actors__reply".into(),
+            arguments: json!({"finish_turn":false,"content":"The file is written; checking the result."}),
         }]),
         MockReply::Answer("Remote work is complete."),
     ]));
@@ -3387,7 +3491,8 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         calls.push(AgentToolCall { id:"remote-write-memory".into(), name:"files__write_file".into(), arguments:json!({"path":approved.join("forbidden.txt"),"content":"denied","expected_sha256":null}) });
         calls.push(AgentToolCall { id:"remote-delegation".into(), name:"actors__message".into(), arguments:json!({"reply_to":null,"actor_id":child.id,"stage_id":null,"content":"Attempt delegated work"}) });
     }
-    let mut host = DeviceIdentity::generate().unwrap();
+    let mut host =
+        DeviceIdentity::generate_for_stage(system.store().public_stage_id().unwrap()).unwrap();
     let remote = DeviceIdentity::generate().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let root = host.initialize_group(now, now + 600000).unwrap();
@@ -4298,7 +4403,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
 
 #[tokio::test]
 async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker() {
-    for account_mode in [false, true] {
+    {
         let provider = Arc::new(ReplayProvider::new(vec![
             MockReply::Pending,
             MockReply::Answer("queued completed after reconfiguration"),
@@ -4323,20 +4428,8 @@ async fn reconfiguration_stops_active_work_preserves_queue_and_keeps_one_worker(
         );
         let queued = enqueue_root(&system, "Queued request before configuration change");
         let mut next = before.config;
-        if account_mode {
-            next.model = Some("mock".into());
-        } else {
-            next.instructions = "Updated instructions".into();
-        }
-        let update = async {
-            if account_mode {
-                system
-                    .patch_owned_preferences("root", Some(next.model.clone()))
-                    .await
-            } else {
-                system.update_owned("root", next.clone()).await
-            }
-        };
+        next.instructions = "Updated instructions".into();
+        let update = system.update_owned("root", next.clone());
         tokio::time::timeout(Duration::from_secs(3), update)
             .await
             .unwrap()
@@ -5201,7 +5294,7 @@ async fn core_import_routes_through_device_permissions_and_never_starts_the_impo
     .unwrap();
     provider.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"read-import".into(),name:"actors__read_resource".into(),arguments:json!({"resource_id":evidence.id,"offset":null,"limit":4096})}]),
-        MockReply::Calls(vec![AgentToolCall {id:"prepare-import".into(),name:"actors__import_conversation".into(),arguments:json!({"stage_id":network.host.local,"resource_id":evidence.id,"name":"Athena","instructions":"Preserve UI context; wait for a new request."})}]),
+        MockReply::Calls(vec![AgentToolCall {id:"prepare-import".into(),name:"actors__import_conversation".into(),arguments:json!({"stage_id":network.host.local,"resource_id":evidence.id,"name":"Athena","model":"mock","instructions":"Preserve UI context; wait for a new request."})}]),
         MockReply::Answer("Imported; waiting for the owner."),
     ]);
     let input = system
@@ -5272,7 +5365,7 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![AgentToolCall {
             id: "early".into(),
-            name: "actors__deliver".into(),
+            name: "actors__reply".into(),
             arguments: json!({"content":"I have started coordinating.","finish_turn":false}),
         }]),
         MockReply::Pending,
@@ -5307,23 +5400,20 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     assert!(system.store().events(0,Some("core"),true,100).unwrap().iter().any(|event|matches!(&event.event,ActorEvent::MessageAdded{message_id} if message_id==&receipt.id)));
     {
         let requests = provider.requests.lock();
+        assert!(requests[0].tools.iter().all(
+            |tool| tool.name.starts_with("actors__") || tool.name.starts_with("admin_actors__")
+        ));
         assert!(
             requests[0]
                 .tools
                 .iter()
-                .all(|tool| tool.name.starts_with("actors__"))
-        );
-        assert!(
-            requests[0]
-                .tools
-                .iter()
-                .any(|tool| tool.name == "actors__deliver")
+                .any(|tool| tool.name == "actors__reply")
         );
     }
     system.cancel("core", &input.id).unwrap();
     assert!(
         system
-            .deliver_from_actor("core", &input.id, "late", "Too late")
+            .deliver_from_actor("core", &input.id, "late", "Too late", false)
             .is_err()
     );
     network.stop().await;
@@ -5352,8 +5442,8 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     let worker = Arc::new(ReplayProvider::new(vec![
         MockReply::Calls(vec![AgentToolCall {
             id: "progress".into(),
-            name: "actors__report".into(),
-            arguments: json!({"content":"Found the cause; repair is still running."}),
+            name: "actors__reply".into(),
+            arguments: json!({"finish_turn":false,"content":"Found the cause; repair is still running."}),
         }]),
         MockReply::Pending,
     ]));
@@ -5388,7 +5478,7 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     core.replies.lock().extend([
         MockReply::Calls(vec![
             AgentToolCall{id:"delegate".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair"})},
-            AgentToolCall{id:"ack".into(),name:"actors__deliver".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
+            AgentToolCall{id:"ack".into(),name:"actors__reply".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
         ]),
         MockReply::Answer("Your second message has been handled."),
         MockReply::Calls(vec![AgentToolCall{id:"absorb-update".into(),name:"actors__yield".into(),arguments:json!({})}]),
@@ -5493,7 +5583,10 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
         deliveries[0].reply.as_deref(),
         Some("The worker is investigating.")
     );
-    assert_eq!(system.actor("core").unwrap().config.apps, vec!["actors"]);
+    assert_eq!(
+        system.actor("core").unwrap().config.apps,
+        vec!["actors", "admin_actors"]
+    );
 
     network.stop().await;
     system.shutdown().await;
@@ -5537,7 +5630,7 @@ async fn coordinator_yields_between_required_results_and_routes_only_progress_th
         MockReply::Calls(vec![
             AgentToolCall{id:"first-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":first.id,"stage_id":null,"content":"Review the first area"})},
             AgentToolCall{id:"second-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":second.id,"stage_id":null,"content":"Review the second area"})},
-            AgentToolCall{id:"brief-progress".into(),name:"actors__report".into(),arguments:json!({"content":"Both reviews are underway."})},
+            AgentToolCall{id:"brief-progress".into(),name:"actors__reply".into(),arguments:json!({"finish_turn":false,"content":"Both reviews are underway."})},
             AgentToolCall{id:"wait-for-reviews".into(),name:"actors__yield".into(),arguments:json!({})},
             // Even a call after yield receives its observation before the boundary.
             AgentToolCall{id:"read-context".into(),name:"actors__read_history".into(),arguments:json!({"cursor":null,"message_id":null,"scope":null,"related_cursor":null,"limit":1})},
@@ -5772,7 +5865,10 @@ async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_inval
 }
 
 fn assert_shared_actor_instructions(prompt: &str) {
-    let instructions = include_str!("../prompts/actors.md");
+    let instructions = include_str!("../prompts/actors.md")
+        .split("{{models}}")
+        .next()
+        .unwrap();
     assert_eq!(prompt.matches(instructions).count(), 1);
     assert!(!prompt.contains(include_str!("../prompts/approval_review.md")));
     assert!(!prompt.contains("Use report for a material discovery"));
@@ -5990,7 +6086,7 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
             id: "prepare-forwarded-import".into(),
             name: "actors__import_conversation".into(),
             arguments: json!({"stage_id":net_a.host.local,"resource_id":resource_id,
-                "name":"Forwarded Athena","instructions":"Preserve the UI context."}),
+                "name":"Forwarded Athena","model":"mock","instructions":"Preserve the UI context."}),
         }]),
         MockReply::Answer("Imported; waiting for the owner."),
     ]);

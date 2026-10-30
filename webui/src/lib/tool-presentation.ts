@@ -20,7 +20,8 @@ const labels: Record<string, string> = {
   computer_use__adjust_window: "computer_use.adjust_window",
   computer_use__list_apps: "computer_use.list_apps", computer_use__list_windows: "computer_use.list_windows", computer_use__launch_app: "computer_use.launch_app", computer_use__open_window: "computer_use.open_window", computer_use__get_window_state: "computer_use.observe", computer_use__click: "computer_use.click", computer_use__type_text: "computer_use.type_text", computer_use__press_key: "computer_use.press_key", computer_use__scroll: "computer_use.scroll", computer_use__drag: "computer_use.drag", computer_use__give_window: "computer_use.give_window", computer_use__release_window: "computer_use.release_window", computer_use__close_window: "computer_use.close_window",
   actors__appeal_approval: "tool_details.request_permission",
-  actors__stop: "tool_presentation.stop_actor", actors__archive: "tool_presentation.archive_actor", actors__unarchive: "tool_presentation.unarchive_actor",
+  admin_actors__resolve_approval_appeal: "tool_presentation.resolve_permission", admin_actors__devices: "tool_presentation.view_devices",
+  admin_actors__stop: "tool_presentation.stop_actor", admin_actors__archive: "tool_presentation.archive_actor", admin_actors__unarchive: "tool_presentation.unarchive_actor",
   actors__create: "tool_presentation.create_actor", actors__import_conversation: "imports.bubble_title", actors__message: "tool_presentation.message_actor", actors__list: "tool_presentation.view_actor", actors__read_history: "tool_presentation.read_history",
   files__read_file: "tool_presentation.read_file", files__write_file: "tool_presentation.write_file", files__edit_file: "tool_presentation.edit_file", files__copy_file: "tool_presentation.copy_file", files__list_directory: "tool_presentation.browse_folder", files__search_text: "tool_presentation.search_files", files__read_skill: "tool_presentation.read_skill", files__list_skills: "tool_presentation.view_skills", files__view_image: "tool_presentation.view_image",
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
@@ -29,7 +30,7 @@ const labels: Record<string, string> = {
   apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close", apps_manager__configure_timeouts: "tool_presentation.update_app_settings",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
-  actors__report: "tool_presentation.report_progress", actors__yield: "tool_presentation.yield_input",
+  actors__reply: "tool_presentation.message_actor", actors__status: "tool_presentation.view_actor", actors__cancel: "tool_presentation.cancel_request", admin_actors__set_model:"tool_presentation.change_model", admin_actors__read_conversation:"tool_presentation.read_history", actors__yield: "tool_presentation.yield_input",
 };
 
 const fieldLabels: Record<string, string> = {
@@ -51,7 +52,7 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
   if (name.startsWith("phone_use__")) return SmartphoneIcon;
   if (name.startsWith("computer_use__")) return MonitorIcon;
   if (name.startsWith("terminal__")) return TerminalSquareIcon;
-  if (name.startsWith("actors__")) return MessageCircleIcon;
+  if ((name.startsWith("actors__") || name.startsWith("admin_actors__"))) return MessageCircleIcon;
   if (name.includes("search")) return SearchIcon;
   if (name.startsWith("web__")) return Globe2Icon;
   if (name.startsWith("browser_use__")) return Globe2Icon;
@@ -71,7 +72,7 @@ export function activitySummary(names: string[]) {
   else if (names.some(name => name.startsWith("files__"))) parts.push(t("tool_presentation.read_files"));
   if (names.some(name => name.startsWith("terminal__"))) parts.push(t("tool_presentation.ran_commands"));
   if (names.some(name => name.includes("search"))) parts.push(t("tool_presentation.searched_content"));
-  if (names.some(name => name.startsWith("actors__"))) parts.push(t("tool_presentation.handled_collaboration"));
+  if (names.some(name => (name.startsWith("actors__") || name.startsWith("admin_actors__")))) parts.push(t("tool_presentation.handled_collaboration"));
   return parts.join(getCurrentWebUiLanguage() === "zh-CN" ? "" : " ") || t("tool_presentation.value0_actions", {value0: names.length});
 }
 

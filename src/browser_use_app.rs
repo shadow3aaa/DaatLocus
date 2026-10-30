@@ -319,6 +319,9 @@ fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T> {
 }
 #[async_trait]
 impl App for BrowserUseApp {
+    fn set_vision_support(&mut self, supported: bool) {
+        self.vision = supported;
+    }
     fn id(&self) -> AppId {
         AppId::new("browser_use").expect("built-in id")
     }

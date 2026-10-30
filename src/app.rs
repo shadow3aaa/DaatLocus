@@ -187,6 +187,8 @@ pub trait App: Send + Sync {
     fn output_schema(&self) -> Option<Value> {
         None
     }
+    /// Update model presentation capabilities without discarding live App resources.
+    fn set_vision_support(&mut self, _supported: bool) {}
     fn managed_revision(&self) -> Option<u64> {
         None
     }
@@ -313,6 +315,11 @@ impl AppManager {
         Ok(Self { order, apps: table })
     }
 
+    pub(crate) fn set_vision_support(&mut self, supported: bool) {
+        for app in self.apps.values_mut() {
+            app.set_vision_support(supported);
+        }
+    }
     pub fn app_ids(&self) -> Vec<AppId> {
         self.order.clone()
     }

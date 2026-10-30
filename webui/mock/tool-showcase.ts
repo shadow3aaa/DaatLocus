@@ -90,12 +90,14 @@ export const toolSections = [
   {id:"tools-actors",label:"工具 · Actor 协作",examples:[
     sample("actor-create","创建 Actor","actors__create",{id:"atlas",name:"Atlas",conversation_url:"/actors/atlas"},{outcome:{actor_id:"atlas",name:"Atlas"}}),
     sample("actor-message","发送消息","actors__message",{message_id:"layout-check",sent_message:{conversation_url:"/actors/atlas",content:"请检查 **桌面布局**。\n\n保留 `12px` 间距，并核对[设计文档](https://example.com/design)。"}},{outcome:{sent_message:true}}),
-    sample("actor-report","发送进度","actors__report",{message_id:"layout-report",sent_message:{conversation_url:"/actors/core",content:"桌面已检查完成，正在核对手机上的折行。"}},{outcome:{sent_message:true}}),
+    sample("actor-report","发送进度","actors__reply",{message_id:"layout-report",sent_message:{conversation_url:"/actors/core",content:"桌面已检查完成，正在核对手机上的折行。"}},{outcome:{sent_message:true}}),
     sample("actor-list","Actor 列表与状态","actors__list",{actors:[{id:"research",name:"Iris",status:"running"},{id:"archived",name:"Atlas",status:"archived"},{id:"ready",name:"Argus",status:"idle"}]}),
     sample("actor-history","历史、嵌套字段与分页","actors__read_history",{messages:[{name:"Core",content:"请检查布局。"},{name:"Iris",content:"检查完成。"}],next_cursor:30}),
     sample("actor-resource-image","读取图片资源","actors__read_resource",{resource_references:[image]}),
     sample("actor-resource-text","读取完整输出提示","actors__read_resource",{text:"这是附件的完整内容。"}),
-    ...["yield","stop","archive","unarchive","import_conversation"].map(action=>sample(`actor-${action}`,`协作 · ${action}`,`actors__${action}`,{message:"操作完成。",actor_id:"research"})),
+    ...["yield","stop","archive","unarchive","import_conversation"].map(action=>sample(`actor-${action}`,`协作 · ${action}`,`${["stop","archive","unarchive"].includes(action)?"admin_actors":"actors"}__${action}`,{message:"操作完成。",actor_id:"research"})),
+    sample("actor-model","调整 Actor 模型","admin_actors__set_model",{actor_id:"research",name:"Iris",model:"economy"}),
+    sample("actor-conversation","查看 Actor 气泡历史","admin_actors__read_conversation",{actor_id:"research",items:[{kind:"assistant",sender:"research",content:"布局已检查，正在修复。"}],next_cursor:null}),
     sample("actor-error","向已归档 Actor 发送失败","actors__message",{},{error:"目标 Actor 已归档，无法接收新消息。"}),
   ]},
   {id:"tools-apps",label:"工具 · AppsManager",examples:[

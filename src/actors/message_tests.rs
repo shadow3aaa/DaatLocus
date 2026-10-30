@@ -82,7 +82,7 @@ async fn core_stop_cancels_all_suspended_inputs_and_preserves_identity_history_a
         .unwrap();
     wait_requests(&provider, 4).await;
     let context = core_stop_context(&system, &first);
-    let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    let mut app = crate::admin_actors_app::AdminActorsApp::new(system.clone());
     let result = tokio::time::timeout(
         Duration::from_secs(3),
         app.execute_tool(
@@ -149,7 +149,7 @@ async fn core_stop_rejects_self_readonly_foreign_and_ordinary_actor_authority() 
         .send_user("root", "Continue work".into(), vec![], None)
         .unwrap();
     let context = core_stop_context(&system, &input);
-    let mut core = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    let mut core = crate::admin_actors_app::AdminActorsApp::new(system.clone());
     let mut call = AgentToolCall {
         id: "stop".into(),
         name: "stop".into(),
@@ -277,7 +277,7 @@ async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
         .send_user("root", "Must not start".into(), vec![], None)
         .unwrap();
     let context = core_stop_context(&system, &first);
-    let mut core = crate::actor_app::ActorApp::new("core".into(), system.clone());
+    let mut core = crate::admin_actors_app::AdminActorsApp::new(system.clone());
     core.execute_tool(
         &AgentToolCall {
             id: "stop-process".into(),
@@ -333,7 +333,7 @@ async fn core_stop_routes_to_remote_actor_and_cancels_all_its_open_inputs() {
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-stop".into(),
-            name: "actors__stop".into(),
+            name: "admin_actors__stop".into(),
             arguments: json!({"stage_id":net_b.host.local,"actor_id":"root"}),
         }]),
         MockReply::Answer("Remote Actor stopped"),
@@ -1135,4 +1135,72 @@ async fn shutdown_preserves_both_suspended_inputs_and_does_not_replay_their_effe
         ));
     }
     reopened.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn administrative_observation_and_model_changes_route_to_the_existing_remote_actor() {
+    let coordinator = Arc::new(ReplayProvider::new(vec![]));
+    let worker = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(coordinator.clone(), worker.clone()).await;
+    let original = b
+        .send_user("root", "REMOTE_VISIBLE_PROGRESS".into(), vec![], None)
+        .unwrap();
+    wait_requests(&worker, 1).await;
+    coordinator.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall{id:"inspect-remote-conversation".into(),name:"admin_actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
+        AgentToolCall{id:"change-remote-model".into(),name:"admin_actors__set_model".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","model":"mock"})}]),
+        MockReply::Answer("Observed progress without messaging the worker"),
+    ]);
+    let request = a
+        .send_user(
+            "core",
+            "Inspect progress and update its model".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let done = wait_completed(&a, &request.id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        b.actor("root").unwrap().config.model.as_deref(),
+        Some("mock")
+    );
+    assert_eq!(
+        b.store().message(&original.id).unwrap().status,
+        MessageStatus::Running
+    );
+    assert_eq!(
+        worker.requests.lock().len(),
+        1,
+        "changing a preference cannot restart in-flight inference"
+    );
+    let calls = a
+        .store()
+        .tool_summaries("core", &request.id, None, 8)
+        .unwrap()
+        .items;
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|call| call.error.is_none()));
+    let observed = calls
+        .iter()
+        .find(|call| call.name == "admin_actors__read_conversation")
+        .unwrap();
+    let result = a.store().tool_result(&observed.id).unwrap();
+    assert!(
+        result.payload["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|bubble| bubble["content"] == "REMOTE_VISIBLE_PROGRESS")
+    );
+    assert_eq!(
+        b.store().messages("root", None, 16).unwrap().items.len(),
+        1,
+        "observation must not create another input"
+    );
+    net_b.stop_abruptly().await;
+    net_a.stop_abruptly().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }

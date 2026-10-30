@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod actor_app;
 pub mod actors;
+pub mod admin_actors_app;
 pub mod app;
 pub mod artifacts;
 pub mod artifacts_app;

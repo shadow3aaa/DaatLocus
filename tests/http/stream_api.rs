@@ -236,7 +236,13 @@ async fn explicit_report_streams_and_can_be_fetched_before_task_completion() {
     let delivery = fixture
         .system
         .store()
-        .deliver(&actor, &input.id, "progress", "Investigation is underway.")
+        .deliver(
+            &actor,
+            &input.id,
+            "progress",
+            "Investigation is underway.",
+            false,
+        )
         .unwrap();
     assert_eq!(
         fixture.system.store().message(&input.id).unwrap().status,

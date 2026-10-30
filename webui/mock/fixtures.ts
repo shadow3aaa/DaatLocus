@@ -63,7 +63,7 @@ export function resetAccountWork(): void {
   store.actors.clear(); store.order.length = 0; store.catalog.length = 0;
   store.attachments.clear(); store.idempotency.clear();
   workReset.generation = {revision: (workReset.generation?.revision ?? 0) + 1, writer: STAGE_ID};
-  createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors"], model: null,
+  createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors","admin_actors"], model: null,
     workspace: "~", instructions: ""});
   broadcastResync();
 }
@@ -79,7 +79,7 @@ function seed(): void {
     id: ROOT_ACTOR_ID,
     name: "Daat Locus",
     parent_id: null,
-    apps: ["actors"],
+    apps: ["actors","admin_actors"],
     model: "mock-large",
     workspace: "~",
     instructions: "You are the root Actor of the mock account.",

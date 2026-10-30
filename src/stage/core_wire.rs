@@ -34,7 +34,7 @@ impl Configuration {
         config.name = self.name.clone();
         config.instructions = self.instructions.clone();
         config.model = self.model.clone();
-        config.apps = vec!["actors".into()];
+        config.apps = vec!["actors".into(), "admin_actors".into()];
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

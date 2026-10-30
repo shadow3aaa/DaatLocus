@@ -515,6 +515,10 @@
     "suggestions_failed": "未能读取搜索记录，请重试。"
   },
   "tool_presentation": {
+    "cancel_request": "取消请求",
+    "change_model": "切换模型",
+    "resolve_permission": "审核权限",
+    "view_devices": "查看设备",
     "update_app_settings": "更新应用设置",
     "sudo_execute": "无沙箱执行",
     "sudo_execute_as_admin": "以管理员执行",

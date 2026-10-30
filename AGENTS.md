@@ -83,7 +83,9 @@ client are connected.
   effect. Cancel MCP requests by their protocol request ID and retain uncertain outcomes.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
-  Core constructs only the portable Actors App. Other Actors receive every
+  Core composes the portable Actors and AdminActors Apps. Only Core receives
+  AdminActors; Actors exposes the same tools and schemas for every Actor.
+  Other Actors receive every
   device-provided App; there are no Actor App or tool capability allowlists.
   Do not require a common `get_state` tool or a separate App workspace UI.
 - Core is the only preset Actor and the default entry. Every other Actor is
@@ -93,7 +95,7 @@ client are connected.
   permission relationship, not a user-visible access level.
 - Ownership determines hierarchy; delegation does not change ownership or
   access. Results remain associated with the originating request.
-- The account Core directly exposes only the portable Actors App. Hosted Actors
+- The account Core directly exposes the portable Actors and AdminActors Apps. Hosted Actors
   on the same device install the same device-provided Apps; creation cannot select
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
@@ -103,7 +105,9 @@ client are connected.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
   instructions or filesystem roots.
-  Model selection stays a composer preference. There is no account or Actor
+  Owner model selection stays a conversation preference. Core may adjust hosted
+  Actor models through AdminActors, never its own. Changes preserve live App
+  resources and apply before the next inference at a settled tool-group boundary. There is no account or Actor
   Full access / Ask / Auto selector. Actor creation happens through the Actors App,
   without permission inheritance. Actors have no individual deletion operation.
   Creation accepts an initial authorization group which always includes recursive
@@ -189,7 +193,7 @@ Every effect still requires device-side epoch, authenticated authority and sandb
 Sandbox expansion uses the unified review/application path.
 
 - Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
-  Core uses Actors `stop` to stop a hosted Actor's whole current execution:
+  Core uses AdminActors `stop` to stop a hosted Actor's whole current execution:
   atomically cancel every pending/running input, including suspended inputs, and
   await worker/App cleanup. Keep identity, configuration, history and completed
   effects; later messages may start new work. Ordinary request `cancel` affects
@@ -334,7 +338,8 @@ Sandbox expansion uses the unified review/application path.
 - Configuration changes prepare a valid candidate and resolve removed Actor model
   preferences to the account default only after persistence succeeds. Providers
   and their models can always be removed; an empty model setup keeps input queued.
-  Hold the lifecycle lock over worker stop, persistence and publication. Persist
+  Provider configuration changes hold the lifecycle lock over worker stop, persistence
+  and publication. Model-only Actor preferences persist without stopping work. Persist
   the exact candidate in the service profile, not a request rebuilt later.
 - Build the shared WebUI/authentication WASM independently before its consumers.
   Tauri owns native assets through frontendDist and its built-in compression;

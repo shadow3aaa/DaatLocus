@@ -2132,7 +2132,7 @@ impl Controller {
                     shared::ACTOR_ID,
                     result.model_images,
                 )?;
-                if app == "actors"
+                if matches!(app, "actors" | "admin_actors")
                     && let Some(payload) = result.payload.as_object_mut()
                 {
                     if let Some(actors) = payload
@@ -2434,7 +2434,7 @@ impl Controller {
             }
             let mut recovered_images = Vec::new();
             for call in shared_store::incomplete_calls(system.store(), &message.id)? {
-                if call.name == "actors__deliver"
+                if call.name == "actors__reply"
                     && let Some(receipt) = system
                         .store()
                         .delivery_receipt(shared::ACTOR_ID, &message.id, &call.id)
@@ -2467,7 +2467,9 @@ impl Controller {
                         .map(|peer| peer.device.stage_id)
                         .collect::<Vec<_>>();
                 devices.push(runtime.host.local);
-                let source = if call.name.starts_with("actors__") {
+                let source = if call.name.starts_with("actors__")
+                    || call.name.starts_with("admin_actors__")
+                {
                     call.arguments
                         .get("stage_id")
                         .cloned()
@@ -2765,7 +2767,7 @@ mod tests {
         let mut apps = core.model_apps().await.unwrap();
         let call = AgentToolCall {
             id: "sync-devices".into(),
-            name: "actors__devices".into(),
+            name: "admin_actors__devices".into(),
             arguments: json!({}),
         };
         apps.validate_tool_call(&call, &context).unwrap();
@@ -2802,7 +2804,7 @@ mod tests {
         let input = &context.actor_call.as_ref().unwrap().message_id;
         assert!(!core.permitted());
         let receipt = system
-            .deliver_from_actor(shared::ACTOR_ID, input, "direct", "Still authorized")
+            .deliver_from_actor(shared::ACTOR_ID, input, "direct", "Still authorized", false)
             .unwrap();
         assert_eq!(receipt.reply.as_deref(), Some("Still authorized"));
         assert_eq!(receipt.in_reply_to.as_deref(), Some(input.as_str()));
@@ -2862,7 +2864,7 @@ mod tests {
             }
             let call = AgentToolCall {
                 id: reason.into(),
-                name: "actors__deliver".into(),
+                name: "actors__reply".into(),
                 arguments: json!({"content":"Must not be delivered","finish_turn":false}),
             };
             assert!(
@@ -2871,7 +2873,7 @@ mod tests {
             );
             assert!(
                 system
-                    .deliver_from_actor(shared::ACTOR_ID, input, reason, "Forbidden")
+                    .deliver_from_actor(shared::ACTOR_ID, input, reason, "Forbidden", false)
                     .is_err(),
                 "{reason}"
             );

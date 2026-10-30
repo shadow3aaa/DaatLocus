@@ -3,13 +3,13 @@ import { asObject, asRows, asText, domainToolName, operationToolName, approvalNo
 import { resourceActorId, safeLink } from "./conversation-links";
 
 export function isBuiltinTool(tool:Pick<ToolSummary,"name"|"outcome">) {
-  return /^(actors|files|terminal|web|browser_use|computer_use|phone_use|apps_manager|artifacts|sudo)__/.test(operationToolName(tool));
+  return /^(actors|admin_actors|files|terminal|web|browser_use|computer_use|phone_use|apps_manager|artifacts|sudo)__/.test(operationToolName(tool));
 }
 /** Internal coordination has no human-facing body. Failed calls still expose their error. */
 export function isInternalTool(tool:Pick<ToolSummary,"name"|"outcome"|"error">) {
   const name=operationToolName(tool);
   return !tool.error&&!approvalNotice(tool.outcome)&&(
-    name.startsWith("actors__")&&name!=="actors__read_resource" ||
+    (name.startsWith("actors__")||name.startsWith("admin_actors__"))&&name!=="actors__read_resource" ||
     ["web__close","browser_use__close_page","computer_use__close_window","computer_use__release_window","phone_use__close_window","phone_use__release_window","apps_manager__refresh","apps_manager__enable","apps_manager__close"].includes(name)
   );
 }
@@ -24,7 +24,7 @@ export function toolContentKind(result:ToolResult):string|undefined {
   if(name.startsWith("web__"))return "web";
   if(/^(browser_use|computer_use|phone_use)__/.test(name))return "gui";
   if(name.startsWith("apps_manager__"))return "apps";
-  if(name.startsWith("actors__"))return "actor";
+  if((name.startsWith("actors__")||name.startsWith("admin_actors__")))return "actor";
   if(name.startsWith("files__")) {
     if(name.endsWith("view_image"))return "image";
     if(name.endsWith("list_directory"))return "directory";

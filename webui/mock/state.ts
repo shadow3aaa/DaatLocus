@@ -178,7 +178,7 @@ export type ActorSeed = {
 
 export function createActor(seed: ActorSeed): ActorStore {
   const ts = now();
-  const apps = seed.id === ROOT_ACTOR_ID ? ["actors"] : ["actors","apps_manager","files","terminal","web","browser_use","artifacts"];
+  const apps = seed.id === ROOT_ACTOR_ID ? ["actors","admin_actors"] : ["actors","apps_manager","files","terminal","web","browser_use","artifacts"];
   const summary: ActorSummary = {
     id: seed.id,
     parent_id: seed.parent_id,

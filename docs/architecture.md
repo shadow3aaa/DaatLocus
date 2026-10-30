@@ -291,7 +291,7 @@ capture，因此不承诺用户同时拖拽的独立性。GetFocus/GetCursorPos 
 ## ComputerUse App（macOS）
 
 macOS 与 Windows 共用 `computer_use` 设备 App、工具名称、模型 schema、Actor
-归属检查及设备桌面能力审批。Core 仍仅持有 Actors App；Android 保留 `phone_use`。
+归属检查及设备桌面能力审批。Core 组合 Actors 与 AdminActors App；Android 保留 `phone_use`。
 macOS 原生宿主位于独立的 `crates/daat-locus-computer-use` lib，不依赖 Actor、
 账号存储、HTTP 或 Tauri。`daat-locus-client-protocol::computer_use` 定义有界通信
 封包及 macOS Unix socket 客户端，不链接 AppKit / ScreenCaptureKit；服务只依赖此
@@ -341,7 +341,7 @@ AX 对象、进程或通用系统调用。启用状态按设备 profile 原子�
 ## ComputerUse App（Windows）
 
 Windows x64 提供 `computer_use` 设备 App，普通 Actor 按现有规则获得，
-Core 仍仅直接持有 Actors App。macOS 复用同一个 App，Android 使用 `phone_use`。
+Core 直接组合 Actors 与 AdminActors App。macOS 复用同一个 App，Android 使用 `phone_use`。
 采用窗口定向的“发现、选定、观察、单次操作、再观察”交互；工具沿用现有 App
 执行机制，不新增 JavaScript REPL、工具引擎或 Actor 类型。
 
@@ -810,16 +810,16 @@ Core 是唯一预置 Actor。普通 Actor 由创建它的 Actor 命名，通过 
 设备默认工作区与能力约束属于基础设施，不以 Actor 身份保存。既有本地 root 的身份和历史保留为普通 Actor，
 不再具有特殊路由或权限，也不靠合并独立 root 来模拟共享 Actor。
 
-核心直接工具固定为一个便携 Actors App：设备发现、分页 Actor 列表、创建、委派、
+核心直接组合便携的 Actors 与 AdminActors App：设备发现、分页 Actor 列表、创建、委派、
 请求状态与取消，以及自身历史、资源和对话交付。模型使用明确的 `stage_id` 指定
-普通 Actor 的宿主；原生 Core Invoke 仅允许 Actors 协作操作，不能转调 Files、
+普通 Actor 的宿主；原生 Core Invoke 仅允许 Actors 与 AdminActors 的协作和管理操作，不能转调 Files、
 Terminal 或 Web。构建模型工具不依赖逐设备网络目录查询；实际操作时重新检查
 目标设备的目录修订、执行代际、权限与审批。读取操作目录先验证 worker 代际并同步
 已提交的账号状态，再计算目录修订，避免执行前同步配置使刚读取的修订失效。
 执行时仍重新校验修订，拒绝其间真实发生的权限变更。设备离线时不更换操作目标。
 
 同设备的非 Core Actor 安装全量平台 App 与启用的 MCP App，创建工具不接受
-`apps` 或只读身份。Core 只构造跨平台 Actors App，不安装其他 App，也不使用能力
+`apps` 或只读身份。Core 只构造跨平台 Actors 与 AdminActors App，不安装设备执行 App，也不使用能力
 白名单。`app_access`、工具白名单、委派 App 上限、本地只读身份和收件人列表均已
 移除。普通 Actor 通过自己的项目沙箱和审批记忆执行；所有项目工作目录默认递归
 可读写。项目 AGENTS 和 Skills 由普通 Actor 读取，不自动注入 Core 的模型上下文。
@@ -1238,7 +1238,7 @@ HTTP 和本机 stdio，Android 仅提供 HTTP。HTTP 使用独立客户端、不
 
 普通 Actor 安装 AppsManager；MCP 安装与调用不声明动作审查或权限指纹，不请求设备沙箱授权。
 仍保留账号、设备、输入代际、远程只读限制与资源归属检查，不把远端工具描述或只读提示当作授权。
-停用立即拒绝新调用，已开始的调用允许完成。Core 继续仅构造 Actors App。
+停用立即拒绝新调用，已开始的调用允许完成。Core 组合 Actors 与 AdminActors App。
 
 每个输入开始前对照目录修订；显式刷新在当前工具协议组的全部结果落盘后生效。
 保留未变实例和资源，仅替换修订改变的 MCP 实例，不重启 Actor、不清空上下文、
@@ -1394,7 +1394,7 @@ profile 与账号凭据版本绑定保证会话权限。
 同一 profile 的窗口；后台重启后重连已核实的本机服务。CLI 与可选浏览器入口保留。
 Android 将同一服务与 Actor/App 核心编译为 APK 内的 Rust 原生库，使用 OS 私有目录，
 不启动桌面 daemon、CLI 子进程或独立 root。它可以创建账号并独立推理，也可以成为
-同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、Web、Artifacts、PhoneUse；账号 Core 直接仅用 Actors；
+同账号共享核心的执行设备。设备可为普通 Actor 提供 Actors、Files、Web、Artifacts、PhoneUse；账号 Core 直接组合 Actors 与 AdminActors；
 终端不安装，未实现的进程隔离始终拒绝。Files 使用目录句柄与实际打开 FD 校验，
 Android 上以 O_PATH 遍历不可列举的系统祖先目录，仅在授权目标读取目录内容；
 创建文件用 renameat2 的 RENAME_NOREPLACE 原子提交，避免 SELinux 禁止的硬链接，
@@ -1719,3 +1719,38 @@ left. Connectors preserve the projection of the attachment face's 3D normal and
 approach the content panel vertically. They prefer one rounded bend, otherwise
 two, avoiding projected plates and visible controls. No file chips, order controls or
 Actor-update counters remain.
+
+
+## Actor collaboration and administration composition
+
+Every Actor installs the same Actors App with identical schemas. Core additionally
+installs AdminActors; ordinary Actors never receive it. The native account transport
+wraps each App without substituting Core-specific schemas. Null stage_id selects the
+local device for local execution; the shared Core selects an explicit target for
+routed operations. Device-side epoch and account authority checks remain mandatory.
+
+Actors contains creation/import, messaging, request status/cancellation, own history
+and resources, permission applications, yield, and one `reply(content, finish_turn)`
+operation addressed to the active input's original requester. Reply capabilities do
+not depend on the caller's role. Publication and checkpoint rules belong to the
+runtime, including the account Core's committed user deliveries.
+
+AdminActors contains devices, stop, archive/unarchive, immutable appeal decisions,
+`set_model`, and `read_conversation`. Each operation revalidates the server-bound
+Core input; target operations enforce account membership and remote authority.
+Model changes cannot target Core and do not stop or recreate hosted workers or Apps.
+Current inference and its tool group settle under their existing snapshot; the next
+inference loads the latest model and calibration binding. Vision metadata refreshes
+without discarding terminal, GUI or browser resources. A text-only model receives
+owned image references rather than unsupported image parts; durable history remains
+unchanged and vision models can materialize the original images again. Owner model preferences use
+the same persistence path. Provider configuration replacement retains its separate
+lifecycle shutdown contract.
+
+Conversation reads reuse the Contacts bubble projection. They contain input,
+assistant, sent-message and reply text, never reasoning, tool arguments/results,
+provider transcripts or execution authority. Attachment entries are resource URI
+references and grant no byte access. Pages are bounded by both item count and encoded
+size; actor-bound cursors continue long UTF-8 messages and attachment references
+without truncating their source. `admin-actors.md` is a Core-only system source,
+assembled and visualized through the same prompt file composition as other sources.

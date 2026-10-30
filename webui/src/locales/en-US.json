@@ -515,6 +515,10 @@
     "suggestions_failed": "Could not load suggestions. Try again."
   },
   "tool_presentation": {
+    "cancel_request": "Cancel request",
+    "change_model": "Change model",
+    "resolve_permission": "Review permission",
+    "view_devices": "View devices",
     "update_app_settings": "Update app settings",
     "sudo_execute": "Run outside sandbox",
     "sudo_execute_as_admin": "Run as administrator",

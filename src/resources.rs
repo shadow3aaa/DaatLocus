@@ -216,8 +216,16 @@ pub fn model_request(
     system: &ActorSystem,
     actor: &str,
     mut request: crate::model_protocol::AgentTurnRequest,
+    vision: bool,
 ) -> Result<crate::model_protocol::AgentTurnRequest> {
     use crate::model_protocol::{AgentContent, AgentContentPart, AgentMessage};
+    let reference = |resource: &Resource| AgentContentPart::Text {
+        text: format!(
+            "Image attachment: {}. This model cannot view images. Resource: {}",
+            resource.name,
+            resource.uri(actor)
+        ),
+    };
     for message in &mut request.messages {
         if let AgentMessage::User { content } = message {
             let mut parts = Vec::new();
@@ -232,6 +240,15 @@ pub fn model_request(
                             "image/png" | "image/jpeg" | "image/gif" | "image/webp"
                         ) {
                             return Err(StageError::Invalid("Unsupported image resource"));
+                        }
+                        if !vision {
+                            if export(system, actor, &resource.id)? != *resource {
+                                return Err(StageError::Forbidden(
+                                    "Resource does not belong to this Actor",
+                                ));
+                            }
+                            parts.push(reference(resource));
+                            continue;
                         }
                         use base64::Engine;
                         let bytes = bytes(system, actor, resource)?;
@@ -269,6 +286,10 @@ pub fn model_request(
                         })?;
                         if resource.media_type != *media_type {
                             return Err(StageError::Conflict("Image resource type changed"));
+                        }
+                        if !vision {
+                            parts.push(reference(&resource));
+                            continue;
                         }
                         use base64::Engine;
                         let bytes = bytes(system, actor, &resource)?;
@@ -555,7 +576,7 @@ mod tests {
             tools: vec![],
         };
         let resolve = |system: &ActorSystem| {
-            let actual = model_request(system, "root", request.clone()).unwrap();
+            let actual = model_request(system, "root", request.clone(), true).unwrap();
             let AgentMessage::User { content } = &actual.messages[0] else {
                 panic!("expected image input");
             };
@@ -571,6 +592,11 @@ mod tests {
             );
         };
         resolve(&target);
+        let blind = model_request(&target, "root", request.clone(), false).unwrap();
+        let encoded = serde_json::to_string(&blind).unwrap();
+        assert!(encoded.contains(&resource.uri("root")));
+        assert!(!encoded.contains("data_base64"));
+        assert!(model_request(&target, "another-actor", request.clone(), false).is_err());
         target.shutdown().await;
         drop(target);
         let target = ActorSystem::open(
@@ -584,13 +610,13 @@ mod tests {
             target.seed_test_actor("root");
         }
         resolve(&target);
-        assert!(model_request(&target, "another-actor", request.clone()).is_err());
+        assert!(model_request(&target, "another-actor", request.clone(), true).is_err());
         let mut changed = resource.clone();
         changed.content.hash = "0".repeat(64);
         assert!(bytes(&target, "root", &changed).is_err());
         let path = target.store().resource("root", &resource.id).unwrap().path;
         std::fs::write(path, b"replaced image").unwrap();
-        assert!(model_request(&target, "root", request).is_err());
+        assert!(model_request(&target, "root", request, true).is_err());
         source.shutdown().await;
         target.shutdown().await;
     }

@@ -85,7 +85,7 @@ impl SystemPrompt {
                 crate::accounts::AccountStore::open(&system.account_credentials_dir())?
                     .current()?
                     .map_or_else(|| "the user".to_owned(), |record| record.name.clone());
-            prompt = prompt!("core.md" { account_name: &account_name });
+            prompt = prompt!("core.md" { account_name: &account_name }, "admin-actors.md");
         }
         let models = available_models(&system.config());
         prompt

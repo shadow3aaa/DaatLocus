@@ -644,7 +644,10 @@ mod tests {
         let batch = capture(&source, "account-a", leader, 1).unwrap().unwrap();
         copy(&source, &target, &batch);
         commit(&target, &batch, follower).unwrap();
-        assert_eq!(target.actor(ACTOR_ID).unwrap().config.apps, ["actors"]);
+        assert_eq!(
+            target.actor(ACTOR_ID).unwrap().config.apps,
+            ["actors", "admin_actors"]
+        );
         assert_eq!(
             target.actor(ACTOR_ID).unwrap().config.instructions,
             "Keep shared identity"
@@ -1224,7 +1227,9 @@ mod tests {
         let leader = StageId::new();
         let input = a.enqueue(input(), None).unwrap();
         a.claim_next(ACTOR_ID).unwrap().unwrap();
-        let receipt = a.deliver(ACTOR_ID, &input.id, "ack", "Started").unwrap();
+        let receipt = a
+            .deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+            .unwrap();
         assert!(
             a.delivery_receipt(ACTOR_ID, &input.id, "ack")
                 .unwrap()
@@ -1241,11 +1246,13 @@ mod tests {
         );
 
         assert_eq!(
-            a.deliver(ACTOR_ID, &input.id, "ack", "Started").unwrap().id,
+            a.deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+                .unwrap()
+                .id,
             receipt.id
         );
         assert!(
-            a.deliver(ACTOR_ID, &input.id, "ack", "Changed content")
+            a.deliver(ACTOR_ID, &input.id, "ack", "Changed content", false)
                 .is_err()
         );
         assert_eq!(a.message(&input.id).unwrap().status, MessageStatus::Running);
@@ -1277,7 +1284,9 @@ mod tests {
             Some("Started")
         );
         assert_eq!(
-            b.deliver(ACTOR_ID, &input.id, "ack", "Started").unwrap().id,
+            b.deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+                .unwrap()
+                .id,
             receipt.id
         );
         b.publish_delivery(&receipt.id).unwrap();
@@ -1290,7 +1299,10 @@ mod tests {
         .unwrap();
         assert_eq!(b.message(&input.id).unwrap().reply.as_deref(), Some(""));
         assert_eq!(b.messages(ACTOR_ID, None, 100).unwrap().items.len(), 2);
-        assert!(b.deliver(ACTOR_ID, &input.id, "late", "Too late").is_err());
+        assert!(
+            b.deliver(ACTOR_ID, &input.id, "late", "Too late", false)
+                .is_err()
+        );
     }
     #[test]
     fn compacted_checkpoint_history_recovers_through_a_long_active_snapshot() {

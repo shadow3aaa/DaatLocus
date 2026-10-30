@@ -211,7 +211,7 @@ impl ActorSystem {
     pub(crate) fn core_device_actor(&self) -> Result<ActorRecord> {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID)?;
         actor.config.workspace = self.device_workspace().to_owned();
-        actor.config.apps = vec!["actors".into()];
+        actor.config.apps = vec!["actors".into(), "admin_actors".into()];
         Ok(actor)
     }
     pub(crate) fn app_actor(&self, id: &str) -> Result<ActorRecord> {
@@ -444,7 +444,7 @@ impl ActorSystem {
         for mut actor in system.store().actors()? {
             let previous = actor.config.clone();
             if actor.id == crate::stage::shared::ACTOR_ID {
-                actor.config.apps = vec!["actors".into()];
+                actor.config.apps = vec!["actors".into(), "admin_actors".into()];
             } else {
                 actor.config = system.hosted_config(actor.config)?;
             }
@@ -601,7 +601,7 @@ impl ActorSystem {
             config: normalize_config(ActorConfig {
                 name: "Daat Locus".into(),
                 workspace,
-                apps: vec!["actors".into()],
+                apps: vec!["actors".into(), "admin_actors".into()],
                 model: None,
                 instructions: String::new(),
             })?,
@@ -1298,6 +1298,35 @@ impl ActorSystem {
         }
         Ok(actor)
     }
+    pub(crate) fn request_for_tool(
+        &self,
+        caller: &ActorCallContext,
+        id: &str,
+        cancel: bool,
+    ) -> Result<MessageRecord> {
+        self.record_for_tool(&caller.actor_id, caller)?;
+        let selected = self.store().message(id)?;
+        if selected.actor_id != caller.actor_id {
+            return self.delegated_request(&caller.actor_id, id);
+        }
+        let current = self.store().message(&caller.message_id)?;
+        if current.remote_authority != selected.remote_authority
+            || (cancel && caller.remote_read_only)
+        {
+            return Err(forbidden(
+                "This input cannot control an unrelated request authority",
+            ));
+        }
+        if cancel && selected.id == current.id {
+            return Err(forbidden("Use yield to finish the current input"));
+        }
+        if caller.actor_id == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
+            return Err(forbidden(
+                "Account inputs are controlled on the current Core worker",
+            ));
+        }
+        Ok(selected)
+    }
     pub fn delegated_request(&self, sender: &str, id: &str) -> Result<MessageRecord> {
         let message = self.store().message(id)?;
         if !matches!(&message.source, MessageSource::Actor { actor_id } if actor_id == sender)
@@ -1314,15 +1343,55 @@ impl ActorSystem {
         input: &str,
         call: &str,
         content: &str,
+        finish_turn: bool,
     ) -> Result<MessageRecord> {
         if sender == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
             return Err(forbidden("Core worker no longer owns execution"));
         }
-        let delivery = self.store().deliver(sender, input, call, content)?;
+        let delivery = self
+            .store()
+            .deliver(sender, input, call, content, finish_turn)?;
         if delivery.status == MessageStatus::Queued {
             self.wake(&delivery.actor_id);
         }
         Ok(delivery)
+    }
+    pub(crate) async fn publish_actor_reply(&self, actor: &str, delivery: &str) -> Result<()> {
+        if actor == crate::stage::shared::ACTOR_ID {
+            self.checkpoint_core().await?;
+        }
+        self.store().publish_delivery(delivery)
+    }
+
+    pub(crate) fn inspect_from_core(
+        &self,
+        target: &str,
+        caller: &ActorCallContext,
+    ) -> Result<ActorRecord> {
+        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        if !self.account_actor_ids(&core.id)?.contains(target)
+            || self
+                .store()
+                .message(&caller.message_id)?
+                .remote_authority
+                .is_some()
+        {
+            return Err(forbidden(
+                "Actor observation requires account Core authority",
+            ));
+        }
+        self.actor(target)
+    }
+
+    pub(crate) async fn set_model_from_core(
+        &self,
+        target: &str,
+        model: Option<String>,
+        caller: &ActorCallContext,
+    ) -> Result<ActorRecord> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.validate_actor_stop(target, caller)?;
+        self.persist_model_preference(target, Some(model))
     }
     pub fn message_from_actor(
         &self,
@@ -1650,20 +1719,21 @@ impl ActorSystem {
         id: &str,
         model: Option<Option<String>>,
     ) -> Result<ActorRecord> {
-        self.update_owned_with(id, |mut config| {
-            if let Some(model) = model {
-                config.model = model;
-            }
-            let checked = normalize_config(config.clone())?;
-            if checked.workspace != config.workspace {
-                return Err(forbidden(
-                    "Preference changes cannot rebind filesystem grants",
-                ));
-            }
-            Ok(config)
-        })
-        .await
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.persist_model_preference(id, model)
     }
+    fn persist_model_preference(
+        &self,
+        id: &str,
+        model: Option<Option<String>>,
+    ) -> Result<ActorRecord> {
+        let mut actor = self.actor(id)?;
+        let Some(model) = model else { return Ok(actor) };
+        actor.config.model = model.clone();
+        self.validate_config(&actor.config)?;
+        self.store().set_model_preference(id, model)
+    }
+
     async fn update_owned_with(
         &self,
         id: &str,
@@ -2258,17 +2328,20 @@ mod tests {
             .unwrap();
         let mut input = system.store().claim_next("core").unwrap().unwrap_or(input);
 
-        let mut apps = AppManager::new(vec![Box::new(crate::actor_app::ActorApp::new(
-            "core".into(),
-            system.clone(),
-        ))])
+        let mut apps = AppManager::new(vec![
+            Box::new(crate::actor_app::ActorApp::new(
+                "core".into(),
+                system.clone(),
+            )),
+            Box::new(crate::admin_actors_app::AdminActorsApp::new(system.clone())),
+        ])
         .unwrap();
         for name in ["archive", "unarchive"] {
             let core = system.actor("core").unwrap();
             let context = system.execution_context(&core, &input).unwrap();
             let call = AgentToolCall {
                 id: format!("archive-lifecycle-{name}"),
-                name: format!("actors__{name}"),
+                name: format!("admin_actors__{name}"),
                 arguments: serde_json::json!({"stage_id":null,"actor_id":"root"}),
             };
             apps.validate_tool_call(&call, &context).unwrap();
@@ -2513,7 +2586,7 @@ mod tests {
         let context = system
             .execution_context(&system.actor("core").unwrap(), &update)
             .unwrap();
-        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let mut app = crate::admin_actors_app::AdminActorsApp::new(system.clone());
         for name in ["archive", "unarchive"] {
             assert!(
                 app.execute_tool(
@@ -2831,7 +2904,9 @@ mod tests {
             .unwrap()
             .model_tool_specs()
             .unwrap();
-        assert!(tools.iter().all(|tool| tool.name.starts_with("actors__")));
+        assert!(tools.iter().all(
+            |tool| tool.name.starts_with("actors__") || tool.name.starts_with("admin_actors__")
+        ));
         let actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
         let tools = crate::builtin_apps::create_apps(&actor, system.clone(), &system.config())
             .unwrap()
@@ -3185,5 +3260,251 @@ mod tests {
         assert!(directory.path().exists());
         system.shutdown().await;
         assert!(survivor_path.is_dir());
+    }
+    #[tokio::test]
+    async fn administrative_apps_are_composed_and_cannot_be_forged_by_workers() {
+        use crate::{app::App, model_protocol::AgentToolCall};
+        let (_dir, system) = fixture().await;
+        let common = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let worker = crate::actor_app::ActorApp::new("root".into(), system.clone());
+        assert_eq!(
+            serde_json::to_value(common.tool_specs()).unwrap(),
+            serde_json::to_value(worker.tool_specs()).unwrap()
+        );
+        assert!(common.tool_specs().iter().any(|tool| tool.name == "reply"));
+        assert!(!common.tool_specs().iter().any(|tool| matches!(
+            tool.name.as_str(),
+            "stop" | "archive" | "set_model" | "deliver" | "report"
+        )));
+        let installed = crate::builtin_apps::create_apps(
+            &system.actor("root").unwrap(),
+            system.clone(),
+            &system.config(),
+        )
+        .unwrap();
+        assert!(
+            !installed
+                .app_ids()
+                .iter()
+                .any(|id| id.as_str() == "admin_actors")
+        );
+        let input = system
+            .send_user("core", "Coordinate work".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("core").unwrap(), &input)
+            .unwrap();
+        let mut admin = crate::admin_actors_app::AdminActorsApp::new(system.clone());
+        for spec in admin.tool_specs() {
+            crate::schema_utils::validate_model_facing_schema(&spec.input_schema).unwrap();
+        }
+        let mut call = AgentToolCall {
+            id: "model".into(),
+            name: "set_model".into(),
+            arguments: serde_json::json!({"stage_id":null,"actor_id":"root","model":"mock"}),
+        };
+        let before = system.actor("root").unwrap();
+        assert_eq!(
+            admin.execute_tool(&call, &context).await.unwrap().payload["model"],
+            "mock"
+        );
+        assert_eq!(
+            system.actor("root").unwrap().created_at_ms,
+            before.created_at_ms
+        );
+        call.arguments["model"] = serde_json::json!("missing");
+        assert!(admin.execute_tool(&call, &context).await.is_err());
+        assert_eq!(
+            system.actor("root").unwrap().config.model.as_deref(),
+            Some("mock")
+        );
+        call.arguments["model"] = serde_json::json!("mock");
+        call.arguments["actor_id"] = serde_json::json!("core");
+        assert!(admin.execute_tool(&call, &context).await.is_err());
+        call.arguments["actor_id"] = serde_json::json!("root");
+        let mut readonly = context.clone();
+        readonly.actor_call.as_mut().unwrap().remote_read_only = true;
+        assert!(admin.execute_tool(&call, &readonly).await.is_err());
+        let input = system
+            .send_user("root", "Worker input".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        let worker_context = system
+            .execution_context(&system.actor("root").unwrap(), &input)
+            .unwrap();
+        assert!(admin.execute_tool(&call, &worker_context).await.is_err());
+        call.name = "read_conversation".into();
+        call.arguments =
+            serde_json::json!({"stage_id":null,"actor_id":"core","cursor":null,"limit":8});
+        assert!(admin.execute_tool(&call, &worker_context).await.is_err());
+        system.store().stage_transaction(|tx|{tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id),account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('core','first'),('root','second');")?;Ok(())}).unwrap();
+        call.arguments["actor_id"] = serde_json::json!("root");
+        assert!(admin.execute_tool(&call, &context).await.is_err());
+        call.name = "set_model".into();
+        call.arguments = serde_json::json!({"stage_id":null,"actor_id":"root","model":"mock"});
+        assert!(admin.execute_tool(&call, &context).await.is_err());
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn administrative_conversation_reads_are_bounded_bubbles_without_tool_or_reasoning_data()
+    {
+        use crate::model_protocol::AgentToolCall;
+        let (_dir, system) = fixture().await;
+        let text = "消息\"\n".repeat(1400);
+        let input = system
+            .send_user("root", text.clone(), vec![], None)
+            .unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        for (channel, text) in [
+            ("assistant", "VISIBLE_COMMENTARY"),
+            ("reasoning", "PRIVATE_REASONING"),
+        ] {
+            system
+                .store()
+                .append_event(
+                    "root",
+                    super::super::ActorEvent::GenerationDelta {
+                        message_id: input.id.clone(),
+                        generation: 1,
+                        channel: channel.into(),
+                        text: text.into(),
+                    },
+                )
+                .unwrap();
+        }
+        let call = AgentToolCall {
+            id: "private".into(),
+            name: "files__read_file".into(),
+            arguments: serde_json::json!({"path":"PRIVATE_ARGUMENTS"}),
+        };
+        system
+            .store()
+            .tool_started("root", &input.id, &call)
+            .unwrap();
+        system
+            .store()
+            .tool_finished(
+                "root",
+                &input.id,
+                &call,
+                serde_json::json!({"content":"PRIVATE_TOOL_OUTPUT"}),
+                "PRIVATE_MODEL_PROTOCOL",
+                "PRIVATE_TOOL_SUMMARY",
+                None,
+            )
+            .unwrap();
+        let mut cursor = None;
+        let mut received = String::new();
+        let mut visible = String::new();
+        let mut pages = 0;
+        loop {
+            let page = system
+                .store()
+                .conversation_bubbles("root", cursor.as_deref(), 2, 1024)
+                .unwrap();
+            let encoded = serde_json::to_string(&page).unwrap();
+            assert!(encoded.len() <= 1024, "{}", encoded.len());
+            assert!(!encoded.contains("PRIVATE_"));
+            for item in &page.items {
+                if item.kind == "input" {
+                    received.push_str(&item.content);
+                }
+                visible.push_str(&item.content);
+            }
+            pages += 1;
+            assert!(pages < 200);
+            if page.next_cursor.is_none() {
+                break;
+            }
+            if cursor.is_none() {
+                assert!(
+                    system
+                        .store()
+                        .conversation_bubbles("core", page.next_cursor.as_deref(), 2, 1024)
+                        .is_err()
+                );
+            }
+            cursor = page.next_cursor;
+        }
+        assert!(pages > 1);
+        assert_eq!(received, text);
+        assert!(visible.contains("VISIBLE_COMMENTARY"));
+        system.shutdown().await;
+    }
+    #[tokio::test]
+    async fn common_reply_can_finish_a_delegated_input_with_one_result() {
+        use crate::{app::App, model_protocol::AgentToolCall};
+        let (_dir, system) = fixture().await;
+        let owner = system
+            .send_user("core", "Coordinate".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("core").unwrap().unwrap();
+        let mut request = owner.clone();
+        request.id = uuid::Uuid::new_v4().to_string();
+        request.seq = 0;
+        request.actor_id = "root".into();
+        request.status = MessageStatus::Queued;
+        request.source = MessageSource::Actor {
+            actor_id: "core".into(),
+        };
+        request.reply_to = ReplyTarget::Actor {
+            actor_id: "core".into(),
+            request_id: owner.id.clone(),
+        };
+        let request = system.store().enqueue(request, None).unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        let context = system
+            .execution_context(&system.actor("root").unwrap(), &request)
+            .unwrap();
+        let call = AgentToolCall {
+            id: "final-reply".into(),
+            name: "actors__reply".into(),
+            arguments: serde_json::json!({"content":"UNIQUE_RESULT","finish_turn":true}),
+        };
+        system
+            .store()
+            .tool_started("root", &request.id, &call)
+            .unwrap();
+        let mut app = crate::actor_app::ActorApp::new("root".into(), system.clone());
+        let result = app
+            .execute_tool(&call.with_name("reply"), &context)
+            .await
+            .unwrap();
+        system
+            .store()
+            .tool_finished(
+                "root",
+                &request.id,
+                &call,
+                result.payload,
+                "reply sent",
+                "Reply",
+                None,
+            )
+            .unwrap();
+        assert!(
+            system
+                .store()
+                .reply_turn_delivered("root", &request.id)
+                .unwrap()
+        );
+        let duplicate = system
+            .store()
+            .finish_message(&request.id, MessageStatus::Completed, Some(""), None)
+            .unwrap();
+        assert!(duplicate.is_none());
+        let results = system
+            .store()
+            .messages("core", None, 32)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|input| input.kind == MessageKind::Result)
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("UNIQUE_RESULT"));
+        system.shutdown().await;
     }
 }

@@ -85,7 +85,7 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     );
     assert_eq!(
         fixture.system.actor("core").unwrap().config.apps,
-        ["actors"]
+        ["actors", "admin_actors"]
     );
     assert!(
         fixture

@@ -1,4 +1,4 @@
-//! The account Actor exposes one portable Actors App. Device execution tools
+//! The account Actor composes portable Apps using their unchanged schemas. Device tools
 //! belong to hosted workers and cannot be invoked through this interface.
 use super::{
     StageId,
@@ -9,142 +9,33 @@ use super::{
 use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
-    app::{
-        App, AppId, AppManager, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec,
-        EmptyAppArgs,
-    },
+    admin_actors_app::AdminActorsApp,
+    app::{App, AppId, AppManager, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
-    schema_utils::model_schema_for,
 };
 use async_trait::async_trait;
-use daat_locus_macros::model_schema;
-use schemars::JsonSchema;
-use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct CreateArgs {
-    stage_id: String,
-    name: String,
-    workspace: Option<String>,
-    /// Additional absolute read/write roots. The working directory is included automatically; Core grants these device scopes without review.
-    initial_authorization: Option<crate::actor_app::InitialAuthorizationGroup>,
-    instructions: Option<String>,
-    /// Exact configured model name from the available models list; never inherited.
-    model: String,
-}
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ImportArgs {
-    stage_id: String,
-    resource_id: String,
-    name: String,
-    /// Exact configured model name from the available models list.
-    model: String,
-    instructions: String,
-}
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListArgs {
-    stage_id: String,
-    cursor: Option<usize>,
-    limit: Option<usize>,
-}
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MessageArgs {
-    stage_id: String,
-    actor_id: String,
-    reply_to: Option<String>,
-    content: String,
-}
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RequestArgs {
-    stage_id: String,
-    message_id: String,
-}
-
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ActorTargetArgs {
-    stage_id: String,
-    actor_id: String,
-}
-
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ResolveAppealArgs {
-    stage_id: String,
-    approval_id: String,
-    decision: crate::actor_app::AppealDecision,
-    reason: String,
-}
-
-#[model_schema]
-#[derive(Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct AppealArgs {
-    stage_id: String,
-    approval_id: Option<String>,
-    tool_result_id: Option<String>,
-    /// Exact read paths; null or [] requests no read scope.
-    readable_roots: Option<Vec<String>>,
-    /// Exact write paths; null or [] requests no write scope.
-    writable_roots: Option<Vec<String>>,
-    explanation: String,
-}
-
-struct AccountActors {
+struct AccountApp {
     controller: Arc<Controller>,
-    local: ActorApp,
+    local: Box<dyn App>,
     actor: ActorRecord,
     system: ActorSystem,
 }
 #[async_trait]
-impl App for AccountActors {
+impl App for AccountApp {
     fn can_passivate(&self) -> bool {
         true
     }
     fn id(&self) -> AppId {
-        AppId::new("actors").expect("Actors App")
+        self.local.id()
+    }
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.local.output_schema()
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
-        let mut specs = self.local.tool_specs();
-        for spec in &mut specs {
-            spec.input_schema = match spec.name.as_str() {
-                "list" => model_schema_for::<ListArgs>(),
-                "create" => model_schema_for::<CreateArgs>(),
-                "import_conversation" => model_schema_for::<ImportArgs>(),
-                "message" => model_schema_for::<MessageArgs>(),
-                "status" | "cancel" => model_schema_for::<RequestArgs>(),
-                "stop" | "archive" | "unarchive" => model_schema_for::<ActorTargetArgs>(),
-                "resolve_approval_appeal" => model_schema_for::<ResolveAppealArgs>(),
-                "appeal_approval" => model_schema_for::<AppealArgs>(),
-                _ => continue,
-            };
-            spec.description = spec
-                .description
-                .replace(
-                    "Null stage_id selects the current device.",
-                    "Use the explicit stage_id returned by devices.",
-                )
-                .replace(
-                    "Null stage_id selects the current device;",
-                    "Use an explicit stage_id;",
-                );
-        }
-        specs.push(AppToolSpec {name:"devices".into(), description:"List authorized account devices and actual connectivity. Select an explicit stage_id for hosted Actor operations. Offline targets are never silently moved.".into(),input_schema:model_schema_for::<EmptyAppArgs>()});
-        specs
+        self.local.tool_specs()
     }
 
     async fn execute_tool(
@@ -165,24 +56,15 @@ impl App for AccountActors {
             ));
         }
         self.system.record_for_tool(shared::ACTOR_ID, caller)?;
-        self.local.check_import_operation(call, context)?;
-        if call.name == "devices" {
-            return Ok(AppToolExecutionResult::new(
-                "Account devices",
-                self.controller
-                    .actor_devices()
-                    .map_err(|error| miette::miette!("{error}"))?,
-                None,
-            ));
-        }
         if matches!(
             call.name.as_str(),
             "read_history"
                 | "read_resource"
-                | "deliver"
+                | "reply"
                 | "yield"
                 | "appeal_approval"
                 | "resolve_approval_appeal"
+                | "devices"
         ) {
             return self.local.execute_tool(call, context).await;
         }
@@ -219,11 +101,12 @@ impl App for AccountActors {
         else {
             return Err(miette::miette!("Device Actor capabilities unavailable"));
         };
+        let app_id = self.local.id().to_string();
         let installation = apps
             .into_iter()
             .find(|app| {
                 app.stage_id == stage
-                    && app.app == "actors"
+                    && app.app == app_id
                     && app.tools.iter().any(|tool| tool.name == call.name)
             })
             .ok_or_else(|| miette::miette!("Device does not permit this Actor operation"))?;
@@ -237,7 +120,7 @@ impl App for AccountActors {
                 Request::Invoke {
                     epoch: self.controller.epoch(),
                     message: caller.message_id.clone(),
-                    app: "actors".into(),
+                    app: app_id,
                     revision: installation.revision,
                     call: routed,
                     identity_read_only: self.actor.remote_read_only,
@@ -270,10 +153,21 @@ pub fn manager(
     actor: ActorRecord,
     system: ActorSystem,
 ) -> miette::Result<AppManager> {
-    AppManager::new(vec![Box::new(AccountActors {
-        controller,
-        local: ActorApp::new(shared::ACTOR_ID.into(), system.clone()),
-        actor,
-        system,
-    })])
+    let local: Vec<Box<dyn App>> = vec![
+        Box::new(ActorApp::new(shared::ACTOR_ID.into(), system.clone())),
+        Box::new(AdminActorsApp::new(system.clone())),
+    ];
+    AppManager::new(
+        local
+            .into_iter()
+            .map(|local| {
+                Box::new(AccountApp {
+                    controller: controller.clone(),
+                    local,
+                    actor: actor.clone(),
+                    system: system.clone(),
+                }) as Box<dyn App>
+            })
+            .collect(),
+    )
 }

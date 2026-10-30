@@ -32,6 +32,9 @@ impl FilesApp {
 
 #[async_trait]
 impl App for FilesApp {
+    fn set_vision_support(&mut self, supported: bool) {
+        self.supports_vision = supported;
+    }
     fn can_passivate(&self) -> bool {
         true
     }

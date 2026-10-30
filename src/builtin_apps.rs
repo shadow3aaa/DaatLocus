@@ -6,6 +6,7 @@ use miette::{Result, miette};
 use crate::{
     actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
+    admin_actors_app::AdminActorsApp,
     app::{App, AppManager},
     artifacts_app::ArtifactsApp,
     config::Config,
@@ -33,6 +34,7 @@ pub const DEVICE_APPS: &[&str] = &[
     "phone_use",
 ];
 pub(crate) const ALL_APPS: &[&str] = &[
+    "admin_actors",
     "actors",
     "files",
     "terminal",
@@ -58,13 +60,8 @@ pub fn validate_app_names(names: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn create_apps(
-    actor: &ActorRecord,
-    system: ActorSystem,
-    config: &Config,
-) -> Result<AppManager> {
-    validate_app_names(&actor.config.apps)?;
-    let model_key = actor.config.model.as_deref().unwrap_or(&config.main_model);
+pub(crate) fn vision_support(actor: &ActorRecord, config: &Config) -> Result<bool> {
+    let model_key = config.actor_model_name(actor.config.model.as_deref());
     let model = config
         .models
         .get(model_key)
@@ -72,21 +69,34 @@ pub fn create_apps(
     let supports_vision = model.supports_vision.unwrap_or_else(|| {
         catalog_model_capacity(&model.model_id).is_some_and(|capacity| capacity.supports_vision)
     });
+    Ok(supports_vision)
+}
+
+pub fn create_apps(
+    actor: &ActorRecord,
+    system: ActorSystem,
+    config: &Config,
+) -> Result<AppManager> {
+    validate_app_names(&actor.config.apps)?;
     let state_dir = system.actor_state_dir(&actor.id);
     let mut apps: Vec<Box<dyn App>> = Vec::new();
     let installed = if actor.id == crate::stage::shared::ACTOR_ID {
-        &["actors"][..]
+        &["actors", "admin_actors"][..]
     } else {
         DEVICE_APPS
     };
     for name in installed {
         let inner: Box<dyn App> = match *name {
+            "admin_actors" => Box::new(AdminActorsApp::new(system.clone())),
             "actors" => Box::new(ActorApp::new(actor.id.clone(), system.clone())),
             "apps_manager" => Box::new(crate::mcp::AppsManager::new(
                 system.app_registry(),
                 actor.id.clone(),
             )),
-            "files" => Box::new(FilesApp::new(state_dir.join("images"), supports_vision)),
+            "files" => Box::new(FilesApp::new(
+                state_dir.join("images"),
+                vision_support(actor, config)?,
+            )),
             "terminal" if !cfg!(target_os = "android") => {
                 Box::new(TerminalApp::with_system(system.clone()))
             }
@@ -100,7 +110,7 @@ pub fn create_apps(
                 actor.id.clone(),
                 system.clone(),
                 actor.remote_read_only,
-                supports_vision,
+                vision_support(actor, config)?,
             )),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
             #[cfg(any(
@@ -111,7 +121,7 @@ pub fn create_apps(
             "computer_use" | "phone_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
                 actor.id.clone(),
                 system.clone(),
-                supports_vision,
+                vision_support(actor, config)?,
             )),
             _ => return Err(miette!("unknown App `{name}`")),
         };
@@ -139,5 +149,26 @@ mod tests {
     fn unknown_and_duplicate_app_configs_fail() {
         assert!(validate_app_names(&["unknown".into()]).is_err());
         assert!(validate_app_names(&["files".into(), "files".into()]).is_err());
+    }
+    #[tokio::test]
+    async fn portable_apps_do_not_require_a_device_model_or_vision_runtime() {
+        let dir = crate::sandbox::test_support::scoped_directory();
+        let system = ActorSystem::open(
+            dir.path().join("state"),
+            dir.path().join("workspace"),
+            Config::default(),
+        )
+        .await
+        .unwrap();
+        let core = system.actor(crate::stage::shared::ACTOR_ID).unwrap();
+        let apps = create_apps(&core, system.clone(), &system.config()).unwrap();
+        assert_eq!(
+            apps.app_ids()
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>(),
+            ["actors", "admin_actors"]
+        );
+        system.shutdown().await;
     }
 }

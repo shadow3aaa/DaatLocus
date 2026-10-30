@@ -83,7 +83,9 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
             let actor = system.execution_actor(&message)?;
             system.store().set_status(&actor_id, ActorStatus::Running)?;
             if actor_id == crate::stage::shared::ACTOR_ID
-                || installed_config.as_ref() != Some(&actor.config)
+                || installed_config
+                    .as_ref()
+                    .is_none_or(|installed| !installed.same_apps(&actor.config))
             {
                 shutdown_apps(&mut apps).await;
                 apps = Some(
@@ -300,6 +302,58 @@ async fn refresh_apps(
     Ok(())
 }
 
+struct InferenceModel {
+    vision: bool,
+    provider: Arc<dyn ModelProvider>,
+    usage: super::ModelUsage,
+    timeout: Duration,
+    binding: String,
+}
+impl InferenceModel {
+    fn load(system: &ActorSystem, actor: &ActorRecord) -> Result<Self> {
+        let config = system.config();
+        let provider = system.provider(actor)?;
+        let model_name = config.actor_model_name(actor.config.model.as_deref());
+        let model_usage = super::ModelUsage::new(
+            model_name,
+            config
+                .models
+                .get(model_name)
+                .ok_or_else(|| miette!("Actor model is unavailable"))?,
+        );
+        let request_timeout = Duration::from_secs(
+            config
+                .models
+                .get(model_name)
+                .map_or(300, |model| model.request_timeout_secs)
+                .clamp(1, 1_200),
+        );
+        let binding = {
+            let model = config
+                .models
+                .get(model_name)
+                .ok_or_else(|| miette!("Actor model is unavailable"))?;
+            let mut provider =
+                serde_json::to_value(config.providers.get(&model.provider)).into_diagnostic()?;
+            if let Some(fields) = provider.as_object_mut() {
+                for field in ["api_key", "github_token", "auth_file"] {
+                    fields.remove(field);
+                }
+            }
+            crate::stage::digest(
+                &serde_json::to_vec(&(model_name, model, provider)).into_diagnostic()?,
+            )
+        };
+        Ok(Self {
+            vision: builtin_apps::vision_support(actor, &config)?,
+            provider,
+            usage: model_usage,
+            timeout: request_timeout,
+            binding,
+        })
+    }
+}
+
 async fn execute_message(
     system: &ActorSystem,
     actor: &ActorRecord,
@@ -308,8 +362,8 @@ async fn execute_message(
     apps: &mut AppManager,
 ) -> Result<Option<String>> {
     check_interruption(system, control, message)?;
-    let context = system.execution_context(actor, message)?;
-    let provider = system.provider(actor)?;
+    let mut context = system.execution_context(actor, message)?;
+    apps.set_vision_support(builtin_apps::vision_support(actor, &system.config())?);
     if actor.id != crate::stage::shared::ACTOR_ID {
         refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
@@ -324,37 +378,9 @@ async fn execute_message(
             .append_history(&actor.id, &message.id, &[input])?;
     }
     let mut window = ModelContext::load(system, actor, &context, tools).await?;
-    let config = system.config();
-    let model_name = config.actor_model_name(actor.config.model.as_deref());
-    let model_usage = super::ModelUsage::new(
-        model_name,
-        config
-            .models
-            .get(model_name)
-            .ok_or_else(|| miette!("Actor model is unavailable"))?,
-    );
-    let request_timeout = Duration::from_secs(
-        config
-            .models
-            .get(model_name)
-            .map_or(300, |model| model.request_timeout_secs)
-            .clamp(1, 1_200),
-    );
+    let mut model = InferenceModel::load(system, actor)?;
+    let mut selected_model = actor.config.model.clone();
     let mut generation = 0u32;
-    let binding = {
-        let model = config
-            .models
-            .get(model_name)
-            .ok_or_else(|| miette!("Actor model is unavailable"))?;
-        let mut provider =
-            serde_json::to_value(config.providers.get(&model.provider)).into_diagnostic()?;
-        if let Some(fields) = provider.as_object_mut() {
-            for field in ["api_key", "github_token", "auth_file"] {
-                fields.remove(field);
-            }
-        }
-        crate::stage::digest(&serde_json::to_vec(&(model_name, model, provider)).into_diagnostic()?)
-    };
     let mut call_ids = std::collections::HashSet::new();
     let mut after = 0;
     loop {
@@ -393,8 +419,9 @@ async fn execute_message(
             )?;
             return Ok(None);
         }
-        if actor.id == crate::stage::shared::ACTOR_ID
-            && system.store().core_turn_delivered(&message.id)?
+        if system
+            .store()
+            .reply_turn_delivered(&actor.id, &message.id)?
         {
             // All observations of the previous group have settled. Persist the
             // turn boundary so takeover does not ask the model to reply again.
@@ -406,32 +433,47 @@ async fn execute_message(
             return Ok(Some(String::new()));
         }
         Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+        let active = system.execution_actor(message)?;
+        if active.config.model != selected_model {
+            model = InferenceModel::load(system, &active)?;
+            context = system.execution_context(&active, message)?;
+            apps.set_vision_support(builtin_apps::vision_support(&active, &system.config())?);
+            window = ModelContext::load(
+                system,
+                &active,
+                &context,
+                apps.model_tool_specs_for_context(&context)?,
+            )
+            .await?;
+            selected_model = active.config.model;
+        }
         window.refresh_instructions(system, actor, &context).await?;
-        let baseline = ModelContext::baseline(system, &actor.id, &binding)?;
-        window.reload(system, message, provider.as_ref(), &baseline)?;
+        let baseline = ModelContext::baseline(system, &actor.id, &model.binding)?;
+        window.reload(system, message, model.provider.as_ref(), &baseline)?;
         check_interruption(system, control, message)?;
         if actor.id == crate::stage::shared::ACTOR_ID {
             system.checkpoint_core().await?;
         }
         let request = if !handoff_required {
-            window.admitted(provider.as_ref(), &baseline)
+            window.admitted(model.provider.as_ref(), &baseline)
         } else {
             None
         };
         let Some(request) = request else {
-            let request = window.handoff_request(message, provider.as_ref(), &baseline)?;
+            let request = window.handoff_request(message, model.provider.as_ref(), &baseline)?;
             let Some(response) = generate(
                 system,
                 actor,
                 message,
                 control,
-                provider.as_ref(),
+                model.provider.as_ref(),
                 request,
-                request_timeout,
+                model.timeout,
                 &mut generation,
-                &binding,
-                &model_usage,
+                &model.binding,
+                &model.usage,
                 &baseline,
+                model.vision,
                 false,
             )
             .await?
@@ -455,7 +497,10 @@ async fn execute_message(
                 .store()
                 .reset_model_context(&actor.id, &message.id, &note)?;
             window.history = vec![recovery];
-            if window.admitted(provider.as_ref(), &baseline).is_none() {
+            if window
+                .admitted(model.provider.as_ref(), &baseline)
+                .is_none()
+            {
                 return Err(miette!(
                     "System instructions, App definitions and handoff note exceed the model budget"
                 ));
@@ -468,13 +513,14 @@ async fn execute_message(
             actor,
             message,
             control,
-            provider.as_ref(),
+            model.provider.as_ref(),
             request,
-            request_timeout,
+            model.timeout,
             &mut generation,
-            &binding,
-            &model_usage,
+            &model.binding,
+            &model.usage,
             &baseline,
+            model.vision,
             true,
         )
         .await
@@ -795,7 +841,7 @@ async fn execute_call(
 ) -> Result<Vec<AgentContentPart>> {
     check_interruption(system, control, message)?;
     let current_actor = system.execution_actor(message)?;
-    if current_actor.config != actor.config {
+    if !current_actor.config.same_apps(&actor.config) {
         return Err(miette!("Actor configuration changed during execution"));
     }
     // Do not reuse the grants captured before a long model request. A freshly
@@ -1147,6 +1193,7 @@ async fn generate(
     binding: &str,
     model_usage: &super::ModelUsage,
     baseline: &TokenEstimateBaseline,
+    vision: bool,
     publish_progress: bool,
 ) -> Result<Option<AgentTurnStreamResult>> {
     let policy = AgentTurnRetryPolicy {
@@ -1201,7 +1248,7 @@ async fn generate(
         let future = tokio::time::timeout(
             policy.request_timeout_for_attempt(attempt),
             provider.complete_agent_turn(
-                crate::resources::model_request(system, &actor.id, request.clone())
+                crate::resources::model_request(system, &actor.id, request.clone(), vision)
                     .map_err(|error| miette!("{error}"))?,
                 options,
             ),

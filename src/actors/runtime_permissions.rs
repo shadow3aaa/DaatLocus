@@ -439,6 +439,44 @@ fn forward_to_core(
     }
 }
 
+pub(crate) async fn submit_from_actor(
+    system: &super::ActorSystem,
+    caller: &crate::app::ActorCallContext,
+    stage: crate::stage::StageId,
+    context: &crate::app::AppToolExecutionContext,
+    source: ApplicationSource,
+    application: super::ReviewApplication,
+) -> miette::Result<super::ApprovalRecord> {
+    if caller.actor_id == crate::stage::shared::ACTOR_ID
+        && let Some(core) = system.shared_core()
+    {
+        return core
+            .submit_approval_application(caller, stage, source, application)
+            .await
+            .map_err(miette::Report::new);
+    }
+    if stage
+        != system
+            .store()
+            .public_stage_id()
+            .map_err(|error| miette::miette!("{error}"))?
+    {
+        return Err(miette::miette!("Operation targets another device"));
+    }
+    let actor = system.record_for_tool(&caller.actor_id, caller)?;
+    let message = system.store().message(&caller.message_id)?;
+    submit(
+        system,
+        &actor,
+        &message,
+        &super::ActorControl::default(),
+        context,
+        source,
+        application,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod native_denial_tests {
     use super::*;

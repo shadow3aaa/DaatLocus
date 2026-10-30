@@ -59,6 +59,9 @@ fn core_requires_commit(db: &Connection) -> Result<bool> {
     ))?;
     Ok(!local)
 }
+fn reply_turn_delivered(db: &Connection, actor: &str, message: &str) -> Result<bool> {
+    sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__reply' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)",params![actor,message],|row|row.get(0)))
+}
 fn turn_yielded(db: &Connection, actor: &str, message: &str) -> Result<bool> {
     sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__yield' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", params![actor, message], |r|r.get(0)))
 }
@@ -162,12 +165,12 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
             "byte_len",
         ],
         "actors__create"
-        | "actors__stop"
+        | "admin_actors__stop"
         | "actors__import_conversation"
         | "actors__message"
-        | "actors__report"
-        | "actors__archive"
-        | "actors__unarchive" => &[
+        | "actors__reply"
+        | "admin_actors__archive"
+        | "admin_actors__unarchive" => &[
             "id",
             "actor_id",
             "message_id",
@@ -197,11 +200,11 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
     if matches!(
         domain_name,
         "actors__create"
-            | "actors__stop"
+            | "admin_actors__stop"
             | "actors__import_conversation"
             | "actors__message"
-            | "actors__archive"
-            | "actors__unarchive"
+            | "admin_actors__archive"
+            | "admin_actors__unarchive"
     ) {
         // Older Core results retained a host-local URL, but their explicit
         // device argument still identifies the original host after replication.
@@ -609,6 +612,22 @@ impl ActorStore {
                 .into_diagnostic()
         })
     }
+    pub(crate) fn set_model_preference(
+        &self,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ActorRecord> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let mut actor = actor_tx(&tx, id)?;
+            actor.config.model = model;
+            actor.updated_at_ms = now();
+            save_actor(&tx, &actor)?;
+            self.commit(tx)?;
+            Ok(actor)
+        })
+    }
     /// Only removed model preferences change; identities, grants and history stay
     /// intact. Null selects the account default, or waits for model setup.
     pub(crate) fn reset_model_preferences(&self, removed: &[String]) -> Result<()> {
@@ -937,6 +956,21 @@ impl ActorStore {
     }
 
     /// Pagination bounds I/O, never the number of retained messages or steps.
+    pub(crate) fn archive_page(
+        &self,
+        actor: &str,
+        after: i64,
+        message: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, AgentMessage)>> {
+        Ok(self
+            .history_page(actor, after, message, limit)?
+            .into_iter()
+            .take_while(|(seq, _, _)| {
+                actor != crate::stage::shared::ACTOR_ID || *seq < 4503599627370496
+            })
+            .collect())
+    }
     pub(crate) fn history_page(
         &self,
         actor: &str,
@@ -1969,10 +2003,8 @@ impl ActorStore {
             Ok(result.id)
         })
     }
-    pub fn core_turn_delivered(&self, message: &str) -> Result<bool> {
-        database_io(|| {
-            sql(self.db.lock().query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id='core' AND message_id=?1 AND done=1 AND json_extract(record,'$.name')='actors__deliver' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", [message], |r|r.get(0)))
-        })
+    pub fn reply_turn_delivered(&self, actor: &str, message: &str) -> Result<bool> {
+        database_io(|| reply_turn_delivered(&self.db.lock(), actor, message))
     }
     pub(crate) fn turn_yielded(&self, actor: &str, message: &str) -> Result<bool> {
         database_io(|| turn_yielded(&self.db.lock(), actor, message))
@@ -2101,6 +2133,7 @@ impl ActorStore {
         input: &str,
         call: &str,
         content: &str,
+        finish_turn: bool,
     ) -> Result<MessageRecord> {
         database_io(|| {
             if content.trim().is_empty()
@@ -2157,12 +2190,20 @@ impl ActorStore {
                 }
                 delivery.actor_id = actor_id.clone();
                 delivery.reply_to = original.reply_to;
-                delivery.kind = MessageKind::Progress;
+                delivery.kind = if finish_turn {
+                    MessageKind::Result
+                } else {
+                    MessageKind::Progress
+                };
                 delivery.in_reply_to = Some(original.id);
-                delivery.content = format!(
-                    "Progress for delegated request {} (still running):\n{}",
-                    source.id, content
-                );
+                delivery.content = if finish_turn {
+                    format!("Result for delegated request {}:\n{}", source.id, content)
+                } else {
+                    format!(
+                        "Progress for delegated request {} (still running):\n{}",
+                        source.id, content
+                    )
+                };
                 delivery.reply = None;
                 delivery.status = MessageStatus::Queued;
                 delivery.finished_at_ms = None;
@@ -2216,7 +2257,11 @@ impl ActorStore {
             let explicit: bool = sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE actor_id=?1 AND json_extract(record,'$.kind')='delivery' AND json_extract(record,'$.in_reply_to')=?2 AND EXISTS(SELECT 1 FROM events e WHERE e.actor_id=m.actor_id AND json_extract(e.record,'$.type')='message_added' AND json_extract(e.record,'$.message_id')=m.id))", params![message.actor_id,id], |r|r.get(0)))?;
             let yielded =
                 status == MessageStatus::Completed && turn_yielded(&tx, &message.actor_id, id)?;
-            let reply = if yielded {
+            let replied = status == MessageStatus::Completed
+                && reply_turn_delivered(&tx, &message.actor_id, id)?;
+            let reply = if replied {
+                Some("")
+            } else if yielded {
                 // Recovery can reach here with a committed empty assistant boundary.
                 // The successful yield observation, not replayed model text, decides
                 // whether this input has an outward result.
@@ -2297,7 +2342,10 @@ impl ActorStore {
             }
             // A deliberate yield closes only this inbox input. No placeholder result
             // may wake the requester or escape as an empty remote delivery.
-            let routed = if yielded && status == MessageStatus::Completed {
+            let routed = if (yielded
+                || (replied && matches!(message.reply_to, ReplyTarget::Actor { .. })))
+                && status == MessageStatus::Completed
+            {
                 None
             } else if let ReplyTarget::Actor {
                 actor_id,

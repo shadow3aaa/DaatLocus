@@ -373,6 +373,9 @@ impl ComputerUseApp {
 
 #[async_trait]
 impl App for ComputerUseApp {
+    fn set_vision_support(&mut self, supported: bool) {
+        self.supports_vision = supported;
+    }
     fn id(&self) -> AppId {
         AppId::new(if cfg!(target_os = "android") {
             "phone_use"
