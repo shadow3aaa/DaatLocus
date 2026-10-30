@@ -1447,8 +1447,10 @@ Tool results retain their original payload and an optional output schema derived
 Rust `Serialize`/`JsonSchema` types. Field names follow serde renames; source files,
 file changes, artifacts and verbatim text carry content-type metadata on their domain
 types. Native/protocol adapters expose public facts through derived domain schemas.
-The client uses one recursive value renderer and shared content primitives, with no
-per-tool payload dispatch or argument decoding. Schemas are fetched with heavy result
+Built-in output types declare their content domain in the derived schema. Shared
+domain views show source content (terminal output, documents, diffs, images and
+named lists), without presenting execution parameters or protocol identifiers.
+Installable external tools retain the recursive schema renderer. Schemas are fetched with heavy result
 details; bounded activity events and model-visible tool output do not carry them.
 Terminal start events include the same bounded command source fact used by completed
 observations, preserving a running command preview across live updates and history
@@ -1459,6 +1461,14 @@ observations identify the underlying `operation` through the server's Sudo proto
 adapter. The client reuses that operation's icon, preview, activity grouping and
 outcome handling; original output schemas, content and resources pass through.
 Clients never decode Sudo's serialized target arguments to render the result.
+Successful internal Actor operations are plain rows. Empty results have no
+disclosure; visible rows resolve bounded details to determine their content.
+Images open from a direct thumbnail into an accessible viewing dialog.
+Terminal progress retains a bounded 64 KiB UTF-8 output tail in its unfinished
+tool record. `tool_updated` events carry only the message, call and result
+references; authorized visible clients fetch the record, coalescing updates.
+Captured process bytes remain separate from model-facing truncation notices.
+Completion replaces the partial result, and cancellation fences later updates.
 Tool detail containers have no default card fill or padded outer frame. Code, diffs
 and resource previews inherit the conversation surface, retaining only content
 boundaries, syntax colors and semantic difference backgrounds.

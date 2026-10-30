@@ -522,9 +522,26 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-tool-details { --code-background: transparent; --code-foreground: var(--foreground); min-width: 0; overflow-wrap: anywhere; margin: 8px 0 12px; max-width: 100%; font-size: calc(var(--ui-font-size, 14px) * 13 / 14); }
 .dl-tool-details :is(.dl-code-block,.dl-code-heading,.dl-diff-heading,.dl-artifact) { background: transparent; }
 .dl-tool-details .dl-file-details { margin: 0; max-width: 100%; }
-.dl-tool-details .dl-tool-note { margin-inline: 0; }
+.dl-step .dl-tool-note { margin-inline: 0; }
 .dl-tool-details pre, .dl-approval-details pre { overflow: auto; max-height: 360px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; }
 .dl-tool-details small { color: var(--muted-foreground); }
+.dl-tool-details:has(>.dl-image-thumbnail) { margin-block: 4px; }
+.dl-image-thumbnail { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.dl-image-thumbnail>img { display: block; max-width: 100%; max-height: 240px; width: auto; height: auto; object-fit: contain; border-radius: 8px; }
+.dl-image-viewer[data-slot=dialog-content] { width: fit-content; max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 0; gap: 0; background: transparent; box-shadow: none; --tw-ring-color: transparent; }
+.dl-image-viewer>img { display: block; max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); width: auto; height: auto; object-fit: contain; border-radius: 8px; }
+.dl-image-viewer>[data-slot=dialog-close] { background: var(--popover); color: var(--popover-foreground); border-radius: 999px; }
+.dl-terminal-output { min-width: 0; max-height: 260px; overflow: auto; overscroll-behavior: contain; }
+.dl-tool-details .dl-terminal-output>pre { margin: 0; width: max-content; min-width: 100%; max-height: none; overflow: visible; white-space: pre; overflow-wrap: normal; word-break: normal; }
+.dl-result-list { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.dl-result-list strong { font-weight: 500; }
+.dl-result-list .dl-tool-note { margin-block: 2px 0; }
+.dl-result-path { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.dl-result-link { display: block; width: fit-content; max-width: 100%; color: inherit; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.dl-tool-details .dl-search-match { margin: 2px 0; }
+.dl-tool-details .dl-artifact { margin: 0; border: 0; border-radius: 0; }
+.dl-tool-details .dl-artifact-header { padding: 0 0 8px; border: 0; }
+.dl-tool-details .dl-artifact p { padding: 0; }
 .dl-tool-note { margin: 8px 0 12px 12px; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.65; }
 .dl-browser-details>a { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; margin-bottom: 8px; }
 .dl-browser-details>a svg { width: 14px; height: 14px; flex-shrink: 0; }
@@ -825,7 +842,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-step-file { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border); }
 .dl-work-conversation .dl-step-list { border-left: 0; padding-left: 0; margin-left: 0; gap: 2px; }
 .dl-work-conversation .dl-step-label { font-size: var(--content-font-size, 16px); gap: 6px; padding: 2px 0; line-height: 1.5; color: var(--muted-foreground); }
-.dl-work-conversation .dl-step-label:hover { color: var(--foreground); }
+.dl-work-conversation button.dl-step-label:hover { color: var(--foreground); }
 .dl-work-conversation .dl-step-label>svg:first-child { width: 20px; height: 20px; }
 .dl-activities svg { stroke-width: 1.65; }
 .dl-step-label > .dl-step-chevron { width: 14px; height: 14px; opacity: 0; flex-shrink: 0; }

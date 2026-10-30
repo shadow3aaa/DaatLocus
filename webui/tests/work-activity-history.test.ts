@@ -46,6 +46,20 @@ test("a live approval rejection keeps its reason after history replaces the even
   }
 });
 
+test("terminal output references update the active call without replaying or reopening a settled call",()=>{
+  const start=record(1,{type:"tool_started",message_id:message.id,call_id:"terminal",name:"terminal__terminal_exec",outcome:{command:"bun test"}});
+  const update=record(2,{type:"tool_updated",message_id:message.id,call_id:"terminal",result_id:"terminal-result"});
+  let state=conversationReducer(initialConversation("worker"),{type:"event",record:start});
+  state=conversationReducer(state,{type:"event",record:update});
+  expect(state.tools).toHaveLength(1);expect(state.tools[0].id).toBe("terminal-result");expect(state.tools[0].status).toBe("running");
+  expect(activityTools([start,update],message,[])[0]).toMatchObject({id:"terminal-result",status:"running",seq:2});
+  const finish=record(3,{type:"tool_finished",message_id:message.id,call_id:"terminal",name:"terminal__terminal_exec",result_id:"terminal-result",summary:"Done",error:null});
+  state=conversationReducer(state,{type:"event",record:finish});
+  state=conversationReducer(state,{type:"event",record:{...update,seq:4}});
+  expect(state.tools[0].status).toBe("completed");
+  expect(activityTools([start,update,finish,{...update,seq:4}],message,[])[0].status).toBe("completed");
+});
+
 test("permission references and grants survive live events being replaced by history pages", () => {
   for (const decision of ["application_required", "approved"] as const) {
     const outcome = {approval:{decision,approval_id:"approval",stage_id:"source"}};

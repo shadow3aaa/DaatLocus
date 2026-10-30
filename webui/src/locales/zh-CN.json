@@ -362,6 +362,8 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "waiting_for_output": "等待输出…",
+    "exit_code": "退出码 {{code}}",
     "sudo_submitted": "权限申请已交给 Core",
     "image_preview_unavailable": "图片预览暂时不可用。",
     "application_required": "需要申请授权",
@@ -513,6 +515,7 @@
     "suggestions_failed": "未能读取搜索记录，请重试。"
   },
   "tool_presentation": {
+    "update_app_settings": "更新应用设置",
     "sudo_execute": "无沙箱执行",
     "sudo_execute_as_admin": "以管理员执行",
     "message_actor": "发送消息",

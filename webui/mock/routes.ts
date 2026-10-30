@@ -1,7 +1,7 @@
 import { contactsPage } from "./contacts";
 import { systemPromptRoute } from "./system-prompt";
 import { examplesForScene } from "./tool-showcase";
-import { prepareToolPreviewRead } from "./tool-showcase-state";
+import { prepareToolPreviewRead, liveToolResult } from "./tool-showcase-state";
 import { toolPreviewControls } from "./tool-preview-controls";
 import { acceptCoreMotionInput, advanceCoreMotionPreview } from "./core-motion";
 import { appsRoute } from "./apps";
@@ -545,6 +545,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
     const resultId = decodeSegment(match[2]);
+    const live=liveToolResult(resultId);
+    if(live&&live.actor_id===actor.summary.id)return json(live);
     const entry = actor.tools.find(item => item.result.id === resultId);
     if (entry && !await prepareToolPreviewRead(resultId)) return json({message:"Preview tool result temporarily unavailable",code:"unavailable"},503);
     return entry ? json(entry.result) : notFound("Unknown tool result");

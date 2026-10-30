@@ -297,7 +297,7 @@ impl<'a> Journal<'a> {
             let mut entries=vec![];let mut through=sequence;let mut encoded_bytes=512usize;
             for (ordinal,created,data,offset,version,projection) in rows {
                 let event:ActorEvent=serde_json::from_str(&data).map_err(|_|StageError::Invalid("Invalid Actor event"))?;
-                if level==SubscriptionLevel::Summary && matches!(event,ActorEvent::GenerationStarted{..}|ActorEvent::GenerationDelta{..}|ActorEvent::ToolStarted{..}|ActorEvent::ToolFinished{..}) {through=ordinal as u64;continue;}
+                if level==SubscriptionLevel::Summary && matches!(event,ActorEvent::GenerationStarted{..}|ActorEvent::GenerationDelta{..}|ActorEvent::ToolStarted{..}|ActorEvent::ToolUpdated{..}|ActorEvent::ToolFinished{..}) {through=ordinal as u64;continue;}
                 let fact=if let Some(projection)=projection {serde_json::from_str(&projection).map_err(|_|StageError::Invalid("Invalid stored message reference"))?}else{project(tx,event,offset,version)?};
                 let entry=Entry {cursor:Cursor{epoch:base.epoch,sequence:ordinal as u64},created_at_ms:created,fact};
                 let size=serde_json::to_vec(&entry).map_err(|_|StageError::Invalid("Cannot encode Actor event"))?.len();

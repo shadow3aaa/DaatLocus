@@ -328,6 +328,12 @@ pub enum ActorEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<Value>,
     },
+    /// The authorized result endpoint has newer source output; bytes stay out of streams.
+    ToolUpdated {
+        message_id: String,
+        call_id: String,
+        result_id: String,
+    },
     ToolFinished {
         message_id: String,
         call_id: String,

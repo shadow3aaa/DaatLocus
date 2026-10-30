@@ -87,7 +87,9 @@ pub fn create_apps(
                 actor.id.clone(),
             )),
             "files" => Box::new(FilesApp::new(state_dir.join("images"), supports_vision)),
-            "terminal" if !cfg!(target_os = "android") => Box::new(TerminalApp::new()),
+            "terminal" if !cfg!(target_os = "android") => {
+                Box::new(TerminalApp::with_system(system.clone()))
+            }
             "sudo" if !cfg!(target_os = "android") => Box::new(crate::sudo_app::SudoApp),
             "web" => Box::new(WebApp::new(
                 actor.id.clone(),

@@ -1,9 +1,28 @@
-import type { ActorEvent } from "../src/lib/actor-api";
+import type { ActorEvent, MessageRecord, ToolResult } from "../src/lib/actor-api";
 import { addMessage, addTool, emitEvent, now, ROOT_ACTOR_ID, setActorStatus, store, touchMessage, type ActorStore } from "./state";
 import { toolExamples, toolExampleResult, toolPreviewResource as resource, type ToolExample } from "./tool-showcase";
 
 let failures = new Set<string>();
-export function resetToolPreview() { failures = new Set(); }
+const liveResults=new Map<string,ToolResult>();
+const liveTimers=new Set<ReturnType<typeof setInterval>>();
+export function liveToolResult(id:string) {return liveResults.get(id);}
+export function resetToolPreview() { failures = new Set(); for(const timer of liveTimers)clearInterval(timer);liveTimers.clear();liveResults.clear(); }
+function seedLiveTerminal(actor:ActorStore,message:MessageRecord,result:ToolResult) {
+  liveResults.set(result.id,result);
+  emitEvent(actor.summary.id,{type:"tool_updated",message_id:message.id,call_id:result.call_id,result_id:result.id});
+  let step=0;
+  const timer=setInterval(()=>{
+    const complete=++step>=14;
+    result.payload={session:{command:"bun test",status:complete?"exited":"running",exit_code:complete?0:null},running:!complete,captured_output:`Starting test suite…\n${Array.from({length:step},(_,index)=>`✓ layout check ${index+1} passed`).join("\n")}\n${complete?"14 pass · 0 fail\n":""}`};
+    if(complete) {
+      clearInterval(timer);liveTimers.delete(timer);liveResults.delete(result.id);addTool(actor,result);
+      emitEvent(actor.summary.id,{type:"tool_finished",message_id:message.id,call_id:result.call_id,name:result.name,result_id:result.id,summary:result.summary,error:null,outcome:result.outcome});
+      touchMessage(message,{status:"completed",finished_at_ms:now(),reply:"输出已完成。"});
+      emitEvent(actor.summary.id,{type:"message_updated",message_id:message.id,status:"completed"});setActorStatus(actor,"idle");
+    } else emitEvent(actor.summary.id,{type:"tool_updated",message_id:message.id,call_id:result.call_id,result_id:result.id});
+  },700);
+  liveTimers.add(timer);
+}
 export async function prepareToolPreviewRead(id: string, activity = false): Promise<boolean> {
   const example = toolExamples.find(item=>`${activity ? "showcase-message" : "showcase-result"}-${item.id}`===id);
   if (example?.network === "loading" && !activity) await new Promise(resolve=>setTimeout(resolve,1200));
@@ -41,7 +60,7 @@ export function seedToolExamples(actor: ActorStore, examples: ToolExample[]) {
     if (!example.running) {
       addTool(actor,result);
       fact(start+2000,{type:"tool_finished",message_id:message.id,call_id:result.call_id,name:result.name,result_id:result.id,summary:result.summary,error:result.error,outcome:result.outcome});
-    }
+    } else if(example.name.startsWith("terminal__")||example.outcome&&typeof example.outcome==="object"&&!Array.isArray(example.outcome)&&String(example.outcome.operation).startsWith("terminal__"))seedLiveTerminal(actor,message,result);
     fact(start+5000,{type:"message_updated",message_id:message.id,status});
   });
   setActorStatus(actor,[...examples].some(example=>example.status==="running")?"running":"idle");

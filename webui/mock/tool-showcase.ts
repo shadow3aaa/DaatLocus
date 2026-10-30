@@ -3,7 +3,7 @@ import type { JsonValue, MessageStatus, ToolResult } from "../src/lib/actor-api"
 export type ToolExample = {
   id: string; label: string; name: string; payload: JsonValue; arguments?: JsonValue; outcome?: JsonValue;
   error?: string; status?: MessageStatus; running?: boolean; network?: "loading" | "detail-error" | "activity-error";
-  content?: "source" | "file-change" | "artifact" | "image";
+  content?: "source" | "file-change" | "artifact" | "image" | "terminal";
   schema?:JsonValue;
 };
 type Example = ToolExample;
@@ -51,7 +51,8 @@ export const toolSections = [
     sample("file-image-broken","图片加载失败","files__view_image",{resource_references:[{...image,uri:toolPreviewResource("missing-image")}]}),
   ]},
   {id:"tools-terminal",label:"工具 · 终端与进程",examples:[
-    sample("terminal-running","正在运行 · 长命令预览","terminal__terminal_exec",{},{running:true,status:"running",arguments:{command:runningCommand},outcome:{command:runningCommand}}),
+    sample("terminal-running","正在运行 · 连续输出","terminal__terminal_exec",{session:{command:"bun test",status:"running",exit_code:null},captured_output:"Starting test suite…\n",running:true},{running:true,status:"running",content:"terminal",arguments:{command:runningCommand},outcome:{command:runningCommand}}),
+    sample("terminal-controls","轮询参数与模型截断不进入日志","terminal__terminal_write_stdin",{mode:"poll",max_chars:6000,yield_time_ms:30000,wait_mode:"timeout",output:"[terminal output shortened by max_chars: 20302 char(s) omitted; showing tail]\nMODEL_ONLY",captured_output:"Compiling example v1.0.0\n    Finished dev profile in 3.2s\n",session:{command:"cargo build",status:"exited",exit_code:0}},{content:"terminal",outcome:{command:"cargo build"}}),
     sample("terminal-success","命令成功、stdout 与 stderr","terminal__terminal_exec",{command:"bun test",cwd:"/workspace",stdout:"204 pass\n0 fail\n",stderr:"warning: optional dependency unavailable",exit_code:0},{outcome:{command:"bun test"}}),
     sample("terminal-nonzero","非零退出码与错误输出","terminal__terminal_exec",{command:"bun test",stdout:"1 test failed",stderr:"Expected 12, received 24",exit_code:1},{outcome:{command:"bun test"}}),
     sample("terminal-session","会话命令与持续输出","terminal__terminal_write_stdin",{session:{command:"vite --host 127.0.0.1",cwd:"/workspace",exit_code:null},output:"Local: http://127.0.0.1:5177/\nWaiting for changes…",running:true}),
@@ -124,7 +125,7 @@ export const toolSections = [
     sample("sudo-file","无沙箱 · 文件差异","sudo__execute_as_admin",{path:"src/layout.ts",change,sudo:{tool:"files__edit_file",administrator:true}},{content:"file-change",outcome:{operation:"files__edit_file",path:"src/layout.ts",added_lines:2,removed_lines:1}}),
     sample("sudo-image","无沙箱 · 图片原样预览","sudo__execute",{resource_references:[image],sudo:{tool:"files__view_image"}},{content:"image",outcome:{operation:"files__view_image"}}),
     sample("sudo-desktop","无沙箱 · 电脑窗口","sudo__execute_as_admin",{observation,resource_references:[image],sudo:{tool:"computer_use__get_window_state"}},{schema:guiSchema,outcome:{operation:"computer_use__get_window_state"}}),
-    sample("sudo-submitted","Sudo 已提交审核","sudo__execute",{status:"submitted",executed:false},{schema:{properties:{status:{"x-dl-content":"status"},executed:{}}},outcome:{operation:"terminal__terminal_exec",command:"repair-service"}}),
+    sample("sudo-submitted","Sudo 已提交审核","sudo__execute",{status:"submitted",executed:false},{schema:{"x-dl-content":"status",properties:{status:{"x-dl-content":"status"},executed:{}}},outcome:{operation:"terminal__terminal_exec",command:"repair-service"}}),
     sample("sudo-invalid","历史 Sudo 参数无法解包","sudo__execute",{sudo:{tool:"terminal__terminal_exec"},message:"保留历史记录。"},{arguments:{arguments_json:"not valid JSON"}}),
     sample("sudo-nested","阻止递归 Sudo 解包","sudo__execute",{sudo:{tool:"sudo__execute"},status:"submitted"}),
   ]},

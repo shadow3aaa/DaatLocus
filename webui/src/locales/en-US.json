@@ -362,6 +362,8 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "waiting_for_output": "Waiting for output…",
+    "exit_code": "Exit code {{code}}",
     "sudo_submitted": "Permission request submitted to Core",
     "image_preview_unavailable": "Image preview unavailable.",
     "application_required": "Permission application needed",
@@ -513,6 +515,7 @@
     "suggestions_failed": "Could not load suggestions. Try again."
   },
   "tool_presentation": {
+    "update_app_settings": "Update app settings",
     "sudo_execute": "Run outside sandbox",
     "sudo_execute_as_admin": "Run as administrator",
     "message_actor": "Message Actor",

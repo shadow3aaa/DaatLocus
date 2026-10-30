@@ -6,6 +6,7 @@ import { ToolParameters } from "../src/components/tool-parameters";
 import { MessageOutcomes, messageOutcomeTools } from "../src/components/message-outcomes";
 import { readableSummary, activityLabel, approvalNotice, operationToolName, toolIcon } from "../src/lib/tool-presentation";
 import { Activities } from "../src/components/conversation-content";
+import { toolResultTitle } from "../src/lib/tool-content";
 import type { ToolResult, JsonValue } from "../src/lib/actor-api";
 
 const sourceSchema={"x-dl-content":"source"};
@@ -101,7 +102,7 @@ describe("tool observations are product content, never protocol dumps", () => {
   });
   test("Sudo preserves target command output and keeps submitted applications separate from effects", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({ name:"sudo__execute", arguments:{tool:"terminal__terminal_exec",arguments_json:JSON.stringify({command:"winget --version"})},payload:{output:"v1.12.350",session:{command:"winget --version",exit_code:0},sudo:{tool:"terminal__terminal_exec",administrator:false,approval_id:"PRIVATE_APPROVAL"}}})}/>);
-    expect(html).toContain("winget --version");
+    expect(html).not.toContain("winget --version");
     expect(html).toContain("v1.12.350");
     for(const hidden of ["PRIVATE_APPROVAL","HIDDEN_MODEL_PROTOCOL","arguments_json"]) expect(html).not.toContain(hidden);
     const submitted = renderToStaticMarkup(<ToolDetail result={result({name:"sudo__execute_as_admin",output_schema:{properties:{status:{"x-dl-content":"status"},executed:{}}},payload:{status:"submitted",executed:false,approval_id:"PRIVATE_APPROVAL"}})}/>);
@@ -111,7 +112,7 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(custom).toContain("Inspection complete");
     for(const hidden of ["PRIVATE_NATIVE_TARGET","PRIVATE_APPROVAL"]) expect(custom).not.toContain(hidden);
   });
-  test("image tools render resource thumbnails with links to the original instead of metadata", () => {
+  test("image tools open authorized thumbnails in a dialog instead of another tab or metadata", () => {
     const uri = "/v1/actors/root/resources/image-snapshot";
     const stage = "12345678-1234-1234-1234-123456789012";
     for (const name of ["files__view_image", "actors__read_resource", "extension__render", "mcp_00000000000000000000000000000001__lookup", "d_abcdef123456_files__view_image"]) {
@@ -119,7 +120,7 @@ describe("tool observations are product content, never protocol dumps", () => {
         const html = renderToStaticMarkup(<ToolDetail result={result({name,output_schema:imageSchema,payload:{path:"C:/images/photo.png",media_type:"image/png",byte_count:9234,resource_references:[{id:"PRIVATE_RESOURCE_ID",uri:source,name:"photo.png",media_type:"image/png"}]}})} />);
         expect(html).toContain("<img ");
         expect(html).toContain(`src="${source}"`);
-        expect(html).toContain(`href="${source}"`);
+        expect(html).toContain('aria-haspopup="dialog"');
         expect(html).toContain('alt="photo.png"');
         for (const hidden of ["PRIVATE_RESOURCE_ID", "resource_references", "HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
         if (name.endsWith("files__view_image")) {
@@ -147,7 +148,7 @@ describe("tool observations are product content, never protocol dumps", () => {
         const html = renderToStaticMarkup(<ToolDetail result={result({name,payload:{status:"observed",observation:{title:"Observed application",screenshot_url:uri},resource_references:references}})} />);
         expect(html.match(/<img\b/g)).toHaveLength(1);
         expect(html).toContain(`src="${uri}"`);
-        expect(html).toContain(`href="${uri}"`);
+        expect(html).toContain('aria-haspopup="dialog"');
         expect(html).toContain('alt="Observed application"');
       }
     }
@@ -189,13 +190,15 @@ describe("tool observations are product content, never protocol dumps", () => {
     for(const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_DRIVER_METADATA","PRIVATE_STATE_TOKEN","HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
   });
   test("BrowserUse renders page facts while keeping coordinates and native receipts private", () => {
-    const html=renderToStaticMarkup(<ToolDetail result={result({output_schema:guiSchema,name:"browser_use__click",arguments:{text:"PRIVATE_TYPED_TEXT",state_id:"PRIVATE_RECEIPT"},payload:{status:"observed",observation:{title:"Shared browser document",url:"https://example.com/report",tab_id:"PRIVATE_TAB",state_id:"PRIVATE_RECEIPT",png_base64:"PRIVATE_IMAGE"},private_metadata:"PRIVATE_NATIVE"}})}/>);
-    expect(html).toContain("Shared browser document");expect(html).toContain("https://example.com/report");
+    const record=result({output_schema:guiSchema,name:"browser_use__click",arguments:{text:"PRIVATE_TYPED_TEXT",state_id:"PRIVATE_RECEIPT"},payload:{status:"observed",observation:{title:"Shared browser document",url:"https://example.com/report",tab_id:"PRIVATE_TAB",state_id:"PRIVATE_RECEIPT",png_base64:"PRIVATE_IMAGE"},private_metadata:"PRIVATE_NATIVE"}});
+    const html=renderToStaticMarkup(<ToolDetail result={record}/>);
+    expect(toolResultTitle(record)).toBe("Shared browser document");
+    expect(html).toBe(""); // Titles stay in the row; no redundant disclosure.
     for(const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_RECEIPT","PRIVATE_TAB","PRIVATE_IMAGE","PRIVATE_NATIVE","HIDDEN_MODEL_PROTOCOL"])expect(html).not.toContain(hidden);
   });
   test("PhoneUse renders window observations without private native identifiers or typed input", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({output_schema:guiSchema,name:"phone_use__set_text",arguments:{text:"PRIVATE_TYPED_TEXT"},payload:{status:"dispatched",observation:{title:"Android document",width:1280,height:720,state_id:"PRIVATE_STATE_TOKEN",window_id:"PRIVATE_WINDOW_TOKEN",input_target:{kind:"editable_control",text:"PRIVATE_RECEIVER_TEXT"}},private_metadata:"PRIVATE_NATIVE_METADATA"}})}/>);
-    expect(html).toContain("Android document");
+    expect(html).toBe(""); // The observation title belongs in its compact row, with no empty disclosure.
     for (const hidden of ["PRIVATE_TYPED_TEXT","PRIVATE_STATE_TOKEN","PRIVATE_WINDOW_TOKEN","PRIVATE_NATIVE_METADATA","HIDDEN_MODEL_PROTOCOL"]) expect(html).not.toContain(hidden);
   });
   test("MCP errors preserve source text without exposing binary or protocol fields", () => {
@@ -243,9 +246,10 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("HIDDEN_HASH");
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
-  test("terminal output and nested session facts render directly", () => {
+  test("terminal details show output without request controls or duplicated session metadata", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({ name: "terminal__terminal_exec", payload: { session: { command: "cargo check", cwd: "C:/project", exit_code: 0 }, output: "Finished build" } })} />);
-    for (const value of ["cargo check", "C:/project", "Finished build"]) expect(html).toContain(value);
+    expect(html).toContain("Finished build");
+    for(const hidden of ["cargo check","C:/project","max_chars","yield_time_ms"])expect(html).not.toContain(hidden);
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
   test("Web documents render their page content without model-specific transcripts", () => {

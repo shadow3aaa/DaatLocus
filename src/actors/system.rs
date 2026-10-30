@@ -2048,6 +2048,70 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn terminal_updates_publish_only_scoped_references_and_stop_at_cancellation() {
+        let (_directory, system) = fixture().await;
+        let input = system
+            .send_user("root", "Run checks".into(), vec![], None)
+            .unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        let call = crate::model_protocol::AgentToolCall {
+            id: "terminal".into(),
+            name: "terminal__terminal_exec".into(),
+            arguments: serde_json::json!({"command":"check"}),
+        };
+        let id = system
+            .store()
+            .tool_started("root", &input.id, &call)
+            .unwrap();
+        let before = system.store().event_cursor().unwrap();
+        let session:crate::terminal_app::TerminalSessionState=serde_json::from_value(serde_json::json!({"session_id":"private-session","status":"running","has_unread_output":true})).unwrap();
+        system
+            .store()
+            .terminal_output("root", &input.id, &call.id, &session, &"输出".repeat(20000))
+            .unwrap();
+        let result = system.store().tool_result(&id).unwrap();
+        let output = result.payload["captured_output"].as_str().unwrap();
+        assert!(output.len() <= 64 * 1024);
+        assert!(!output.is_empty());
+        assert_eq!(result.output_schema.unwrap()["x-dl-content"], "terminal");
+        let updates = system
+            .store()
+            .events(before, Some("root"), false, 10)
+            .unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(
+            matches!(&updates[0].event,super::super::ActorEvent::ToolUpdated{result_id,..} if result_id==&id)
+        );
+        let wire = serde_json::to_string(&updates).unwrap();
+        assert!(!wire.contains("输出"));
+        assert!(!wire.contains("private-session"));
+        assert!(
+            system
+                .store()
+                .terminal_output("foreign", &input.id, &call.id, &session, "secret")
+                .is_err()
+        );
+        system.store().request_cancel(&input.id).unwrap();
+        assert!(
+            system
+                .store()
+                .terminal_output("root", &input.id, &call.id, &session, "late")
+                .is_err()
+        );
+        assert_eq!(
+            system
+                .store()
+                .events(before, Some("root"), false, 10)
+                .unwrap()
+                .iter()
+                .filter(|item| matches!(item.event, super::super::ActorEvent::ToolUpdated { .. }))
+                .count(),
+            1
+        );
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn committed_actor_stop_finishes_cleanup_even_when_its_core_call_is_cancelled() {
         struct OwnedResource(Arc<AtomicBool>);
         impl Drop for OwnedResource {

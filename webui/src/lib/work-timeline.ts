@@ -55,6 +55,10 @@ export function activityTools(events: EventRecord[], message: MessageRecord, sum
     const event = record.event;
     if (event.type === "tool_started") tools.set(event.call_id, { seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: !complete || ["queued", "running"].includes(message.status) ? null : t("conversation_content.interrupted"), status: !complete ? "unknown" : ["queued", "running"].includes(message.status) ? "running" : "completed", outcome: event.outcome });
     if (event.type === "tool_finished") tools.set(event.call_id, { seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", outcome: event.outcome });
+    if (event.type === "tool_updated") {
+      const previous = tools.get(event.call_id);
+      if (previous?.status === "running") tools.set(event.call_id, {...previous,seq:record.seq,id:event.result_id});
+    }
   }
   for (const tool of summaries) {
     const existing = tools.get(tool.call_id);

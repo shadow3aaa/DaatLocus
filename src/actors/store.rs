@@ -1793,6 +1793,69 @@ impl ActorStore {
             Ok(result.id)
         })
     }
+    pub(crate) fn terminal_output(
+        &self,
+        actor: &str,
+        message: &str,
+        call: &str,
+        session: &crate::terminal_app::TerminalSessionState,
+        delta: &str,
+    ) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let input = message_tx(&tx, message)?;
+            if input.actor_id != actor
+                || input.status != MessageStatus::Running
+                || input.cancel_requested
+            {
+                return Err(ActorError::Forbidden(
+                    "Terminal output belongs to an inactive input".into(),
+                )
+                .into());
+            }
+            let record: Option<String> = sql(tx.query_row(
+                "SELECT record FROM tools WHERE actor_id=?1 AND message_id=?2 AND call_id=?3 AND done=0",
+                params![actor,message,call], |row| row.get(0),
+            ).optional())?;
+            let Some(record) = record else {
+                return Ok(());
+            };
+            let mut result: ToolResultRecord = decode(record)?;
+            let mut output = result
+                .payload
+                .get("captured_output")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            output.push_str(delta);
+            let mut start = output.len().saturating_sub(64 * 1024);
+            while !output.is_char_boundary(start) {
+                start += 1;
+            }
+            output.drain(..start);
+            result.payload = serde_json::json!({"session":session,"captured_output":output,"running":session.status=="running"});
+            result.output_schema =
+                Some(schemars::schema_for!(crate::terminal_app::TerminalToolResult).to_value());
+            sql(tx.execute(
+                "UPDATE tools SET record=?2 WHERE id=?1 AND done=0",
+                params![result.id, encode(&result)?],
+            ))?;
+            event(
+                &tx,
+                actor,
+                ActorEvent::ToolUpdated {
+                    message_id: message.into(),
+                    call_id: call.into(),
+                    result_id: result.id,
+                },
+            )?;
+            self.commit(tx)
+        })
+    }
     // A tool observation is committed together with its complete model protocol.
     #[allow(clippy::too_many_arguments)]
     pub fn tool_finished(

@@ -33,7 +33,7 @@ output!(GuiView {
     #[schemars(extend("format"="uri"))]
     url: String
 });
-output!(GuiOutput {
+output!(#[schemars(extend("x-dl-content"="gui"))] GuiOutput {
     status:String, message:String, observation:GuiView,
     apps:Vec<GuiEntry>, windows:Vec<GuiEntry>, pages:Vec<GuiEntry>,
     discovered_windows:Vec<GuiEntry>, related_windows:Vec<GuiEntry>,
@@ -67,7 +67,7 @@ output!(WebOperation {
     result: WebDocument,
     error: String
 });
-output!(WebOutput {results:Vec<WebOperation>,closed:bool});
+output!(#[schemars(extend("x-dl-content"="web"))] WebOutput {results:Vec<WebOperation>,closed:bool});
 output!(
     #[schemars(extend("x-dl-content"="image"))]
     ImageOutput {
@@ -81,7 +81,13 @@ output!(AppEntry {
     description: String,
     enabled: bool
 });
-output!(AppsOutput {name:String,description:String,enabled:bool,app:AppEntry,apps:Vec<AppEntry>,tools:Vec<AppEntry>,status:String});
+output!(#[schemars(extend("x-dl-content"="apps"))] AppsOutput {name:String,description:String,enabled:bool,app:AppEntry,apps:Vec<AppEntry>,tools:Vec<AppEntry>,status:String});
+output!(SkillEntry {
+    name: String,
+    description: String,
+    path: String
+});
+output!(#[schemars(extend("x-dl-content"="skills"))] SkillsOutput {skills:Vec<SkillEntry>});
 output!(ActorEntry {
     name: String,
     status: String,
@@ -93,17 +99,20 @@ pub struct SentActorMessage {
     pub conversation_url: String,
     pub content: String,
 }
-output!(ActorOutput {
+output!(#[schemars(extend("x-dl-content"="actor"))] ActorOutput {
     name:String,status:String,actors:Vec<ActorEntry>,
     #[schemars(extend("format"="uri"))] conversation_url:String,
     #[schemars(extend("x-dl-content"="markdown"))] message:String,
     sent_message:SentActorMessage,
 });
-output!(SudoOutput {
+output!(
     #[schemars(extend("x-dl-content"="status"))]
-    status: String,
-    executed: bool
-});
+    SudoOutput {
+        #[schemars(extend("x-dl-content"="status"))]
+        status: String,
+        executed: bool
+    }
+);
 
 #[cfg(test)]
 mod tests {

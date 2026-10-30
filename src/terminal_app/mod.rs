@@ -20,7 +20,38 @@ mod backend;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod command_tests;
 const LOGIN_COMMAND_REJECTION: &str = "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative";
+fn terminal_progress(
+    system: Option<crate::actors::ActorSystem>,
+    provenance: Option<crate::app::ActorCallContext>,
+    call: String,
+) -> impl FnMut(&TerminalSessionState, &str) + Send {
+    let mut pending = String::new();
+    let mut last = None;
+    move |session, delta| {
+        let (Some(system), Some(origin)) = (&system, &provenance) else {
+            return;
+        };
+        pending.push_str(delta);
+        if pending.len() < 4096
+            && last.is_some_and(|at: std::time::Instant| {
+                at.elapsed() < std::time::Duration::from_millis(150)
+            })
+        {
+            return;
+        }
+        let _ = system.store().terminal_output(
+            &origin.actor_id,
+            &origin.message_id,
+            &call,
+            session,
+            &pending,
+        );
+        pending.clear();
+        last = Some(std::time::Instant::now());
+    }
+}
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "terminal"))]
 struct TerminalObservation<'a> {
     #[serde(flatten)]
     result: &'a TerminalToolResult,
@@ -33,11 +64,13 @@ struct TerminalObservation<'a> {
     wait_mode: Option<&'a str>,
 }
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "terminal"))]
 struct TerminatedSession {
     session: TerminalSessionState,
 }
 pub struct TerminalApp {
     terminal: TerminalManager<RuntimeSandboxPolicy>,
+    system: Option<crate::actors::ActorSystem>,
 }
 impl Default for TerminalApp {
     fn default() -> Self {
@@ -82,12 +115,20 @@ impl TerminalApp {
     pub const fn new() -> Self {
         Self {
             terminal: TerminalManager::new(),
+            system: None,
+        }
+    }
+    pub fn with_system(system: crate::actors::ActorSystem) -> Self {
+        Self {
+            system: Some(system),
+            ..Self::new()
         }
     }
     #[cfg(test)]
     const fn new_with_output_buffer_capacity(capacity: usize) -> Self {
         Self {
             terminal: TerminalManager::new_with_output_buffer_capacity(capacity),
+            system: None,
         }
     }
     pub fn session_state(&self, id: &str) -> Result<TerminalSessionState> {
@@ -265,7 +306,7 @@ impl App for TerminalApp {
             },
             AppToolSpec {
                 name: "terminal_write_stdin".to_string(),
-                description: "Continue a running terminal session. Send text to write stdin; send empty text to wait. By default `wait_mode=any_output` returns after new output, exit, or timeout; use `wait_mode=timeout` to wait for the full yield window or process exit without streaming intermediate progress.".to_string(),
+                description: "Continue a running terminal session. Send text to write stdin; send empty text to wait. By default `wait_mode=any_output` returns after new output, exit, or timeout; use `wait_mode=timeout` to wait for the full yield window or process exit.".to_string(),
                 input_schema: model_schema_for::<TerminalWriteStdinArgs>(),
             },
             AppToolSpec {
@@ -304,6 +345,11 @@ impl App for TerminalApp {
         match call.name.as_str() {
             "terminal_exec" => {
                 let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
+                let progress = terminal_progress(
+                    self.system.clone(),
+                    context.actor_call.clone(),
+                    call.id.clone(),
+                );
                 let effective_workdir = args.workdir.as_deref().map_or_else(
                     || context.execution_cwd.clone(),
                     |workdir| resolve_terminal_path(context, workdir, Some(&context.execution_cwd)),
@@ -325,7 +371,7 @@ impl App for TerminalApp {
                             yield_time_ms: args.yield_time_ms,
                             max_chars: args.max_chars,
                         },
-                        |_session, _delta| {},
+                        progress,
                     )
                     .await?;
                 let running = result.session.status == "running";
@@ -380,6 +426,11 @@ impl App for TerminalApp {
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                let progress = terminal_progress(
+                    self.system.clone(),
+                    context.actor_call.clone(),
+                    call.id.clone(),
+                );
                 let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
                 let session = self.session_state(&args.session_id)?;
                 if let Some(cwd) = session.cwd.as_deref() {
@@ -394,7 +445,7 @@ impl App for TerminalApp {
                         wait_mode,
                         args.yield_time_ms,
                         args.max_chars,
-                        |_session, _delta| {},
+                        progress,
                     )
                     .await?;
                 let mode = terminal_progress_mode(&args.text);
@@ -1205,7 +1256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_wait_mode_suppresses_progress_until_timeout() {
+    async fn timeout_wait_mode_reports_progress_without_returning_early() {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
         let session_id = start_stdin_echo_session(&mut app, &sandbox_policy).await;
@@ -1225,7 +1276,10 @@ mod tests {
             .await
             .expect("timeout wait should succeed");
 
-        assert_eq!(progress_calls, 0, "timeout wait must not stream progress");
+        assert!(
+            progress_calls > 0,
+            "source output must remain observable during a timeout wait"
+        );
         assert!(
             started_at.elapsed() >= Duration::from_millis(850),
             "timeout wait should wait for the requested yield window"

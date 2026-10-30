@@ -26,7 +26,7 @@ const labels: Record<string, string> = {
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
   web__run: "tool_presentation.read_page", web__close: "tool_presentation.close_page",
   browser_use__move_pointer:"browser_use.move",browser_use__drag:"browser_use.drag",browser_use__open_page:"browser_use.open",browser_use__observe:"browser_use.observe",browser_use__list_pages:"browser_use.list",browser_use__click:"browser_use.click",browser_use__scroll:"browser_use.scroll",browser_use__type_text:"browser_use.type",browser_use__press_key:"browser_use.key",browser_use__navigate:"browser_use.navigate",browser_use__back:"browser_use.back",browser_use__forward:"browser_use.forward",browser_use__reload:"browser_use.reload",browser_use__close_page:"tool_presentation.close_page",
-  apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close",
+  apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close", apps_manager__configure_timeouts: "tool_presentation.update_app_settings",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
   actors__report: "tool_presentation.report_progress", actors__yield: "tool_presentation.yield_input",

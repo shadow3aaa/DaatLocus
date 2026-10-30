@@ -161,7 +161,8 @@ impl App for FilesApp {
                     format!("listed {} skills", skills.len()),
                     json!({ "skills": skills }),
                     catalog.render_prompt_block(),
-                ))
+                )
+                .with_output_schema::<crate::app::output::SkillsOutput>())
             }
             _ => Err(miette!("unknown Files tool")),
         }

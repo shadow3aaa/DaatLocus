@@ -184,6 +184,11 @@ export type ActorEvent = {
   name: string;
   outcome?: JsonValue | null;
 } | {
+  type: "tool_updated";
+  message_id: string;
+  call_id: string;
+  result_id: string;
+} | {
   type: "tool_finished";
   message_id: string;
   call_id: string;

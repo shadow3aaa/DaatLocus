@@ -148,6 +148,7 @@ pub struct DirectoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "directory"))]
 pub struct DirectoryPage {
     pub entries: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
@@ -161,6 +162,7 @@ pub struct SearchMatch {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "search"))]
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
     pub limited: bool,

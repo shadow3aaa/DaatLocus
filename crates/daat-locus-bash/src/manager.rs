@@ -33,10 +33,14 @@ struct TerminalSession<P: ProcessPolicy> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(extend("x-dl-content" = "terminal"))]
 pub struct TerminalToolResult {
     pub session: TerminalSessionState,
     #[schemars(extend("x-dl-content" = "text"))]
     pub output: String,
+    /// Original retained process bytes, separate from model-facing truncation notices.
+    #[serde(default)]
+    pub captured_output: String,
     pub output_missed_bytes: usize,
     pub output_dropped_bytes: usize,
     pub output_retained_bytes: usize,
@@ -184,9 +188,9 @@ impl<P: ProcessPolicy> TerminalManager<P> {
             );
             progress_offset = chunk.next_offset;
             apply_terminal_output_stats(&mut session.state, chunk.stats);
-            let delta = format_terminal_output_chunk(&chunk, max_chars);
+            let delta = &chunk.text;
             if !delta.is_empty() {
-                on_progress(&session.state, &delta);
+                on_progress(&session.state, delta);
             }
             if session.state.status != "running" || started_at.elapsed() >= timeout {
                 break;
@@ -217,6 +221,7 @@ impl<P: ProcessPolicy> TerminalManager<P> {
         Ok(TerminalToolResult {
             session: state,
             output,
+            captured_output: chunk.text,
             output_missed_bytes,
             output_dropped_bytes: output_stats.dropped_bytes,
             output_retained_bytes: output_stats.retained_bytes,
@@ -279,11 +284,9 @@ impl<P: ProcessPolicy> TerminalManager<P> {
             apply_terminal_output_stats(&mut session.state, chunk.stats);
             let has_output_update =
                 chunk.missed_bytes > 0 || chunk.next_offset > previous_progress_offset;
-            if wait_mode == TerminalWaitMode::AnyOutput {
-                let delta = format_terminal_output_chunk(&chunk, max_chars);
-                if !delta.is_empty() {
-                    on_progress(&session.state, &delta);
-                }
+            let delta = &chunk.text;
+            if !delta.is_empty() {
+                on_progress(&session.state, delta);
             }
             if session.state.status != "running"
                 || started_at.elapsed() >= timeout
@@ -310,6 +313,7 @@ impl<P: ProcessPolicy> TerminalManager<P> {
         Ok(TerminalToolResult {
             session: state,
             output,
+            captured_output: chunk.text,
             output_missed_bytes,
             output_dropped_bytes: output_stats.dropped_bytes,
             output_retained_bytes: output_stats.retained_bytes,

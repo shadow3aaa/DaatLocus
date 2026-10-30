@@ -124,6 +124,10 @@ export function conversationReducer(state: ConversationState, action: Conversati
         next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: `live:${event.call_id}`, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: "", error: null, status: "running", outcome: event.outcome }]) };
       if (event.type === "tool_finished")
         next = { ...next, tools: mergeTools(next.tools, [{ seq: record.seq, id: event.result_id, message_id: event.message_id, call_id: event.call_id, name: event.name, summary: event.summary, error: event.error, status: "completed", outcome: event.outcome }]) };
+      if (event.type === "tool_updated") {
+        const previous = next.tools.find(tool => tool.call_id === event.call_id && tool.message_id === event.message_id);
+        if (previous?.status === "running") next = { ...next, tools: mergeTools(next.tools, [{...previous,seq:record.seq,id:event.result_id}]) };
+      }
       return next;
     }
   }
