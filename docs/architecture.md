@@ -1502,6 +1502,9 @@ matching original bubble bodies per Actor. Cursor continuation walks authenticat
 account devices using the existing immutable observation-content protocol. Each
 source enforces account ownership; the account Core appears only once. Unavailable
 devices remain explicit rather than blocking other sources.
+Each contact includes its effective configured model name, resolved on the
+authoritative device with the execution path's account-default fallback; an
+unconfigured model registry returns null. This is observation metadata only.
 
 Search covers visible inputs, replies, sent Actor messages and assistant prose
 assembled from semantic deltas. It excludes reasoning, tool output and Core's
@@ -1572,6 +1575,15 @@ the configured maximum, while the OAuth backend retains its parameter constraint
 The former `openai-codex-oauth` configuration tag remains readable for saved logins.
 Account synchronization retains API keys in private definitions and only reuses
 device-local OAuth files when both old and new configurations select OAuth.
+
+### Model usage
+
+Usage records retain the configured model name, provider and model ID at request
+time alongside Actor totals. Model edits, removal, restart and context resets do
+not relabel prior usage. Independent automatic reviews record their usage under
+Core with the review model identity. The Owner-only Actor usage endpoint returns
+these daily/lifetime counters; the client aggregates them by Actor or model and
+keeps pre-attribution history separate rather than inferring its model.
 
 ### Static system instructions
 

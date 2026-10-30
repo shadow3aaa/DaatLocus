@@ -21,7 +21,7 @@ import type {
   Page,
   SetupConfigRequest,
   TokenUsage,
-  TokenUsageInfo,
+  ActorUsage,
 } from "../src/lib/actor-api";
 import type { CoreStatus, Device, DeviceSettings, PublicLoginStatus, StageInfo } from "../src/lib/stage-api";
 import { cancelTurn, isActorBusy, submitTurn } from "./engine";
@@ -164,7 +164,7 @@ function attachmentsFromIds(ids: unknown): Attachment[] {
 const RE_ACTOR = /^\/v1\/actors\/([^/]+)$/;
 
 /** Deterministic per-agent usage fixture; the Usage page consumes the real wire shape. */
-function mockUsage(id: string, _createdAt: number): TokenUsageInfo {
+function mockUsage(id: string, _createdAt: number): ActorUsage {
   let seed = 0;
   for (const character of id) seed = (seed * 31 + character.charCodeAt(0)) >>> 0;
   const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
@@ -183,7 +183,27 @@ function mockUsage(id: string, _createdAt: number): TokenUsageInfo {
     for (const key of Object.keys(total) as (keyof TokenUsage)[]) total[key] += usage[key];
     daily.push({ date: `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`, usage });
   }
-  return { total_token_usage: total, last_token_usage: daily.at(-1)?.usage ?? { ...total, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 }, model_context_window: 200_000, daily_token_usage: daily };
+  const zero = (): TokenUsage => ({ input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 0 });
+  const modelDays: typeof daily[] = [[], [], []];
+  for (const [index, day] of daily.entries()) {
+    const remaining = { ...day.usage };
+    for (let part = 0; part < 3; part++) {
+      const usage = zero();
+      for (const key of Object.keys(usage) as (keyof TokenUsage)[]) {
+        usage[key] = part === 2 ? remaining[key] : Math.floor(day.usage[key] * (part === 0 ? .6 : .3));
+        remaining[key] -= usage[key];
+      }
+      modelDays[(part + index + id.length) % 3].push({ date: day.date, usage });
+    }
+  }
+  const models = ["mock-large", "mock-mini", "mock-motion"].map((model, index) => {
+    const days = modelDays[index];
+    const sum = zero();
+    for (const day of days) for (const key of Object.keys(sum) as (keyof TokenUsage)[]) sum[key] += day.usage[key];
+    return { model, provider: "mock", model_id: `${model}-001`, total_token_usage: sum,
+      last_token_usage: days.at(-1)?.usage ?? zero(), daily_token_usage: days, model_context_window: 200_000 };
+  });
+  return { total_token_usage: total, last_token_usage: daily.at(-1)?.usage ?? zero(), model_context_window: 200_000, daily_token_usage: daily, models };
 }
 const RE_ACTOR_USAGE = /^\/v1\/actors\/([^/]+)\/usage$/;
 const RE_MESSAGES = /^\/v1\/actors\/([^/]+)\/messages$/;

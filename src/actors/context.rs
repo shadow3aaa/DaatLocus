@@ -15,6 +15,29 @@ pub struct AgentContext {
     pub token_estimate: TokenEstimateBaseline,
     #[serde(default)]
     pub usage: crate::core::TokenUsageInfo,
+    #[serde(default)]
+    pub model_usage: Vec<ModelUsage>,
+}
+
+/// The configured model identity at request time, retained after edits/removal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub provider: String,
+    pub model_id: String,
+    #[serde(flatten)]
+    pub usage: crate::core::TokenUsageInfo,
+}
+
+impl ModelUsage {
+    pub(crate) fn new(model: &str, config: &crate::config::ModelConfig) -> Self {
+        Self {
+            model: model.into(),
+            provider: config.provider.clone(),
+            model_id: config.model_id.clone(),
+            usage: Default::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +118,7 @@ impl AgentContext {
     pub(crate) fn valid(&self) -> bool {
         self.model_binding.len() <= 64
             && self.usage.valid()
+            && self.model_usage.iter().all(|model| model.usage.valid())
             && self.anchor.as_ref().is_none_or(|anchor| {
                 valid_id(&anchor.message_id)
                     && !anchor.reset_id.is_nil()

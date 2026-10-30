@@ -4,7 +4,7 @@ mod model_context;
 pub(crate) mod prompt;
 mod types;
 pub use crate::sandbox::SandboxScope;
-pub use context::{AgentContext, HistoryAnchor, TaskHandoff};
+pub use context::{AgentContext, HistoryAnchor, ModelUsage, TaskHandoff};
 pub use types::*;
 pub mod approval;
 pub mod permissions;

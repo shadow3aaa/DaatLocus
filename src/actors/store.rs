@@ -850,6 +850,7 @@ impl ActorStore {
     pub(crate) fn record_model_usage(
         &self,
         id: &str,
+        model: &super::ModelUsage,
         delta: crate::core::TokenUsage,
         window: Option<i64>,
     ) -> Result<()> {
@@ -860,8 +861,24 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut actor = actor_tx(&tx, id)?;
-            actor.context.usage.append_last_usage(delta);
-            actor.context.usage.model_context_window = window;
+            actor.context.usage.append_last_usage(delta.clone());
+            if window.is_some() {
+                actor.context.usage.model_context_window = window;
+            }
+            let models = &mut actor.context.model_usage;
+            let index = models
+                .iter()
+                .position(|entry| {
+                    entry.model == model.model
+                        && entry.provider == model.provider
+                        && entry.model_id == model.model_id
+                })
+                .unwrap_or_else(|| {
+                    models.push(model.clone());
+                    models.len() - 1
+                });
+            models[index].usage.append_last_usage(delta);
+            models[index].usage.model_context_window = window;
             save_actor(&tx, &actor)?;
             self.commit(tx)
         })

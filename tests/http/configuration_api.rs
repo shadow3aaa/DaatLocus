@@ -44,9 +44,43 @@ async fn actor_usage_requires_owner_and_starts_with_no_input_tokens() {
         .await
         .unwrap();
     assert_eq!(usage.status(), StatusCode::OK);
+    let initial: Value = usage.json().await.unwrap();
+    assert_eq!(initial["total_token_usage"]["input_tokens"], 0);
+    assert_eq!(initial["models"], json!([]));
+    let mut actor = fixture.system.actor("root").unwrap();
+    actor
+        .context
+        .usage
+        .append_last_usage(daat_locus::core::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            total_tokens: 120,
+            ..Default::default()
+        });
+    actor
+        .context
+        .model_usage
+        .push(daat_locus::actors::ModelUsage {
+            model: "former-model".into(),
+            provider: "former-provider".into(),
+            model_id: "original-v1".into(),
+            usage: actor.context.usage.clone(),
+        });
+    fixture.system.store().save_actor(&actor).unwrap();
+    let recorded: Value = fixture
+        .owner(reqwest::Method::GET, "/v1/actors/root/usage")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recorded["models"][0]["model"], "former-model");
+    assert_eq!(recorded["models"][0]["provider"], "former-provider");
+    assert_eq!(recorded["models"][0]["model_id"], "original-v1");
     assert_eq!(
-        usage.json::<Value>().await.unwrap()["total_token_usage"]["input_tokens"],
-        0
+        recorded["models"][0]["total_token_usage"]["total_tokens"],
+        120
     );
     assert_eq!(
         fixture

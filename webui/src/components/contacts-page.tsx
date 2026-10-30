@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ContactRoundIcon, PanelLeftIcon, SearchIcon, ChevronRightIcon } from "lucide-react";
+import { ContactRoundIcon, CpuIcon, PanelLeftIcon, SearchIcon, ChevronRightIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ActorApiError, subscribeCatalogEvents } from "@/lib/actor-api";
 import { actorIdFromUrl, localActorId } from "@/lib/conversation-links";
@@ -24,6 +24,7 @@ export function ContactsPage({onNavigation,onActor,onAccessRevoked,active=true}:
   const text=query.trim();
   const denied=useCallback((error:unknown)=>{if(error instanceof ActorApiError&&error.status===401)onAccessRevoked();},[onAccessRevoked]);
   useEffect(()=>{
+    if(!active)return;
     const version=++epoch.current,controller=new AbortController();current.current=controller;
     setLoading(true);setFailed(false);setNext(null);setCursor(null);paging.current=false;
     const timer=setTimeout(()=>{
@@ -33,16 +34,16 @@ export function ContactsPage({onNavigation,onActor,onAccessRevoked,active=true}:
       }).catch(error=>{if(!controller.signal.aborted){denied(error);setFailed(true);}}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});
     },text?180:0);
     return()=>{clearTimeout(timer);controller.abort();};
-  },[text,revision,denied]);
+  },[text,revision,denied,active]);
   useEffect(()=>{
-    if(cursor===null)return;
+    if(cursor===null||!active)return;
     const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
     void subscribeCatalogEvents({after:cursor,signal:controller.signal,onEvent:record=>{
       if(record.event.type!=="actor_changed"&&record.event.type!=="actor_deleted"&&record.event.type!=="conversation_restored")return;
       clearTimeout(timer);timer=setTimeout(()=>setRevision(value=>value+1),300);
     }}).catch(error=>{if(!controller.signal.aborted)denied(error);});
     return()=>{controller.abort();clearTimeout(timer);};
-  },[cursor,denied]);
+  },[cursor,denied,active]);
   useEffect(()=>{
     if(!active)return;
     const key=(event:KeyboardEvent)=>{if(event.defaultPrevented||event.isComposing||event.altKey||event.shiftKey)return;if((event.ctrlKey||event.metaKey)&&["f","k"].includes(event.key.toLowerCase())){event.preventDefault();setSearching(true);}};
@@ -68,7 +69,7 @@ export function ContactsPage({onNavigation,onActor,onAccessRevoked,active=true}:
     <div className="dl-contacts-scroll" id={results} aria-busy={loading}>
       {loading&&!items.length&&Array.from({length:6},(_,index)=><Skeleton key={index} className="mb-3 h-20 w-full rounded-xl"/>)}
       {!failed&&<ul className="dl-contact-list">{items.map(item=><li key={item.actor.conversation_url}>
-        <button className="dl-contact-heading" onClick={()=>open(item)}><GeneratedAvatar seed={`actor:${item.actor.id}`} /><span><strong><HighlightedText text={item.actor.name} query={text}/></strong><small>{t(`contacts.${item.actor.status}`)}</small></span><ChevronRightIcon aria-hidden="true"/></button>
+        <button className="dl-contact-heading" onClick={()=>open(item)}><GeneratedAvatar seed={`actor:${item.actor.id}`} /><span><strong><HighlightedText text={item.actor.name} query={text}/></strong><small className="dl-contact-meta"><span>{t(`contacts.${item.actor.status}`)}</span><span className="dl-contact-model" aria-label={t("contacts.model",{model:item.model??t("contacts.no_model")})}><CpuIcon aria-hidden="true"/>{item.model??t("contacts.no_model")}</span></small></span><ChevronRightIcon aria-hidden="true"/></button>
         {item.messages.length>0&&<div className="dl-contact-matches">{item.messages.map(message=><button key={`${message.message_id}:${message.kind}:${message.result_id??message.generation??""}`} onClick={()=>open(item,message)}><small>{t(`contacts.${message.kind}`)}</small><span><HighlightedText text={contactExcerpt(message.content,text)} query={text}/></span></button>)}</div>}
       </li>)}</ul>}
       {!loading&&!failed&&!items.length&&!next&&<Empty><EmptyHeader><EmptyMedia variant="icon"><ContactRoundIcon/></EmptyMedia><EmptyTitle>{t(text?"contacts.no_results":"contacts.empty")}</EmptyTitle></EmptyHeader></Empty>}

@@ -9,7 +9,7 @@ const tokens = (input: number, cached: number, output: number): TokenUsage => ({
 const entry = (id: string, name: string, daily: Record<string, TokenUsage>, status: "idle" | "archived" = "idle"): UsageEntry => ({
   actor: { id, name, status, conversation_url: `/actors/${id}`, apps: [], created_at_ms: 0, updated_at_ms: 0 },
   usage: { total_token_usage: tokens(0, 0, 0), last_token_usage: tokens(0, 0, 0), model_context_window: 200_000,
-    daily_token_usage: Object.entries(daily).map(([date, usage]) => ({ date, usage })) },
+    daily_token_usage: Object.entries(daily).map(([date, usage]) => ({ date, usage })), models: [] },
 });
 
 test("local calendar days end at the requested day and stay ordered", () => {
@@ -72,4 +72,32 @@ test("archived agents keep their usage in the ranking", () => {
   const [row] = usageRanking([archived], ["2026-10-14"]);
   expect(row.status).toBe("archived");
   expect(row.used).toBe(50);
+});
+
+test("model statistics merge actors, preserve previous models and retain unattributed history", () => {
+  const day = "2026-10-14";
+  const alpha = entry("a", "Alpha", { [day]: tokens(300, 200, 30) });
+  const beta = entry("b", "Beta", { [day]: tokens(200, 50, 20) }, "archived");
+  const model = (name: string, usage: TokenUsage, provider = "gateway") => ({
+    model: name, provider, model_id: name === "large" ? "large-v1" : "small-v1",
+    total_token_usage: usage, last_token_usage: usage, daily_token_usage: [{ date: day, usage }], model_context_window: 200_000,
+  });
+  alpha.usage.models = [model("large", tokens(200, 180, 20)), model("small", tokens(50, 10, 5))];
+  beta.usage.models = [model("large", tokens(100, 30, 10)), model("large", tokens(100, 20, 10), "other")];
+  alpha.usage.total_token_usage = tokens(300, 200, 30);
+  beta.usage.total_token_usage = tokens(200, 50, 20);
+  const entries = [alpha, beta];
+  const rows = usageRanking(entries, [day], "model");
+  expect(rows.map(row => [row.name, row.used])).toEqual([["large", 330], ["large", 110], ["", 55], ["small", 55]]);
+  expect(rows[0].usage).toEqual(tokens(300, 210, 30));
+  expect(rows[0].total.total_tokens).toBe(330);
+  expect(rows[1].description).toBe("other · large-v1");
+  expect(rows.reduce((sum, row) => sum + row.used, 0)).toBe(550);
+  const series = usageSeries(entries, [day], "model");
+  expect(series[0].total).toBe(550);
+  expect(usageLegend(series).map(row => row.tokens)).toEqual([330, 110, 55, 55]);
+  expect(cacheRanking(entries, [day], "model")[0].cacheRate).toBe(.7);
+  expect(usageRanking(entries, ["2026-09-01"], "model")).toEqual([]);
+  // Projection cannot mutate recorded source totals while merging Actors.
+  expect(alpha.usage.models[0].total_token_usage).toEqual(tokens(200, 180, 20));
 });

@@ -21,6 +21,7 @@ struct Reviewer {
     requests: parking_lot::Mutex<Vec<PromptRequest>>,
     started: tokio::sync::Notify,
     dropped: Arc<AtomicBool>,
+    usage: parking_lot::Mutex<TokenUsageInfo>,
 }
 impl Reviewer {
     fn new(reply: ReviewReply) -> Self {
@@ -29,6 +30,7 @@ impl Reviewer {
             requests: parking_lot::Mutex::new(vec![]),
             started: tokio::sync::Notify::new(),
             dropped: Arc::new(AtomicBool::new(false)),
+            usage: parking_lot::Mutex::new(TokenUsageInfo::default()),
         }
     }
 }
@@ -53,7 +55,18 @@ impl ModelProvider for Reviewer {
         self.started.notify_one();
         let reply = self.reply.lock().take().expect("one reviewer request");
         match reply {
-            ReviewReply::Json(value) => Ok(value),
+            ReviewReply::Json(value) => {
+                self.usage
+                    .lock()
+                    .append_last_usage(crate::core::TokenUsage {
+                        input_tokens: 80,
+                        cached_input_tokens: 40,
+                        output_tokens: 5,
+                        total_tokens: 85,
+                        ..Default::default()
+                    });
+                Ok(value)
+            }
             ReviewReply::Blocked(release, value) => {
                 release.notified().await;
                 Ok(value)
@@ -84,7 +97,7 @@ impl ModelProvider for Reviewer {
         }
     }
     fn token_usage_info(&self) -> TokenUsageInfo {
-        TokenUsageInfo::default()
+        self.usage.lock().clone()
     }
     fn model_name(&self) -> String {
         "mock-reviewer".into()
@@ -450,6 +463,20 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     assert!(approved.appeal.is_none());
     assert!(core_inputs(&system).is_empty());
     assert_eq!(reviewer.requests.lock().len(), 1);
+    let usage = system
+        .actor(crate::stage::shared::ACTOR_ID)
+        .unwrap()
+        .context;
+    assert_eq!(usage.usage.total_token_usage.total_tokens, 85);
+    assert_eq!(usage.model_usage.len(), 1);
+    assert_eq!(usage.model_usage[0].model, "reviewer");
+    assert_eq!(
+        usage.model_usage[0]
+            .usage
+            .total_token_usage
+            .cached_input_tokens,
+        40
+    );
     {
         let requests = reviewer.requests.lock();
         assert!(requests[0].history_messages.is_empty());

@@ -1360,6 +1360,8 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 .dl-usage-row>th>button { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 13px 8px; font-size: 14px; text-align: left; }
 .dl-usage-row>th>button>svg { flex: none; width: 15px; height: 15px; color: var(--muted-foreground); transition: transform .15s ease; transform: rotate(-90deg); }
 .dl-usage-row>th>button[aria-expanded=true]>svg { transform: rotate(0); }
+.dl-usage-name { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.dl-usage-name small { color: var(--muted-foreground); font-size: 11px; }
 .dl-usage-row:hover { background: color-mix(in srgb, var(--foreground) 3%, transparent); }
 .dl-usage-badge { flex: none; padding: 2px 7px; border-radius: 999px; color: var(--muted-foreground); background: color-mix(in srgb, var(--foreground) 7%, transparent); font-size: 11px; }
 .dl-usage-detail td { padding: 0 8px 16px; }
@@ -1395,6 +1397,9 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 .dl-contact-heading>span:not([data-slot=avatar]) { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
 .dl-contact-heading strong { font-weight: 550; overflow-wrap: anywhere; }
 .dl-contact-heading small,.dl-contact-matches small { color: var(--muted-foreground); font-size: 12px; }
+.dl-contact-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.dl-contact-model { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.dl-contact-model>svg { width: 12px; height: 12px; flex: none; align-self: center; }
 .dl-contact-heading>svg { width: 16px; height: 16px; color: var(--muted-foreground); }
 .dl-contact-matches { display: grid; gap: 6px; padding-bottom: 16px; }
 .dl-contact-matches>button { text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 10px var(--contact-inset-end) 10px calc(var(--contact-inset-start) + 58px); transition: background .15s; min-width: 0; }

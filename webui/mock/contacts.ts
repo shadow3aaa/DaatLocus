@@ -1,6 +1,6 @@
 import type { ContactMessage, ActorContact } from "../src/lib/contacts";
 import { isInternalNotification } from "../src/lib/conversation-messages";
-import { store } from "./state";
+import { configHolder, store } from "./state";
 
 export function contactsPage(url:URL) {
   const query=(url.searchParams.get("q")??"").trim().toLowerCase(),after=url.searchParams.get("after");
@@ -27,7 +27,10 @@ export function contactsPage(url:URL) {
 
     }
     const messages=query?bubbles.filter(message=>message.content.toLowerCase().includes(query)).reverse().slice(0,3):[];
-    if(!query||actor.summary.name.toLowerCase().includes(query)||messages.length)items.push({actor:actor.summary,messages});
+    const config=configHolder.current,preference=actor.detail.config?.model;
+    const name=config.models.some(model=>model.name===preference)?preference:config.main_model;
+    const model=config.models.some(model=>model.name===name)?name??null:null;
+    if(!query||actor.summary.name.toLowerCase().includes(query)||messages.length)items.push({actor:actor.summary,model,messages});
   }
   items.sort((a,b)=>a.actor.name.toLowerCase().localeCompare(b.actor.name.toLowerCase())||a.actor.id.localeCompare(b.actor.id));
   const start=after?items.findIndex(item=>item.actor.id===after)+1:0;

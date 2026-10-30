@@ -475,7 +475,7 @@ pub(crate) async fn review_on_core(
         );
         return Err(ReviewFailure::Arguments);
     }
-    let provider = system.approval_provider().map_err(|_| {
+    let (provider, model_usage) = system.approval_provider().map_err(|_| {
         tracing::warn!(
             approval_id,
             actor_id,
@@ -506,29 +506,40 @@ pub(crate) async fn review_on_core(
             );
             ReviewFailure::Budget
         })?;
-    let value = provider
-        .complete_json(request, options)
-        .await
-        .map_err(|error| {
-            let provider_failure = error.downcast_ref::<crate::providers::ModelRequestFailure>();
-            let failure = if provider_failure
-                .is_some_and(|failure| failure.kind == crate::providers::ModelFailureKind::Timeout)
-            {
-                ReviewFailure::Timeout
-            } else {
-                ReviewFailure::Request
-            };
-            tracing::warn!(
-                approval_id,
-                actor_id,
-                failure = failure.code(),
-                provider_code = provider_failure.map_or("none", |failure| failure.code()),
-                elapsed_ms = started.elapsed().as_millis(),
-                error = %system.safe_error(&crate::core::model_request_error_detail(&error)),
-                "Automatic review model request failed"
-            );
-            failure
-        })?;
+    let before = provider.token_usage_info().total_token_usage;
+    let result = provider.complete_json(request, options).await;
+    system
+        .store()
+        .record_model_usage(
+            crate::stage::shared::ACTOR_ID,
+            &model_usage,
+            provider
+                .token_usage_info()
+                .total_token_usage
+                .delta_from(&before),
+            None,
+        )
+        .map_err(|_| ReviewFailure::Request)?;
+    let value = result.map_err(|error| {
+        let provider_failure = error.downcast_ref::<crate::providers::ModelRequestFailure>();
+        let failure = if provider_failure
+            .is_some_and(|failure| failure.kind == crate::providers::ModelFailureKind::Timeout)
+        {
+            ReviewFailure::Timeout
+        } else {
+            ReviewFailure::Request
+        };
+        tracing::warn!(
+            approval_id,
+            actor_id,
+            failure = failure.code(),
+            provider_code = provider_failure.map_or("none", |failure| failure.code()),
+            elapsed_ms = started.elapsed().as_millis(),
+            error = %system.safe_error(&crate::core::model_request_error_detail(&error)),
+            "Automatic review model request failed"
+        );
+        failure
+    })?;
     validate_value_against_schema(&value, &schema, "approval verdict").map_err(|error| {
         tracing::warn!(
             approval_id,

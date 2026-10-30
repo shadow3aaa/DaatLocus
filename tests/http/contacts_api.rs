@@ -6,6 +6,65 @@ use daat_locus::{
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn contacts_report_the_effective_model_after_preferences_and_model_removal() {
+    let fixture = Fixture::new().await;
+    let child = fixture.child("Athena").await;
+    let mut config = fixture.system.config();
+    config
+        .models
+        .insert("specialist".into(), config.models["mock"].clone());
+    fixture.system.update_config(config.clone()).await.unwrap();
+    let changed = fixture
+        .owner(reqwest::Method::PATCH, &format!("/v1/actors/{child}"))
+        .json(&json!({"model":"specialist"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(changed.status().is_success());
+    let read = || fixture.owner(reqwest::Method::GET, "/v1/contacts");
+    let page: Value = read().send().await.unwrap().json().await.unwrap();
+    let selected = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["actor"]["id"] == child)
+        .unwrap();
+    assert_eq!(selected["model"], "specialist");
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["model"] == "mock")
+    );
+
+    config.models.remove("specialist");
+    fixture.system.update_config(config.clone()).await.unwrap();
+    let page: Value = read().send().await.unwrap().json().await.unwrap();
+    let selected = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["actor"]["id"] == child)
+        .unwrap();
+    assert_eq!(selected["model"], "mock");
+
+    config.models.clear();
+    config.providers.clear();
+    config.main_model.clear();
+    config.approval_model = None;
+    fixture.system.update_config(config).await.unwrap();
+    let page: Value = read().send().await.unwrap().json().await.unwrap();
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["model"].is_null())
+    );
+}
+
+#[tokio::test]
 async fn contacts_search_visible_bubbles_and_names_with_bounded_account_scoped_pages() {
     let fixture = Fixture::new().await;
     let alpha = fixture.child("Athena").await;

@@ -326,6 +326,13 @@ async fn execute_message(
     let mut window = ModelContext::load(system, actor, &context, tools).await?;
     let config = system.config();
     let model_name = config.actor_model_name(actor.config.model.as_deref());
+    let model_usage = super::ModelUsage::new(
+        model_name,
+        config
+            .models
+            .get(model_name)
+            .ok_or_else(|| miette!("Actor model is unavailable"))?,
+    );
     let request_timeout = Duration::from_secs(
         config
             .models
@@ -423,6 +430,7 @@ async fn execute_message(
                 request_timeout,
                 &mut generation,
                 &binding,
+                &model_usage,
                 &baseline,
                 false,
             )
@@ -465,6 +473,7 @@ async fn execute_message(
             request_timeout,
             &mut generation,
             &binding,
+            &model_usage,
             &baseline,
             true,
         )
@@ -1136,6 +1145,7 @@ async fn generate(
     timeout: Duration,
     generation: &mut u32,
     binding: &str,
+    model_usage: &super::ModelUsage,
     baseline: &TokenEstimateBaseline,
     publish_progress: bool,
 ) -> Result<Option<AgentTurnStreamResult>> {
@@ -1216,7 +1226,7 @@ async fn generate(
                     check_interruption(system,control, message)?;
                     if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
-                        system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
+                        system.store().record_model_usage(&actor.id, model_usage, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
                     }
                 },
@@ -1224,7 +1234,7 @@ async fn generate(
                     check_interruption(system,control, message)?;
                     if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
-                        system.store().record_model_usage(&actor.id, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
+                        system.store().record_model_usage(&actor.id, model_usage, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
                         return Ok(None);
                     }
                 },
@@ -1236,9 +1246,12 @@ async fn generate(
         pending.flush(system, actor, message, *generation)?;
         let usage = provider.token_usage_info();
         let delta = usage.total_token_usage.delta_from(&usage_before);
-        system
-            .store()
-            .record_model_usage(&actor.id, delta.clone(), usage.model_context_window)?;
+        system.store().record_model_usage(
+            &actor.id,
+            model_usage,
+            delta.clone(),
+            usage.model_context_window,
+        )?;
         check_interruption(system, control, message)?;
         match result {
             Ok(response) => {

@@ -721,15 +721,20 @@ impl ActorSystem {
         )
     }
 
-    pub fn approval_provider(&self) -> Result<Arc<dyn ModelProvider>> {
+    pub(crate) fn approval_provider(&self) -> Result<(Arc<dyn ModelProvider>, super::ModelUsage)> {
         let config = self.config();
-        self.inner.factory.build(
-            config
-                .approval_model
-                .as_deref()
-                .unwrap_or(&config.main_model),
-            &config,
-        )
+        let name = config
+            .approval_model
+            .as_deref()
+            .unwrap_or(&config.main_model);
+        let model = config
+            .models
+            .get(name)
+            .ok_or_else(|| miette::miette!("Review model is unavailable"))?;
+        Ok((
+            self.inner.factory.build(name, &config)?,
+            super::ModelUsage::new(name, model),
+        ))
     }
 
     pub fn requested_tool_context(

@@ -12,6 +12,7 @@ pub struct ContactMessage {
 #[derive(Debug, Serialize, serde::Deserialize)]
 pub struct ActorContact {
     pub actor: ActorSummary,
+    pub model: Option<String>,
     pub messages: Vec<ContactMessage>,
 }
 #[derive(Debug, Serialize, serde::Deserialize)]
@@ -58,6 +59,7 @@ WITH bubbles AS (
 impl ActorStore {
     pub fn contacts(
         &self,
+        config: &crate::config::Config,
         owner: &str,
         query: &str,
         after: Option<&str>,
@@ -114,6 +116,10 @@ impl ActorStore {
                 };
                 items.push(ActorContact {
                     actor: actor.summary(),
+                    model: {
+                        let model = config.actor_model_name(actor.config.model.as_deref());
+                        config.models.contains_key(model).then(|| model.to_owned())
+                    },
                     messages,
                 });
             }
@@ -153,16 +159,21 @@ mod tests {
         store.stage_transaction(|tx|{
             tx.execute_batch("CREATE TABLE stage_account_actors(actor TEXT PRIMARY KEY,account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('core','account-a'),('foreign','account-b');")?;Ok(())
         }).unwrap();
-        let page = store.contacts("core", "", None, 24).unwrap();
+        let config = crate::config::Config::default();
+        let page = store.contacts(&config, "core", "", None, 24).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].actor.id, "core");
         assert!(
             store
-                .contacts("core", "foreign", None, 24)
+                .contacts(&config, "core", "foreign", None, 24)
                 .unwrap()
                 .items
                 .is_empty()
         );
-        assert!(store.contacts("core", "", Some("foreign"), 24).is_err());
+        assert!(
+            store
+                .contacts(&config, "core", "", Some("foreign"), 24)
+                .is_err()
+        );
     }
 }

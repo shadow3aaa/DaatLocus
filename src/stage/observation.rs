@@ -127,7 +127,7 @@ pub fn read(
             if actor.actor_id!=super::shared::ACTOR_ID || !StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)? {
                 return Err(StageError::Forbidden("Contacts require account ownership"));
             }
-            let mut page=system.store().contacts(&actor.actor_id,text,after.as_deref(),*limit as usize).map_err(fail)?;
+            let mut page=system.store().contacts(&system.config(),&actor.actor_id,text,after.as_deref(),*limit as usize).map_err(fail)?;
             page.items.retain(|item|item.actor.id!=super::shared::ACTOR_ID);
             serde_json::to_value(page)
         },

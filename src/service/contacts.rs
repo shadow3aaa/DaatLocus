@@ -74,6 +74,7 @@ pub(super) async fn list(
                 .system
                 .store()
                 .contacts(
+                    &state.system.config(),
                     crate::stage::shared::ACTOR_ID,
                     &text,
                     cursor.after.as_deref(),

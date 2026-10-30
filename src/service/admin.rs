@@ -247,7 +247,17 @@ async fn usage(
 ) -> ApiResult<Json<Value>> {
     owner(&state, &headers).await?;
     let actor = state.system.actor(&actor).map_err(ApiError::from_report)?;
+    #[derive(serde::Serialize)]
+    struct Usage<'a> {
+        #[serde(flatten)]
+        totals: &'a crate::core::TokenUsageInfo,
+        models: &'a [crate::actors::ModelUsage],
+    }
     Ok(Json(
-        serde_json::to_value(actor.context.usage).map_err(|_| ApiError::internal())?,
+        serde_json::to_value(Usage {
+            totals: &actor.context.usage,
+            models: &actor.context.model_usage,
+        })
+        .map_err(|_| ApiError::internal())?,
     ))
 }

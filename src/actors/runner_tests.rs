@@ -832,6 +832,12 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
         MessageStatus::Completed
     );
     let first_usage = system.actor("root").unwrap().context.usage;
+    let first_models = system.actor("root").unwrap().context.model_usage;
+    assert_eq!(first_models.len(), 1);
+    assert_eq!(first_models[0].model, "mock");
+    assert_eq!(first_models[0].provider, "mock");
+    assert_eq!(first_models[0].model_id, "mock");
+    assert_eq!(first_models[0].usage, first_usage);
     assert!(
         first_usage.total_token_usage.input_tokens > 0 && first_usage.daily_token_usage.len() == 1
     );
@@ -859,6 +865,16 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
     .unwrap();
     assert_eq!(system.actor("root").unwrap().context.usage, first_usage);
     assert_eq!(
+        system.actor("root").unwrap().context.model_usage,
+        first_models
+    );
+    let mut config = runtime_config();
+    let mut replacement = config.models.remove("mock").unwrap();
+    replacement.model_id = "replacement-v2".into();
+    config.models.insert("replacement".into(), replacement);
+    config.main_model = "replacement".into();
+    system.update_config(config).await.unwrap();
+    assert_eq!(
         crate::resources::bytes(&system, "root", &resource).unwrap(),
         original.as_bytes()
     );
@@ -879,6 +895,14 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
             .input_tokens
             > first_usage.total_token_usage.input_tokens
     );
+    let updated = system.actor("root").unwrap().context;
+    assert_eq!(updated.model_usage.len(), 2);
+    assert_eq!(updated.model_usage[0], first_models[0]);
+    assert_eq!(updated.model_usage[1].model, "replacement");
+    assert_eq!(updated.model_usage[1].model_id, "replacement-v2");
+    let mut sum = first_models[0].usage.total_token_usage.clone();
+    sum.add_assign(&updated.model_usage[1].usage.total_token_usage);
+    assert_eq!(sum, updated.usage.total_token_usage);
     system.shutdown().await;
 }
 

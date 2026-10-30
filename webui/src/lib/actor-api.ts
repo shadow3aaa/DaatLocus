@@ -354,7 +354,9 @@ export type TokenUsageInfo = {
   model_context_window: number | null;
   daily_token_usage: DailyTokenUsage[];
 };
-export const getActorUsage = (id: string, options?: FetchOptions) => request<TokenUsageInfo>(`${actorPath(id)}/usage`, options);
+export type ModelUsage = TokenUsageInfo & { model: string; provider: string; model_id: string };
+export type ActorUsage = TokenUsageInfo & { models: ModelUsage[] };
+export const getActorUsage = (id: string, options?: FetchOptions) => request<ActorUsage>(`${actorPath(id)}/usage`, options);
 export const getActor = (id: string, options?: FetchOptions) => request<ActorDetail>(actorPath(id), options);
 export const patchActorPreferences = (id: string, preferences: {
   model?: string | null;
