@@ -19,6 +19,7 @@ include = [
     "/AGENTS.md",
     "/assets/logo.svg",
     "/assets/logo-mark.svg",
+    "/assets/wordmark.txt",
     "/build.rs",
     "/docs/**",
     "/src/**",

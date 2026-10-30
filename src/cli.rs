@@ -22,7 +22,7 @@ const AFTER_HELP: &str = "\x1b[92;1mExamples\x1b[0m\n  \x1b[96mdaat-locus serve\
 #[derive(Debug, Parser)]
 #[command(name = "daat-locus", version, propagate_version = true)]
 #[command(about = "Local Actor/App service with a WebUI.")]
-#[command(styles = HELP_STYLES, before_help = crate::terminal_logo::render_daat_locus_logo())]
+#[command(styles = HELP_STYLES, help_template = crate::terminal_logo::help_template())]
 #[command(after_help = AFTER_HELP)]
 struct Cli {
     #[command(subcommand)]
@@ -312,6 +312,33 @@ mod tests {
                 .command,
             Some(Command::Restart { open: false })
         ));
+    }
+
+    #[test]
+    fn help_keeps_the_wordmark_pixels_at_normal_terminal_widths() {
+        let pixels: Vec<_> = include_str!("../assets/wordmark.txt").lines().collect();
+        let ansi = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        for width in [60, 80, 120] {
+            let help = Cli::command().term_width(width).render_help().to_string();
+            let help = ansi.replace_all(&help, "");
+            let lines: Vec<_> = help.lines().take(pixels.len().div_ceil(2)).collect();
+            for (y, row) in pixels.iter().enumerate() {
+                let line: Vec<_> = lines[y / 2].chars().collect();
+                for (x, expected) in row.bytes().enumerate() {
+                    let glyph = line.get(x).copied().unwrap_or(' ');
+                    let visible = if y % 2 == 0 {
+                        matches!(glyph, '█' | '▀')
+                    } else {
+                        matches!(glyph, '█' | '▄')
+                    };
+                    assert_eq!(
+                        visible,
+                        matches!(expected, b'C' | b'V'),
+                        "wordmark pixel ({x}, {y}) at {width} columns"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

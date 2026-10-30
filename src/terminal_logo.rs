@@ -1,94 +1,55 @@
+const PIXELS: &str = include_str!("../assets/wordmark.txt");
 const RESET: &str = "\x1b[0m";
 
-#[derive(Clone, Copy)]
-struct LogoTone {
-    ink: &'static str,
-    shadow_fg: &'static str,
-    shadow_bg: &'static str,
+pub fn help_template() -> String {
+    // clap reflows before_help as prose, including whitespace inside pixel art.
+    // A literal template prefix preserves the logo while ordinary help still wraps.
+    format!(
+        "{}\n\n{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{{all-args}}{{after-help}}",
+        render_daat_locus_logo()
+    )
 }
-
-const LEFT_TONE: LogoTone = LogoTone {
-    ink: "\x1b[38;5;87m",
-    shadow_fg: "\x1b[38;5;24m",
-    shadow_bg: "\x1b[48;5;24m",
-};
-
-const RIGHT_TONE: LogoTone = LogoTone {
-    ink: "\x1b[38;5;141m",
-    shadow_fg: "\x1b[38;5;54m",
-    shadow_bg: "\x1b[48;5;54m",
-};
-
-const DAAT_LEFT: &[&str] = &[
-    "                   ",
-    "█▀▀▄ █▀▀█ █▀▀█ ▀█▀ ",
-    "█__█ █__█ █__█  █  ",
-    "▀▀▀  ▀  ▀ ▀  ▀  ▀  ",
-];
-
-const LOCUS_RIGHT: &[&str] = &[
-    "                        ",
-    "█    █▀▀█ █▀▀▀ █  █ █▀▀▀",
-    "█    █__█ █___ █__█ ▀▀▀█",
-    "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
-];
 
 pub fn render_daat_locus_logo() -> String {
+    let rows: Vec<_> = PIXELS.lines().map(str::as_bytes).collect();
     let mut out = String::new();
-    let rows = DAAT_LEFT.len().max(LOCUS_RIGHT.len());
-
-    for row in 0..rows {
-        if row > 0 {
+    for (index, pair) in rows.chunks(2).enumerate() {
+        if index > 0 {
             out.push('\n');
         }
-
-        render_template_line(
-            &mut out,
-            DAAT_LEFT.get(row).copied().unwrap_or_default(),
-            LEFT_TONE,
-        );
-        out.push_str("   ");
-        render_template_line(
-            &mut out,
-            LOCUS_RIGHT.get(row).copied().unwrap_or_default(),
-            RIGHT_TONE,
-        );
-    }
-
-    out
-}
-
-fn render_template_line(out: &mut String, line: &str, tone: LogoTone) {
-    for ch in line.chars() {
-        match ch {
-            ' ' => out.push(' '),
-            '_' => {
-                out.push_str(tone.shadow_bg);
-                out.push(' ');
+        let mut style = (b'.', false);
+        for (column, &top) in pair[0].iter().enumerate() {
+            let bottom = pair.get(1).map_or(b'.', |row| row[column]);
+            let top_ink = matches!(top, b'C' | b'V');
+            let bottom_ink = matches!(bottom, b'C' | b'V');
+            let ink = if top_ink {
+                top
+            } else if bottom_ink {
+                bottom
+            } else {
+                b'.'
+            };
+            let shadow = top == b'S' || bottom == b'S';
+            if style != (ink, shadow) {
                 out.push_str(RESET);
+                match ink {
+                    b'C' => out.push_str("\x1b[38;2;183;177;177m"),
+                    b'V' => out.push_str("\x1b[38;2;241;236;236m"),
+                    _ => {}
+                }
+                if shadow {
+                    out.push_str("\x1b[48;2;75;70;70m");
+                }
+                style = (ink, shadow);
             }
-            '^' => {
-                out.push_str(tone.ink);
-                out.push_str(tone.shadow_bg);
-                out.push('▀');
-                out.push_str(RESET);
-            }
-            '~' => {
-                out.push_str(tone.shadow_fg);
-                out.push('▀');
-                out.push_str(RESET);
-            }
-            ',' => {
-                out.push_str(tone.shadow_fg);
-                out.push('▄');
-                out.push_str(RESET);
-            }
-            '█' | '▀' | '▄' => {
-                out.push_str(tone.ink);
-                out.push(ch);
-                out.push_str(RESET);
-            }
-            _ => out.push(ch),
+            out.push(match (top_ink, bottom_ink) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
         }
+        out.push_str(RESET);
     }
+    out
 }
