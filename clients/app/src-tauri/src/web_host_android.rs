@@ -146,7 +146,7 @@ impl Bridge {
                 env.cast_local::<JString>(value)?.try_to_string(env)
             })
             .map_err(|_| "Android Web host unavailable")?;
-        if result.len() > 12 * 1024 * 1024 {
+        if result.len() > 96 * 1024 * 1024 {
             return Err("Android Web capture exceeds its limit".into());
         }
         serde_json::from_str(&result).map_err(|_| "Invalid Android Web capture".into())

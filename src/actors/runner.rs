@@ -1085,6 +1085,9 @@ fn record_tool_error(
 
 fn context_overflow(error: &miette::Report) -> bool {
     crate::context_budget::is_context_budget_exceeded(error)
+        || error
+            .downcast_ref::<crate::image_input::ImageRequestBudgetError>()
+            .is_some()
 }
 
 /// New messages preempt inference at settled boundaries. A nested input owns
@@ -1217,8 +1220,11 @@ async fn generate(
             )?;
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let materialized =
+            crate::resources::model_request(system, &actor.id, request.clone(), vision)
+                .map_err(|error| crate::image_input::ImageRequestError(error.to_string()))?;
         let mut options =
-            ModelRequestOptions::for_agent_turn(provider, &request, Some(actor.id.clone()))?;
+            ModelRequestOptions::for_agent_turn(provider, &materialized, Some(actor.id.clone()))?;
         let estimated_input = options.budget.total_input_tokens;
         options.budget = options
             .budget
@@ -1247,11 +1253,7 @@ async fn generate(
         let usage_before = provider.token_usage_info().total_token_usage;
         let future = tokio::time::timeout(
             policy.request_timeout_for_attempt(attempt),
-            provider.complete_agent_turn(
-                crate::resources::model_request(system, &actor.id, request.clone(), vision)
-                    .map_err(|error| miette!("{error}"))?,
-                options,
-            ),
+            provider.complete_agent_turn(materialized, options),
         );
         tokio::pin!(future);
         let mut pending = ProgressBuffer::default();
@@ -1355,6 +1357,9 @@ async fn generate(
                     if error
                         .downcast_ref::<crate::context_budget::ContextBudgetExceededError>()
                         .is_some()
+                        || error
+                            .downcast_ref::<crate::image_input::ImageRequestBudgetError>()
+                            .is_some()
                         || error
                             .downcast_ref::<crate::providers::ModelRequestFailure>()
                             .is_some()

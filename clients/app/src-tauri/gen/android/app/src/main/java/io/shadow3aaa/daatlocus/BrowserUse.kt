@@ -277,7 +277,7 @@ internal object BrowserUse {
   }
   private fun captureOwner(owner:MainActivity,view:WebView,done:(ByteArray?,String?)->Unit){
     val width=view.width;val height=view.height
-    if(!embedded||!view.isShown||width<=0||height<=0||width.toLong()*height>8_000_000){done(null,"Open a browser page before capturing");return}
+    if(!embedded||!view.isShown||width<=0||height<=0||width.toLong()*height>64_000_000){done(null,"Open a browser page before capturing");return}
     cursor(view,JSONObject().put("kind","suspend")){
       view.postVisualStateCallback(SystemClock.uptimeMillis(),object:WebView.VisualStateCallback(){override fun onComplete(requestId:Long){
         if(!embedded||!view.isShown||!view.isAttachedToWindow){cursor(view,JSONObject().put("kind","resume"));done(null,"Browser page is no longer visible");return}
@@ -493,7 +493,7 @@ internal object BrowserUse {
       val page=WebHost.pages[key] ?: run {fail("Browser page closed");return}
       val view=page.view
       val width=view.width;val height=view.height
-      if(width<=0||height<=0||width.toLong()*height>8_000_000){fail("Browser viewport exceeds image budget");return}
+      if(width<=0||height<=0||width.toLong()*height>64_000_000){fail("Browser viewport exceeds image budget");return}
       val bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888)
       fun copied(success:Boolean) {
         cursor(view,JSONObject().put("kind","resume"))
@@ -544,7 +544,8 @@ internal object BrowserUse {
           "input"->{
             val page=WebHost.pages[key] ?: throw IllegalStateException("Browser page closed")
             val images=frames[key]
-            val frame=images?.firstOrNull{it.id==command.getString("state_id")} ?: images?.lastOrNull() ?: ImageFrame("",page.view.width.coerceAtLeast(1),page.view.height.coerceAtLeast(1))
+            val coordinateSize=command.optJSONArray("coordinate_size")
+            val frame=if(coordinateSize!=null) ImageFrame(command.getString("state_id"),coordinateSize.getInt(0),coordinateSize.getInt(1)) else images?.firstOrNull{it.id==command.getString("state_id")} ?: images?.lastOrNull() ?: ImageFrame("",page.view.width.coerceAtLeast(1),page.view.height.coerceAtLeast(1))
             frameReady(page.view,{ metrics(page.view,script,{value ->
               try {
                 if(result.isDone||jobs[key]!=id)return@metrics

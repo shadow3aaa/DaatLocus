@@ -121,6 +121,7 @@ impl BackendRequest<'_> {
         diagnostics: &[String],
         header_timeout: Duration,
     ) -> Result<reqwest::Response> {
+        crate::image_input::validate_payload(payload)?;
         let (mut rate_retries, mut server_retries) = (0usize, 0usize);
         loop {
             self.http.wait().await;

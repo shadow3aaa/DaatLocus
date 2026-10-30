@@ -566,7 +566,7 @@ public final class PhoneUseHost {
             window.state = null; unobscured(window);
             if (region == null) region = new Rect(0, 0, window.bounds.width(), window.bounds.height());
             require(!region.isEmpty() && new Rect(0, 0, window.bounds.width(), window.bounds.height()).contains(region)
-                && scale >= 1 && scale <= 4 && (long) region.width() * region.height() * scale * scale <= 8_000_000, "Invalid crop or image size");
+                && scale >= 1 && scale <= 4 && (long) region.width() * region.height() * scale * scale <= 64_000_000, "Invalid crop or image size");
             byte[] image;
             synchronized (this) {
                 long deadline = SystemClock.uptimeMillis() + 3000;

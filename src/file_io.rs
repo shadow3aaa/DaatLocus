@@ -20,7 +20,7 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
 };
 
-pub const MAX_VIEW_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+pub const MAX_VIEW_IMAGE_BYTES: u64 = crate::image_input::MAX_SOURCE_BYTES;
 const MAX_READ_PAGE_BYTES: usize = 1024 * 1024;
 /// A search never descends further than this many directory levels below its root.
 const MAX_SEARCH_DEPTH: usize = 32;
@@ -113,6 +113,10 @@ pub struct CopyFileArgs {
 #[serde(deny_unknown_fields)]
 pub struct ViewImageArgs {
     pub path: String,
+    /// Source pixels; null views the complete original snapshot.
+    pub region: Option<crate::image_input::ImageRegion>,
+    /// Positive bounds <= 1568 per side and 1150000 pixels; null uses 1024 / 786432.
+    pub resolution: Option<crate::image_input::ImageResolution>,
 }
 
 #[model_schema]
@@ -269,6 +273,7 @@ fn file_change(before: &[u8], after: &[u8], created: bool) -> Option<FileChange>
 
 #[derive(Debug, Clone)]
 pub struct ViewedImage {
+    pub view: crate::image_input::ImageView,
     pub media_type: String,
     pub byte_count: usize,
     pub model_image: AgentContentPart,
@@ -1307,14 +1312,15 @@ pub fn view_image(
     }
     let path = authorized_path(cwd, policy, &args.path, false)?;
     let bytes = read_bytes(&path, MAX_VIEW_IMAGE_BYTES, policy)?;
-    view_image_bytes(&bytes, image_state_dir, &args.path)
+    view_image_bytes(&bytes, image_state_dir, args)
 }
 
 pub(crate) fn view_image_bytes(
     bytes: &[u8],
     image_state_dir: &Path,
-    description: &str,
+    args: &ViewImageArgs,
 ) -> Result<ViewedImage> {
+    let view = crate::image_input::prepare(bytes, args.region, args.resolution, false)?.view;
     let (media_type, extension) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         ("image/png", "png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -1336,12 +1342,14 @@ pub(crate) fn view_image_bytes(
     )
     .map_err(|_| miette!("unable to store image input"))?;
     Ok(ViewedImage {
+        view,
         media_type: media_type.into(),
         byte_count: bytes.len(),
         model_image: AgentContentPart::Image {
+            view: Some(view),
             path: snapshot.display().to_string(),
             media_type: media_type.into(),
-            description: Some(description.into()),
+            description: Some(args.path.clone()),
         },
     })
 }
@@ -2325,6 +2333,8 @@ mod tests {
             true,
             &ViewImageArgs {
                 path: "image.gif".into(),
+                region: None,
+                resolution: None,
             },
         )
         .unwrap();

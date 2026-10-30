@@ -129,7 +129,7 @@ mod transport {
         Ok(())
     }
     pub fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > 48 * 1024 * 1024 {
+        if bytes.len() > 96 * 1024 * 1024 {
             return Err(Error("GUI reply exceeds budget".into()));
         }
         stream
@@ -182,7 +182,7 @@ mod transport {
                 return Err(Error("GUI request exceeds budget".into()));
             }
             write_frame(&mut stream, &bytes)?;
-            serde_json::from_slice(&read_frame(&mut stream, 48 * 1024 * 1024)?)
+            serde_json::from_slice(&read_frame(&mut stream, 96 * 1024 * 1024)?)
                 .map_err(|_| Error("Invalid GUI reply; do not replay".into()))
         }
         pub fn cancel(&self, id: &str) {

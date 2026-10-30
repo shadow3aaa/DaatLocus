@@ -252,7 +252,10 @@ pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
         return Some(format!("data:{media_type};base64,{data_base64}"));
     }
     let AgentContentPart::Image {
-        path, media_type, ..
+        path,
+        media_type,
+        view,
+        ..
     } = part
     else {
         return None;
@@ -265,10 +268,16 @@ pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
             return None;
         }
     };
-    let media_type = normalize_image_part_media_type(path, media_type)?;
+    normalize_image_part_media_type(path, media_type)?;
+    let prepared = match view {
+        Some(view) => crate::image_input::render_view(&bytes, *view),
+        None => crate::image_input::prepare(&bytes, None, None, false),
+    }
+    .ok()?;
+    let media_type = prepared.media_type;
     Some(format!(
         "data:{media_type};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
+        base64::engine::general_purpose::STANDARD.encode(&prepared.bytes)
     ))
 }
 

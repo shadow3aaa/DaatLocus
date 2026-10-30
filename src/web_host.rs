@@ -135,8 +135,9 @@ pub fn validate_reply(request: &Request, reply: &Reply) -> Result<()> {
                 if &observation.page.tab != tab
                     || observation.width == 0
                     || observation.height == 0
-                    || u64::from(observation.width) * u64::from(observation.height) > 8_000_000
-                    || observation.png_base64.len() > 10 * 1024 * 1024
+                    || u64::from(observation.width) * u64::from(observation.height)
+                        > crate::image_input::MAX_SOURCE_PIXELS
+                    || observation.png_base64.len() > 96 * 1024 * 1024
                     || observation.state_id != request.id
                     || observation.state_id.len() != 32
                     || !observation.state_id.bytes().all(|b| b.is_ascii_hexdigit())

@@ -236,6 +236,44 @@ pub(crate) fn utf8_prefix(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
+pub fn estimate_agent_turn_request_for_model<'a>(
+    messages: impl IntoIterator<Item = &'a AgentMessage>,
+    tools: &[AgentToolSpec],
+    limits: RequestBudgetLimits,
+    model: &str,
+) -> RequestBudgetBreakdown {
+    let messages: Vec<_> = messages.into_iter().collect();
+    let mut budget = estimate_agent_turn_request(messages.iter().copied(), tools, limits);
+    let mut generic = 0usize;
+    let mut specific = 0usize;
+    for message in messages {
+        if let AgentMessage::User { content } = message {
+            for part in content.parts() {
+                generic += crate::image_input::image_tokens(part, None);
+                specific += crate::image_input::image_tokens(part, Some(model));
+            }
+        }
+    }
+    if let Some(section) = budget
+        .sections
+        .iter_mut()
+        .find(|s| s.name == "user_messages")
+    {
+        section.tokens = section
+            .tokens
+            .saturating_sub(generic)
+            .saturating_add(specific);
+    }
+    budget.total_input_tokens = budget
+        .total_input_tokens
+        .saturating_sub(generic)
+        .saturating_add(specific);
+    budget.total_with_reserve_tokens = budget
+        .total_input_tokens
+        .saturating_add(budget.reserved_output_tokens);
+    budget
+}
+
 pub fn estimate_agent_turn_request<'a>(
     messages: impl IntoIterator<Item = &'a AgentMessage>,
     tools: &[AgentToolSpec],
@@ -403,7 +441,13 @@ pub fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     match message {
         AgentMessage::System { content } => message_token_cost("system", content),
         AgentMessage::User { content } => message_token_cost("user", content.as_text())
-            .saturating_add(content.parts().len() * 1024),
+            .saturating_add(
+                content
+                    .parts()
+                    .iter()
+                    .map(|part| crate::image_input::image_tokens(part, None))
+                    .sum::<usize>(),
+            ),
         AgentMessage::Assistant { content, .. } => message_token_cost("assistant", content),
         AgentMessage::AssistantToolCallProtocol {
             content,

@@ -1984,6 +1984,7 @@ impl ActorSystem {
                 "image/png" | "image/jpeg" | "image/gif" | "image/webp"
             ) {
                 parts.push(AgentContentPart::ResourceImage {
+                    view: None,
                     description: Some(resource.name.clone()),
                     resource,
                 });

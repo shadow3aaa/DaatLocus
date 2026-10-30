@@ -284,8 +284,8 @@ object PhoneUseController {
                 val json = JSONObject(reply.json)
                 reply.image?.let { fd ->
                     android.os.ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
-                        val bytes = input.readNBytes(8_000_001)
-                        check(bytes.size <= 8_000_000) { "Screenshot exceeds limit" }
+                        val bytes = input.readNBytes(64 * 1024 * 1024 + 1)
+                        check(bytes.size <= 64 * 1024 * 1024) { "Screenshot exceeds limit" }
                         check(images.size < 8) { "Too many pending screenshots" }
                         images[id] = bytes
                     }

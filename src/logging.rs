@@ -234,6 +234,7 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
                         path,
                         media_type,
                         description,
+                        ..
                     } => {
                         lines.push(format!(
                             "part[{index}]=image media_type={media_type} path={path} description={}",

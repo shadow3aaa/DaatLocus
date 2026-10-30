@@ -71,11 +71,24 @@ struct ImageRegion {
 #[model_schema]
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ObserveArgs {
+struct NativeObserveArgs {
     window_id: String,
     region: Option<ImageRegion>,
     scale: Option<u32>,
 }
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ObserveArgs {
+    window_id: String,
+    /// Null captures a fresh image; a returned state_id re-views that saved source.
+    state_id: Option<String>,
+    /// Original screenshot pixels, not coordinates of a previous crop.
+    region: Option<crate::image_input::ImageRegion>,
+    /// Bounds <=1568 per side / 1150000 pixels; null uses a low-resolution overview.
+    resolution: Option<crate::image_input::ImageResolution>,
+}
+
 #[model_schema]
 #[derive(Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -138,7 +151,7 @@ impl ObservedView {
         }
         if (i64::from(region.width) * i64::from(region.height))
             .checked_mul(i64::from(scale).pow(2))
-            .is_none_or(|pixels| pixels > 8_000_000)
+            .is_none_or(|pixels| pixels > crate::image_input::MAX_SOURCE_PIXELS as i64)
         {
             return Err(miette!(
                 "image is too large; select a smaller region or lower scale"
@@ -304,7 +317,7 @@ impl ComputerUseApp {
             ),
             tool(
                 "get_window_state",
-                "Observe the complete taken window, including its title bar. Null region/scale returns the full window at native resolution. A region uses full-window pixel coordinates; scale 1..4 magnifies it. Input coordinates always refer to the returned image; the host handles crop/scale conversion. After outcome_unknown, timeout or capture failure, observe before deciding whether another input is needed.",
+                "Observe the taken window. Null state_id captures fresh pixels; a returned state_id re-views its saved original without operating the window. region uses original screenshot pixels; resolution bounds are <=1568 per side and <=1150000 pixels. Null settings return a low-resolution overview. Input coordinates use the returned image and state_id; crop/scale conversion is automatic. After outcome_unknown, observe fresh before continuing.",
                 model_schema_for::<ObserveArgs>(),
             ),
             tool(
@@ -430,6 +443,51 @@ impl App for ComputerUseApp {
                 "ComputerUse observation and input require a vision-capable model"
             ));
         }
+        let mut region = None;
+        let mut resolution = None;
+        let native_call = if call.name == "get_window_state" {
+            let args: ObserveArgs = parse(&call.arguments)?;
+            region = args.region;
+            resolution = args.resolution;
+            if let Some(resolution) = resolution {
+                resolution.validate()?;
+            }
+            if let Some(reference) = args.state_id {
+                let (observation, image) = crate::gui_image::reframe(
+                    &self.system,
+                    &self.actor_id,
+                    "computer",
+                    &args.window_id,
+                    &reference,
+                    region,
+                    resolution,
+                )?;
+                let payload = json!({"status":"observed","observation":observation});
+                let mut result = AppToolExecutionResult::new(
+                    "Saved window image",
+                    payload.clone(),
+                    Some(payload.to_string()),
+                )
+                .with_output_schema::<crate::app::output::GuiOutput>();
+                result.model_images.push(image);
+                return Ok(result);
+            }
+            AgentToolCall {
+                arguments: json!({"window_id":args.window_id,"region":null,"scale":1}),
+                ..call.clone()
+            }
+        } else {
+            crate::gui_image::map_call(
+                &self.system,
+                &self.actor_id,
+                "computer",
+                "window_id",
+                call,
+                true,
+            )?
+            .0
+        };
+        let call = &native_call;
         #[cfg(windows)]
         {
             if self.client.is_none() {
@@ -444,12 +502,26 @@ impl App for ComputerUseApp {
                 .expect("initialized client")
                 .call(call.clone(), context.clone())
                 .await?;
-            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
+            self.publish_reply(
+                reply.summary,
+                reply.payload,
+                reply.failure,
+                reply.image,
+                region,
+                resolution,
+            )
         }
         #[cfg(target_os = "android")]
         {
             let reply = self.android.call(&self.actor_id, call, context).await?;
-            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
+            self.publish_reply(
+                reply.summary,
+                reply.payload,
+                reply.failure,
+                reply.image,
+                region,
+                resolution,
+            )
         }
         #[cfg(target_os = "macos")]
         {
@@ -457,11 +529,18 @@ impl App for ComputerUseApp {
                 .macos
                 .call(&self.actor_id, &self.system, call, context)
                 .await?;
-            self.publish_reply(reply.summary, reply.payload, reply.failure, reply.image)
+            self.publish_reply(
+                reply.summary,
+                reply.payload,
+                reply.failure,
+                reply.image,
+                region,
+                resolution,
+            )
         }
         #[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
         {
-            let _ = (&self.system, call);
+            let _ = (&self.system, call, region, resolution);
             Err(miette!("ComputerUse requires a supported native backend"))
         }
     }
@@ -486,43 +565,38 @@ impl ComputerUseApp {
         payload: Value,
         failure: Option<String>,
         image: Option<Vec<u8>>,
+        region: Option<crate::image_input::ImageRegion>,
+        resolution: Option<crate::image_input::ImageResolution>,
     ) -> Result<AppToolExecutionResult> {
         let mut result = AppToolExecutionResult::new(summary, payload, None)
             .with_output_schema::<crate::app::output::GuiOutput>();
         result.failure = failure;
         if let Some(bytes) = image {
-            let resource = match crate::resources::publish(
+            match crate::gui_image::publish(
                 &self.system,
                 &self.actor_id,
-                "computer-use.png",
-                "image/png",
+                "computer",
+                result.payload["observation"].clone(),
                 &bytes,
+                region,
+                resolution,
             ) {
-                Ok(resource) => resource,
+                Ok((observation, image)) => {
+                    result.payload["observation"] = observation;
+                    result.model_images.push(image);
+                    result.model_content = Some(result.payload.to_string());
+                }
                 Err(_) => {
                     result.payload["status"] = json!("outcome_unknown");
                     result.payload["observation_error"] = json!(
-                        "Screenshot resource publication failed; observe before continuing, do not replay the operation"
+                        "Screenshot preparation failed; observe fresh before continuing, do not replay the operation"
                     );
-                    result.failure = Some("ComputerUse screenshot resource unavailable after native operation; do not replay".into());
-                    return Ok(result);
+                    result.failure = Some(
+                        "ComputerUse image unavailable after native operation; do not replay"
+                            .into(),
+                    );
                 }
-            };
-            result.payload["observation"]["screenshot"] =
-                serde_json::to_value(&resource).map_err(|e| miette!("{e}"))?;
-            result.payload["observation"]["screenshot_url"] = json!(format!(
-                "/v1/actors/{}/resources/{}",
-                self.actor_id, resource.id
-            ));
-            result
-                    .model_images
-                    .push(crate::model_protocol::AgentContentPart::ResourceImage {
-                        resource,
-                        description: Some(
-                            "Observed window or explicitly selected region. Input coordinates use this returned image; the host maps its crop and scale."
-                                .into(),
-                        ),
-                    });
+            }
         }
         Ok(result)
     }

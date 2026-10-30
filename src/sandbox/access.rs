@@ -296,7 +296,7 @@ impl<'a> FileSystem<'a> {
                     file_io::MAX_VIEW_IMAGE_BYTES,
                 )
                 .await?;
-            return file_io::view_image_bytes(&bytes, image_dir, &args.path);
+            return file_io::view_image_bytes(&bytes, image_dir, args);
         }
         let policy = self.read_policy(&args.path).await?;
         file_io::view_image(

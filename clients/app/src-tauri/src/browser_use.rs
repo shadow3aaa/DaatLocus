@@ -200,6 +200,7 @@ impl NativeHost {
             BrowserCommand::Input {
                 tab,
                 state_id,
+                coordinate_size,
                 input,
             } => {
                 let key = label(profile, &tab);
@@ -231,8 +232,9 @@ impl NativeHost {
                     None
                 };
                 let size = window.size().map_err(|_| "Browser viewport unavailable")?;
-                let (image_width, image_height) = frame
-                    .map(|frame| (frame.width, frame.height))
+                let (image_width, image_height) = coordinate_size
+                    .map(|[w, h]| (w, h))
+                    .or_else(|| frame.map(|frame| (frame.width, frame.height)))
                     .unwrap_or((size.width.max(1), size.height.max(1)));
                 let map = |x: f64, y: f64| -> Result<(f64, f64), String> {
                     if !x.is_finite()
@@ -368,13 +370,13 @@ impl NativeHost {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&png)
             .map_err(|_| "Invalid browser screenshot")?;
-        if bytes.len() < 24 || bytes[..8] != *b"\x89PNG\r\n\x1a\n" || bytes.len() > 7 * 1024 * 1024
+        if bytes.len() < 24 || bytes[..8] != *b"\x89PNG\r\n\x1a\n" || bytes.len() > 64 * 1024 * 1024
         {
             return Err("Browser screenshot exceeds its image budget".into());
         }
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 8_000_000 {
+        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 64_000_000 {
             return Err("Browser image geometry exceeds its budget".into());
         }
         let mut page = page(&window, tab)?;

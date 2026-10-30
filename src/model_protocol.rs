@@ -68,11 +68,15 @@ pub enum AgentContentPart {
         path: String,
         media_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<crate::image_input::ImageView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
     /// Durable image identity. Device-local paths are resolved only at the provider boundary.
     ResourceImage {
         resource: crate::resources::Resource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<crate::image_input::ImageView>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
@@ -93,6 +97,7 @@ impl AgentContentPart {
             Self::ResourceImage {
                 resource,
                 description,
+                ..
             } => Some(description.as_deref().unwrap_or(&resource.name)),
             Self::Text { .. } => None,
             Self::ImageData { description, .. } => Some(description.as_deref().unwrap_or("image")),
@@ -655,6 +660,7 @@ mod tests {
                 assert_eq!(
                     content.parts()[0],
                     AgentContentPart::Image {
+                        view: None,
                         path: "/tmp/demo.png".to_string(),
                         media_type: "image/png".to_string(),
                         description: Some("demo image".to_string()),

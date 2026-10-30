@@ -1613,7 +1613,7 @@ mod tests {
                 "Work",
                 vec![AgentContentPart::ImageData {
                     media_type: "image/png".into(),
-                    data_base64: "aGVsbG8=".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
                     description: None,
                 }],
             )
@@ -1808,7 +1808,7 @@ mod tests {
                     "Image",
                     vec![AgentContentPart::ImageData {
                         media_type: "image/png".into(),
-                        data_base64: "aGVsbG8=".into(),
+                        data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
                         description: None,
                     }],
                 )),

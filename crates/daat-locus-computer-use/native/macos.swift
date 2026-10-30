@@ -319,7 +319,7 @@ private func adjust(_ lease: Lease, _ request: [String: Any]) throws {
   if action == "resize" {
     let size = try CGSize(width: number(request, "width"), height: number(request, "height"))
     try require(
-      size.width >= 100 && size.height >= 100 && size.width * size.height * 4 <= 8_000_000
+      size.width >= 100 && size.height >= 100 && size.width * size.height * 4 <= 64_000_000
         && area.contains(CGRect(origin: bounds.origin, size: size)),
       "Size outside virtual display or image budget")
     try setSize(lease.element, size)
@@ -327,7 +327,7 @@ private func adjust(_ lease: Lease, _ request: [String: Any]) throws {
   }
   try require(action == "fit", "Unknown adjustment")
   let inset = area.insetBy(dx: 16, dy: 16)
-  let ratio = min(1.0, sqrt(8_000_000 / (inset.width * inset.height * 4)))
+  let ratio = min(1.0, sqrt(64_000_000 / (inset.width * inset.height * 4)))
   try setSize(
     lease.element, CGSize(width: floor(inset.width * ratio), height: floor(inset.height * ratio)))
   try setPoint(lease.element, inset.origin)
@@ -347,7 +347,7 @@ private func take(_ lease: Lease) throws {
   placementIndex += 1
   let width = min(current.width, area.width - offset)
   let height = min(current.height, area.height - offset)
-  let ratio = min(1.0, sqrt(8_000_000 / (width * height * 4)))
+  let ratio = min(1.0, sqrt(64_000_000 / (width * height * 4)))
   try setSize(lease.element, CGSize(width: floor(width * ratio), height: floor(height * ratio)))
   try setPoint(lease.element, CGPoint(x: area.minX + offset, y: area.minY + offset))
   let deadline = Date().addingTimeInterval(2)
@@ -533,7 +533,7 @@ private func capture(_ lease: Lease, _ request: [String: Any]) throws -> [String
     config.height = Int(bounds.height.rounded(.up)) * 2
     config.showsCursor = false
     config.ignoreShadowsSingleWindow = true
-    if config.width * config.height > 8_000_000 {
+    if config.width * config.height > 64_000_000 {
       failure = Failure(message: "Window image exceeds pixel budget")
       semaphore.signal()
       return
@@ -555,7 +555,7 @@ private func capture(_ lease: Lease, _ request: [String: Any]) throws -> [String
   try require(
     scale >= 1 && scale <= 4 && region.width > 0 && region.height > 0
       && CGRect(x: 0, y: 0, width: full.width, height: full.height).contains(region)
-      && region.width * region.height * Double(scale * scale) <= 8_000_000, "Invalid crop or scale")
+      && region.width * region.height * Double(scale * scale) <= 64_000_000, "Invalid crop or scale")
   guard let crop = full.cropping(to: region),
     let context = CGContext(
       data: nil, width: Int(region.width) * scale, height: Int(region.height) * scale,

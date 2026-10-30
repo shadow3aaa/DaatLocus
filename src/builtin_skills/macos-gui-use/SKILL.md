@@ -18,7 +18,7 @@ supported_actions, then check the returned observation for the intended result.
 For content outside the viewport, scroll or use adjust_window to fit or resize
 the window on the virtual display. Move and resize arguments use logical points;
 click, scroll and drag coordinates use pixels in the latest returned image.
-Use a cropped, magnified get_window_state for small visible details. After a
+Use a crop or higher-resolution saved image for small visible details. After a
 geometry change, inspect the fresh image and select the editable control again
 before entering text. Check the actual value before submitting it.
 

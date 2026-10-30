@@ -2,7 +2,7 @@
 use super::{ActorRecord, ActorSystem, MessageRecord, prompt::SystemPrompt};
 use crate::{
     app::AppToolExecutionContext,
-    context_budget::{TokenEstimateBaseline, estimate_agent_turn_request},
+    context_budget::{TokenEstimateBaseline, estimate_agent_turn_request_for_model},
     core::ModelProvider,
     model_protocol::{AgentMessage, AgentToolSpec, AgentTurnRequest},
 };
@@ -133,13 +133,16 @@ impl ModelContext {
         baseline: &TokenEstimateBaseline,
     ) -> bool {
         // Borrow the window during admission; do not clone schemas on every page.
-        let budget = estimate_agent_turn_request(
+        let budget = estimate_agent_turn_request_for_model(
             std::iter::once(&self.system).chain(history),
             &self.tools,
             provider.request_budget_limits(),
+            &provider.model_name(),
         )
         .with_conservative_calibrated_input_tokens(baseline);
-        budget.within_context_window() && !budget.above_auto_compact_threshold()
+        crate::image_input::fits_messages(std::iter::once(&self.system).chain(history))
+            && budget.within_context_window()
+            && !budget.above_auto_compact_threshold()
     }
 
     pub fn admitted(
@@ -183,7 +186,13 @@ impl ModelContext {
             }
         };
         let fits = |request: &AgentTurnRequest| {
-            estimate_agent_turn_request(&request.messages, &[], provider.request_budget_limits())
+            crate::image_input::fits_messages(&request.messages)
+                && estimate_agent_turn_request_for_model(
+                    &request.messages,
+                    &[],
+                    provider.request_budget_limits(),
+                    &provider.model_name(),
+                )
                 .with_conservative_calibrated_input_tokens(baseline)
                 .within_context_window()
         };

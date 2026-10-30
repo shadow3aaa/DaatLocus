@@ -327,7 +327,7 @@ async fn responses_reuses_summary_and_vision_fallbacks_across_instances() {
             "Inspect",
             vec![AgentContentPart::ImageData {
                 media_type: "image/png".into(),
-                data_base64: "iVBORw0KGgo=".into(),
+                data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
                 description: None,
             }],
         ))],

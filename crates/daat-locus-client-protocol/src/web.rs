@@ -74,6 +74,8 @@ pub enum BrowserCommand {
     Input {
         tab: String,
         state_id: String,
+        #[serde(default)]
+        coordinate_size: Option<[u32; 2]>,
         input: BrowserInput,
     },
     Close {
@@ -139,10 +141,16 @@ impl BrowserCommand {
         match self {
             Self::Open { url, .. } => !url.is_empty() && url.len() <= 8192,
             Self::Input {
-                state_id, input, ..
+                state_id,
+                input,
+                coordinate_size,
+                ..
             } => {
                 state_id.len() == 32
                     && state_id.bytes().all(|c| c.is_ascii_hexdigit())
+                    && coordinate_size.is_none_or(|[w, h]| {
+                        w > 0 && h > 0 && u64::from(w) * u64::from(h) <= 64_000_000
+                    })
                     && input.validate()
             }
             _ => true,
@@ -299,6 +307,7 @@ mod tests {
                 tab: "a".repeat(32),
             },
             BrowserCommand::Input {
+                coordinate_size: None,
                 tab: "a".repeat(32),
                 state_id: "b".repeat(32),
                 input: BrowserInput::Reload,

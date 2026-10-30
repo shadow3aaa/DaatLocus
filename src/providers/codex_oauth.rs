@@ -293,6 +293,7 @@ impl CodexResponsesClient {
         request_context: &[String],
         request_identity: Option<&CodexRequestIdentity>,
     ) -> Result<reqwest::Response> {
+        crate::image_input::validate_payload(payload)?;
         const MAX_429_RETRIES: usize = 4;
         const MAX_5XX_RETRIES: usize = 3;
 
@@ -2348,11 +2349,12 @@ mod tests {
         let client = test_client();
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("sample.png");
-        std::fs::write(&image_path, b"png-bytes").unwrap();
+        std::fs::write(&image_path, base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap()).unwrap();
         let request = AgentTurnRequest {
             messages: vec![AgentMessage::user_content(AgentContent::multimodal(
                 "describe this",
                 vec![AgentContentPart::Image {
+                    view: None,
                     path: image_path.display().to_string(),
                     media_type: "application/octet-stream".to_string(),
                     description: Some("sample".to_string()),

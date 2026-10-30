@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     context_budget::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
-        estimate_agent_turn_request, estimate_prompt_request,
+        estimate_prompt_request,
     },
     model_protocol::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
@@ -293,10 +293,11 @@ impl ModelRequestOptions {
         request: &AgentTurnRequest,
         conversation_id: Option<String>,
     ) -> Result<Self> {
-        let budget = estimate_agent_turn_request(
+        let budget = crate::context_budget::estimate_agent_turn_request_for_model(
             &request.messages,
             &request.tools,
             provider.request_budget_limits(),
+            &provider.model_name(),
         );
         Self::from_budget("agent turn", provider, budget, conversation_id)
     }
@@ -596,6 +597,15 @@ pub fn model_request_error_detail(err: &miette::Report) -> String {
 }
 
 pub fn should_retry_agent_turn_error(error: &miette::Report) -> bool {
+    if error
+        .downcast_ref::<crate::image_input::ImageRequestError>()
+        .is_some()
+        || error
+            .downcast_ref::<crate::image_input::ImageRequestBudgetError>()
+            .is_some()
+    {
+        return false;
+    }
     if is_context_budget_error(error) {
         return false;
     }

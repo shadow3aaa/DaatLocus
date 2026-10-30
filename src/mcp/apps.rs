@@ -498,6 +498,7 @@ impl App for McpApp {
                 resources.push(json!({"id":resource.id,"name":resource.name,"media_type":resource.media_type,"uri":format!("/v1/actors/{actor}/resources/{}",resource.id)}));
                 if media_type.starts_with("image/") && media_type != "image/svg+xml" {
                     images.push(crate::model_protocol::AgentContentPart::ResourceImage {
+                        view: None,
                         resource,
                         description: None,
                     });

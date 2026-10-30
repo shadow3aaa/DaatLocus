@@ -170,6 +170,7 @@ pub fn capture_images(
             AgentContentPart::Image {
                 path,
                 media_type,
+                view,
                 description,
             } => {
                 let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
@@ -182,7 +183,7 @@ pub fn capture_images(
                 policy.filesystem.bound_roots = roots;
                 let bytes = crate::file_io::read_authorized_bytes(
                     std::path::Path::new(&path),
-                    crate::daemon::attachments::MAX_IMAGE_ATTACHMENT_BYTES as u64,
+                    crate::image_input::MAX_SOURCE_BYTES,
                     &policy,
                 )
                 .map_err(|_| {
@@ -191,16 +192,19 @@ pub fn capture_images(
                 let resource = publish(system, actor, "image", &media_type, &bytes)?;
                 Ok(AgentContentPart::ResourceImage {
                     resource,
+                    view,
                     description,
                 })
             }
             AgentContentPart::ResourceImage {
                 resource,
+                view,
                 description,
             } => {
                 bytes(system, actor, &resource)?;
                 Ok(AgentContentPart::ResourceImage {
                     resource,
+                    view,
                     description,
                 })
             }
@@ -209,6 +213,17 @@ pub fn capture_images(
             ),
         })
         .collect()
+}
+
+fn prepare_model_image(
+    bytes: &[u8],
+    view: Option<crate::image_input::ImageView>,
+) -> Result<crate::image_input::PreparedImage> {
+    let result = match view {
+        Some(view) => crate::image_input::render_view(bytes, view),
+        None => crate::image_input::prepare(bytes, None, None, false),
+    };
+    result.map_err(|_| StageError::Invalid("Invalid or oversized model image"))
 }
 
 /// Resolve only this Actor's ledger entries; hashes never confer authority.
@@ -233,6 +248,7 @@ pub fn model_request(
                 match part {
                     AgentContentPart::ResourceImage {
                         resource,
+                        view,
                         description,
                     } => {
                         if !matches!(
@@ -252,15 +268,18 @@ pub fn model_request(
                         }
                         use base64::Engine;
                         let bytes = bytes(system, actor, resource)?;
+                        let prepared = prepare_model_image(&bytes, *view)?;
                         parts.push(AgentContentPart::ImageData {
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                            media_type: resource.media_type.clone(),
+                            data_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&prepared.bytes),
+                            media_type: prepared.media_type.into(),
                             description: description.clone(),
                         });
                     }
                     AgentContentPart::Image {
                         path,
                         media_type,
+                        view,
                         description,
                     } => {
                         // Existing histories may contain local paths. Resolve them through
@@ -293,9 +312,11 @@ pub fn model_request(
                         }
                         use base64::Engine;
                         let bytes = bytes(system, actor, &resource)?;
+                        let prepared = prepare_model_image(&bytes, *view)?;
                         parts.push(AgentContentPart::ImageData {
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                            media_type: media_type.clone(),
+                            data_base64: base64::engine::general_purpose::STANDARD
+                                .encode(&prepared.bytes),
+                            media_type: prepared.media_type.into(),
                             description: description.clone(),
                         });
                     }
@@ -544,7 +565,9 @@ mod tests {
         if target.actor("root").is_err() {
             target.seed_test_actor("root");
         }
-        let image = b"\x89PNG\r\n\x1a\nportable image bytes";
+        use base64::Engine as _;
+        let image_bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        let image = image_bytes.as_slice();
         let local = source.actor_state_dir("root").join("images/image.png");
         std::fs::create_dir_all(local.parent().unwrap()).unwrap();
         std::fs::write(&local, image).unwrap();
@@ -552,6 +575,7 @@ mod tests {
             &source,
             "root",
             vec![AgentContentPart::Image {
+                view: None,
                 path: local.to_string_lossy().into(),
                 media_type: "image/png".into(),
                 description: None,

@@ -55,7 +55,7 @@ impl App for FilesApp {
         if self.supports_vision {
             specs.push(AppToolSpec {
                 name: "view_image".into(),
-                description: "Read a local image into the model context.".into(),
+                description: "View a local image. Use Actors read_resource for resource IDs. Null region/resolution returns a low-resolution overview. Request a source-pixel region or higher resolution (<=1568 per side, <=1150000 pixels) for detail. The result reports actual dimensions; small images are not enlarged.".into(),
                 input_schema: model_schema_for::<ViewImageArgs>(),
             });
         }
@@ -150,7 +150,7 @@ impl App for FilesApp {
                     .await?;
                 let mut result = AppToolExecutionResult::new(
                     format!("viewed image {}", args.path),
-                    json!({ "path": args.path, "media_type": viewed.media_type, "byte_count": viewed.byte_count }),
+                    json!({ "path": args.path, "media_type": viewed.media_type, "byte_count": viewed.byte_count, "view": viewed.view }),
                     None,
                 ).with_output_schema::<crate::app::output::ImageOutput>();
                 result.model_images.push(viewed.model_image);

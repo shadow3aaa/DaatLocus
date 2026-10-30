@@ -406,7 +406,7 @@ impl Host {
             "launch_app" => self.launch(&parse::<AppArgs>(&call.arguments)?.app_id, cancelled),
             "open_window" => self.take(&parse::<WindowArgs>(&call.arguments)?.window_id, cancelled),
             "get_window_state" => {
-                let args: ObserveArgs = parse(&call.arguments)?;
+                let args: NativeObserveArgs = parse(&call.arguments)?;
                 self.observe_view(&args.window_id, args.region, args.scale)
             }
             "adjust_window" => self.adjust(parse(&call.arguments)?, cancelled),

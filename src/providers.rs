@@ -1990,12 +1990,13 @@ mod tests {
     fn compatible_agent_messages_serialize_multimodal_user_content() {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("sample.png");
-        std::fs::write(&image_path, b"png-bytes").unwrap();
+        std::fs::write(&image_path, base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap()).unwrap();
 
         let message = agent_message_to_openai_message(
             AgentMessage::user_content(AgentContent::multimodal(
                 "describe this",
                 vec![AgentContentPart::Image {
+                    view: None,
                     path: image_path.display().to_string(),
                     media_type: "application/octet-stream".to_string(),
                     description: Some("sample".to_string()),

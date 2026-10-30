@@ -167,6 +167,7 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                             media_type,
                             data_base64,
                             description,
+                            ..
                         } => {
                             media_type.len()
                                 + data_base64.len()
@@ -176,6 +177,7 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                             path,
                             media_type,
                             description,
+                            ..
                         } => {
                             path.chars().count()
                                 + media_type.chars().count()
@@ -186,6 +188,7 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
                         AgentContentPart::ResourceImage {
                             resource,
                             description,
+                            ..
                         } => {
                             resource.id.len()
                                 + resource.media_type.len()

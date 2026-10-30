@@ -348,7 +348,7 @@ async fn images_from_any_app_expose_reusable_references_to_the_model() {
         MockReply::Calls(vec![AgentToolCall {
             id: "inspect-image".into(),
             name: "files__view_image".into(),
-            arguments: json!({"path":"image.png"}),
+            arguments: json!({"path":"image.png","region":null,"resolution":null}),
         }]),
         MockReply::Answer("Image inspected"),
     ]));
@@ -2486,12 +2486,13 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-image".into(), name: "actors__read_resource".into(),
-            arguments: json!({"resource_id":"remote-image","offset":null,"limit":1024}),
+            arguments: json!({"resource_id":"remote-image","offset":null,"limit":1024,"region":null,"resolution":null}),
         }]),
         MockReply::PendingOnEveryRequest,
     ]);
     model_a.usage_bias.store(37, Ordering::Relaxed);
-    let image = b"\x89PNG\r\n\x1a\nremote view image";
+    let image_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+    let image = image_bytes.as_slice();
     let image_path = b.actor_data_dir(shared::ACTOR_ID).join("inspect.png");
     std::fs::write(&image_path, image).unwrap();
     b.store()
@@ -4539,6 +4540,7 @@ fn window_preserves_complete_multi_tool_protocol_and_encrypted_reasoning() {
         AgentMessage::user_content(AgentContent::multimodal(
             "images",
             vec![AgentContentPart::Image {
+                view: None,
                 path: "owned.png".to_owned(),
                 media_type: "image/png".to_owned(),
                 description: None,
@@ -4717,6 +4719,7 @@ fn settled_groups_preserve_nested_inputs_images_and_original_tool_observations()
     let image = AgentMessage::user_content(AgentContent::multimodal(
         "App image",
         vec![AgentContentPart::Image {
+            view: None,
             path: "owned.png".into(),
             media_type: "image/png".into(),
             description: None,
@@ -5293,7 +5296,7 @@ async fn core_import_routes_through_device_permissions_and_never_starts_the_impo
     )
     .unwrap();
     provider.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"read-import".into(),name:"actors__read_resource".into(),arguments:json!({"resource_id":evidence.id,"offset":null,"limit":4096})}]),
+        MockReply::Calls(vec![AgentToolCall {id:"read-import".into(),name:"actors__read_resource".into(),arguments:json!({"resource_id":evidence.id,"offset":null,"limit":4096,"region":null,"resolution":null})}]),
         MockReply::Calls(vec![AgentToolCall {id:"prepare-import".into(),name:"actors__import_conversation".into(),arguments:json!({"stage_id":network.host.local,"resource_id":evidence.id,"name":"Athena","model":"mock","instructions":"Preserve UI context; wait for a new request."})}]),
         MockReply::Answer("Imported; waiting for the owner."),
     ]);
@@ -6080,7 +6083,7 @@ async fn follower_http_import_forwards_original_evidence_without_local_execution
         MockReply::Calls(vec![AgentToolCall {
             id: "read-forwarded-import".into(),
             name: "actors__read_resource".into(),
-            arguments: json!({"resource_id":resource_id,"offset":null,"limit":4096}),
+            arguments: json!({"resource_id":resource_id,"offset":null,"limit":4096,"region":null,"resolution":null}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "prepare-forwarded-import".into(),

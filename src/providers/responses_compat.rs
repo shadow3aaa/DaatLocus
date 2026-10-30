@@ -997,7 +997,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().expect("temporary directory");
         let image_path = dir.path().join("diagram.png");
-        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nfixture").expect("write image");
+        std::fs::write(&image_path, base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap()).expect("write image");
         let payload = build_agent_payload(
             &client,
             &AgentTurnRequest {
@@ -1019,6 +1019,7 @@ mod tests {
                     AgentMessage::user_content(AgentContent::multimodal(
                         "The `view_image` tool attached image content for visual inspection.",
                         vec![AgentContentPart::Image {
+                            view: None,
                             path: image_path.display().to_string(),
                             media_type: "image/png".to_string(),
                             description: Some("diagram".to_string()),

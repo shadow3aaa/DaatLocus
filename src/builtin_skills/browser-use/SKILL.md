@@ -37,11 +37,13 @@ image. Inspect that image before choosing the next action.
 
 - Ground targets in visible content. Coordinates are pixels of the returned
   image, with origin at its top left: `0 <= x < width`, `0 <= y < height`.
-  Account for any scaling or cropping used to inspect it; do not use desktop,
-  browser-chrome or CSS coordinates for input points.
+  The host converts the image crop and scale. Use image pixels rather than
+  desktop, browser-chrome or CSS coordinates for input points.
 - Supply the observation's `tab_id` and `state_id` with each input.
   The state identifies screenshot dimensions for coordinate conversion. It is
   reusable, not a lock; page changes and user activity never expire it.
+- Use saved-image crops or higher-resolution views for small details; each
+  retains its own coordinate reference without refreshing the page.
 - Inspect the screenshot returned by the input and use its new state for the
   next action. A separate `observe` is unnecessary when that result answers
   the next question. Observe again when it is unavailable or no longer current.

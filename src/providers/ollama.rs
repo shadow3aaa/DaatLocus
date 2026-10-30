@@ -286,6 +286,7 @@ impl OllamaClient {
         payload: &Value,
         request_context: &[String],
     ) -> Result<(Value, Option<TokenUsage>)> {
+        crate::image_input::validate_payload(payload)?;
         const MAX_429_RETRIES: usize = 4;
         const MAX_5XX_RETRIES: usize = 4;
 
@@ -484,6 +485,7 @@ impl OllamaClient {
         payload: &Value,
         request_context: &[String],
     ) -> Result<reqwest::Response> {
+        crate::image_input::validate_payload(payload)?;
         self.wait_for_request_slot(request_context).await;
         let url = self.chat_url();
         let mut req = self.client.post(&url).json(payload);

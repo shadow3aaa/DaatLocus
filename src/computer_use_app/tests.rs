@@ -76,7 +76,7 @@ fn views_refuse_partial_crops_oversized_images_and_coordinate_overflow() {
     for scale in [0, 5, u32::MAX] {
         assert!(ObservedView::new(800, 600, None, Some(scale)).is_err());
     }
-    assert!(ObservedView::new(1920, 1080, None, Some(4)).is_err());
+    assert!(ObservedView::new(3840, 2160, None, Some(4)).is_err());
     assert!(ObservedView::new(i32::MAX, i32::MAX, None, Some(4)).is_err());
 }
 
