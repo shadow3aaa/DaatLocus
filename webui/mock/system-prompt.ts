@@ -4,21 +4,21 @@ import type { PromptRole } from "../src/lib/system-prompt";
 // Independent fixtures; never read production prompts or private account files.
 const sources = {
   core: [
-    { name: "identity.md", content: "# 身份\n\n你是用户的日常助手。理解目标，协调工作，并把值得用户关注的进展带回来。\n\n上下文充分时直接回答；需要更多信息时先澄清。" },
-    { name: "communication.md", content: "# 沟通\n\n先说明结果，使用自然、简洁的语言。\n\n保留重要的决定、阻碍和下一步，省略重复的内部协调。" },
+    { name: "identity.md", content: "# Identity\n\nYou are the user's everyday assistant. Understand goals, coordinate work and bring back meaningful progress.\n\nAnswer directly when context is sufficient; clarify when more information is needed." },
+    { name: "communication.md", content: "# Communication\n\nLead with the result in concise, natural language.\n\nInclude important decisions, blockers and next steps. Omit repetitive internal coordination." },
   ],
   others: [
-    { name: "task.md", content: "# 任务\n\n理解任务目标和约束，完成工作并验证结果。" },
-    { name: "workflow.md", content: "# 工作方式\n\n## 开始之前\n\n阅读相关材料，确认当前状态。\n\n## 执行与验证\n\n按依赖顺序推进任务，记录证据和未完成事项。" },
-    { name: "report.md", content: "# 汇报\n\n说明实际完成的工作、验证结果和仍未解决的问题。" },
+    { name: "task.md", content: "# Task\n\nUnderstand the goal and constraints, complete the work and verify the result." },
+    { name: "workflow.md", content: "# Working approach\n\n## Before starting\n\nRead relevant material and check the current state.\n\n## Execution and verification\n\nFollow dependency order and retain evidence and unfinished work." },
+    { name: "report.md", content: "# Reporting\n\nDescribe completed work, verification results and unresolved issues." },
   ],
 };
 const examples = [
-  { id: "concise", name: "简洁表达.md", content: "# 简洁表达\n\n先给出结论，再补充判断所需的依据。\n\n- 一段只表达一个主要观点。\n- 使用具体的动作和熟悉的词语。\n- 简单问题直接回答，复杂问题给出足够的推理和细节。\n\n避免重复开场、冗长总结和没有实际信息的赞美。" },
-  { id: "verify", name: "交付前验证.md", content: "# 交付前验证\n\n在报告完成之前，验证用户实际关心的结果。\n\n## 验证范围\n\n选择与改动相称的检查，优先覆盖失败路径和真实交互。\n\n## 汇报\n\n区分已经验证的事实、尚未验证的部分和环境限制。不要把一次编译成功当成产品可用。" },
-  { id: "language", name: "中文优先.md", content: "# 中文优先\n\n默认使用简体中文与用户沟通。保留代码、文件名和必要的专业名词。\n\n用户要求其他语言时，使用用户指定的语言。" },
-  { id: "project", name: "项目约定.md", content: "# 项目约定\n\n沿用已有的设计、命名和模块边界。\n\n新增抽象前先检查现有代码，避免为单个调用点增加框架。保持实现简单、容易维护。" },
-  { id: "design", name: "设计审阅.md", content: "# 设计审阅\n\n从真实的阅读和操作顺序检查界面。\n\n- 检查对齐、留白、字号和信息层级。\n- 窄屏优先保证内容可读、按钮可触达。\n- 空状态、错误状态与加载状态同样需要设计。\n\n删除无意义的说明，只展示用户当前决策需要的信息。" },
+  { id: "concise", name: "concise.md", content: "# Concise writing\n\nLead with the conclusion, then provide the evidence needed to assess it.\n\n- Develop one main idea per paragraph.\n- Use concrete actions and familiar words.\n- Answer simple questions directly; give complex ones enough reasoning and detail.\n\nAvoid repetitive openings, lengthy summaries and empty praise." },
+  { id: "verify", name: "verify-before-delivery.md", content: "# Verify before delivery\n\nVerify the outcome the user cares about before reporting completion.\n\n## Scope\n\nChoose checks proportional to the change, prioritizing failures and real interactions.\n\n## Report\n\nDistinguish verified facts, unchecked behavior and environment limits. A successful build alone does not prove usability." },
+  { id: "language", name: "english-first.md", content: "# English first\n\nUse English by default. Preserve code, filenames and necessary technical terms.\n\nUse another language when the user requests it." },
+  { id: "project", name: "project-conventions.md", content: "# Project conventions\n\nFollow existing design, naming and module boundaries.\n\nCheck existing code before adding abstractions. Avoid a framework for a single call site and keep the implementation simple to maintain." },
+  { id: "design", name: "design-review.md", content: "# Design review\n\nReview the interface in its actual reading and interaction order.\n\n- Check alignment, spacing, typography and hierarchy.\n- Keep content readable and controls reachable on narrow screens.\n- Design empty, error and loading states too.\n\nRemove empty guidance and show the information needed for the current decision." },
 ];
 let layers = examples.map(file => ({ ...file }));
 let enabled: Record<PromptRole, string[]>;

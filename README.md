@@ -1,88 +1,65 @@
-# Daat Locus
+<p align="center">
+  <img src="assets/wordmark.svg" alt="DaatLocus" width="640">
+</p>
+<p align="center"><sub>All-in-one Agent platform</sub></p>
+<p align="center"><a href="README_zh-CN.md">简体中文</a></p>
 
-[简体中文](README_zh-CN.md)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/home-dark.png">
+    <img src="assets/screenshots/home.png" alt="Daat Locus WebUI: parallel work in one conversation" width="1120">
+  </picture>
+</p>
 
-Daat Locus is an Actor system with one conversation interface:
+## Features
 
-```text
-Actor = Agent core + installed App instances
-```
+- A unified, straightforward interface for moving tasks forward in parallel from one window.
+- Connect devices into a distributed Agent network, or use a single device on its own.
+- Virtual-screen ComputerUse across multiple platforms, so Agents can work with GUI applications without interrupting you.
+- An Agent browser that also works as an ordinary browser.
+- Very low memory use, even with several Agents working at once.
+- An elegant, simple interface.
+- Support for most LLM providers, including ChatGPT subscriptions.
+- Full MCP support.
 
-The account Actor accepts requests and delegates to persistent Actors. Devices
-share its conversation and model context, provide tools, and can take over its
-worker. Ordinary Actors keep their own host. Follow Actor links to open work
-conversations; no permanent sidebar, TUI, Workflow or Sleep framework is needed.
+## Installation
 
-The WebUI supplies messages, attachments, queue guidance, compact activity and
-results. Account/settings live in a floating menu, conversation search in the
-opposite corner. Chinese and English are supported; language follows the browser
-by default and can be selected in Appearance. Guest sharing and public tunnels
-are removed; accounts run locally or connect devices through authenticated, end-to-end encrypted public relay channels.
+Download a package from [Releases](https://github.com/shadow3aaa/DaatLocus/releases).
 
-## Run
+| Platform | Package |
+| --- | --- |
+| Windows x64 | Desktop installer; uses WebView2 |
+| macOS | Desktop package; uses the system WebKit |
+| Linux | Service archive; open the interface in a web browser |
+| Android | APK with the service built in |
 
-Install Rust, Bun and wasm-pack:
+Browser and computer interaction need the native client. Linux supports the service and HTTP web reading; sandboxed commands need bubblewrap and working user namespaces. Android has no terminal or Sudo.
+
+To build the browser entry from source, install [Rust](https://rustup.rs/), [Bun](https://bun.sh/), [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and your platform's build tools:
 
 ```sh
+git clone https://github.com/shadow3aaa/DaatLocus.git
+cd DaatLocus
 rustup target add wasm32-unknown-unknown
 bun scripts/build-webui.ts
-cargo run -- serve
+cargo run --locked -- serve
 ```
 
-Build the shared WebUI/authentication WASM once, then Cargo embeds the dist with
-zstd for the standalone browser service. Rust build scripts do not run frontend
-toolchains. Use `--no-default-features` for a headless service. Open
-the printed address and create an account locally, or sign in with the same
-account name and password on another device. OPAQUE keeps passwords in the client;
-browser sessions use HttpOnly cookies. `--profile NAME` isolates local accounts.
-Local mode starts no cross-device infrastructure. In relay mode, discovery and
-synchronization are automatic through a public WSS service, deployable on
-Cloudflare Workers/DO or an ordinary server. Devices retain execution authority.
+Open the address printed by the service. See the [native client guide](clients/app/README.md) to build the desktop app or APK.
 
-Use `daat-locus --help` for clap help and the original character logo.
-`serve` runs in the foreground; `start --open`, `status --json`, `stop` and
-`restart` manage the selected profile through local OS-owner IPC. Stopping or
-restarting keeps Actor identity and history. Headless first-account creation is
-`account create NAME --password-stdin`; never pass passwords as command arguments.
+## Connect devices
 
-Windows and macOS use the [Tauri desktop client](clients/app/README.md), sharing
-the same WebUI and account interfaces. Tauri owns the native assets and compression;
-its companion service excludes embedded-webui. Follow the native build guide,
-then run `daat-locus-app` next to the service executable. `start --open` prefers the installed client. Closing its
-window hides it; Quit client preserves background tasks; service maintenance uses
-the CLI. The independent backend has no GUI dependencies. Linux
-retains the service and browser entry. Android embeds the same core and WebUI in an APK;
-a terminal is not required. See [native client builds](clients/app/README.md#android).
+We recommend **Cloudflare Workers** for the relay; there is no server to maintain. Set your Cloudflare account and domain in `workers/signaling/wrangler.jsonc`, then run:
 
-## Permissions and recovery
+```sh
+cd workers/signaling
+bun install --frozen-lockfile
+bunx wrangler login
+bunx wrangler deploy
+```
 
-| Mode | Behavior |
-| --- | --- |
-| Auto | Independent model review approves or denies; errors deny, without human fallback. |
-| Ask | Owner reviews the immutable action and requested access. |
-| Full access | Runs without approval review, within hard identity and access boundaries. |
+On each device, choose relay mode in account settings, enter the same public WSS address and sign in with the same Daat Locus account. A single device needs no relay. See the [relay guide](workers/signaling/README.md) for more configuration options.
 
-Extra filesystem access applies to one action. Read-only identity, tool grants,
-framework credentials and other Actors' private data remain protected. Native
-sandbox requirements fail closed. Files use SHA256 freshness checks; resources
-are authorized by Actor and have stable pathless descriptions across devices.
+## License
 
-Execution has no fixed message, ReAct-round or tool-batch limit. A full context
-window is cleared with an archive-recovery prompt rather than summarized or
-slid. Original history persists; interrupted or uncertain effects are not replayed.
-The account's worker keeps healthy affinity and hands off to a synchronized device.
-New devices join as replicas without adding permanent voting dependencies. If
-account authority becomes unreachable, an eligible synchronized device continues
-in a durable local recovery branch. Reconnection merges the conversation while
-retaining original branches and never replaying uncertain App effects.
-
-## Develop and package
-
-See [contribution instructions](CONTRIBUTING.md), [architecture](docs/architecture.md),
-[model catalog](docs/model-catalog.md) and [license notes](docs/license-attribution.md).
-Explicit `DAAT_LOCUS_BUILD_WEBUI=0` omits WebUI assets for backend-only checks.
-
-`cargo xtask package binary --target <triple>` creates a binstall archive.
-`package windows` and `package macos` create native installers on their respective
-platforms. Binary archives carry the embedded browser service; native installers
-carry the Tauri UI and an API-only companion service, avoiding duplicate assets. No Git submodules are needed.
+This project uses [Apache-2.0](LICENSE). License information for bundled open-source projects is listed in [third-party attribution](docs/license-attribution.md) and [NOTICE](NOTICE).

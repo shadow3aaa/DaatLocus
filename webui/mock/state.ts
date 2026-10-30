@@ -24,10 +24,11 @@ import type {
   ToolSummary,
 } from "../src/lib/actor-api";
 import type { DeviceSettings } from "../src/lib/stage-api";
+import { actorNames } from "./actor-names";
 
 export const STAGE_ID = "4f9c1a5e-8b2d-4e6f-9a3c-7d5e1f0b2a4c";
 export const ACCOUNT_ID = "mock-account";
-export const ACCOUNT_NAME = "林";
+export const ACCOUNT_NAME = "Lin";
 export const ROOT_ACTOR_ID = "core";
 /** Listen port; env DAAT_LOCUS_MOCK_PORT overrides the 45826 default. */
 export const MOCK_PORT = Number(process.env.DAAT_LOCUS_MOCK_PORT) || 45826;
@@ -81,7 +82,7 @@ export const store: Store = {
 export const workReset: {generation: import("../src/lib/stage-api").WorkGeneration | null} = {generation: null};
 
 export const stageSettings: DeviceSettings = {
-  label: "Mock Device",
+  label: "Workstation",
   mode: "local",
   relay_origin: null,
   compute_priority: 100,
@@ -104,7 +105,7 @@ export function defaultConfig(): SetupConfigRequest {
         name: "mock-large",
         provider_name: "mock",
         model_id: "mock-large-001",
-        capabilities: "复杂推理、架构设计与任务协调；优先用于主模型。",
+        capabilities: "Complex reasoning, architecture and coordination; preferred main model.",
         context_window_tokens: 200000,
         max_completion_tokens: 8192,
         supports_vision: false,
@@ -113,7 +114,7 @@ export function defaultConfig(): SetupConfigRequest {
         name: "mock-mini",
         provider_name: "mock",
         model_id: "mock-mini-001",
-        capabilities: "常规检索与整理，成本低；适合简短判断和自动审核。",
+        capabilities: "Low-cost research and organization; suitable for short decisions and automatic reviews.",
         context_window_tokens: 128000,
         max_completion_tokens: 4096,
         supports_vision: true,
@@ -122,7 +123,7 @@ export function defaultConfig(): SetupConfigRequest {
         name: "mock-motion",
         provider_name: "mock",
         model_id: "mock-motion-001",
-        capabilities: "擅长动画、动效与视觉实现；复杂视觉任务优先，成本较高。",
+        capabilities: "Strong at animation, motion and visual implementation; prefer for complex visual work at a higher cost.",
         context_window_tokens: 200000,
         max_completion_tokens: 8192,
         supports_vision: true,
@@ -176,9 +177,22 @@ export type ActorSeed = {
   instructions: string;
 };
 
+export function nextActorName(): string {
+  const used = new Set([...store.actors.values()].map(actor => actor.summary.name));
+  const name = actorNames.find(name => !used.has(name));
+  if (!name) throw new Error("The fixture has exhausted its mythological Actor names");
+  return name;
+}
+
+export function requestOrigin(actor: ActorStore): Pick<MessageRecord, "source" | "reply_to"> {
+  return actor.summary.id === ROOT_ACTOR_ID
+    ? {source:{kind:"user"},reply_to:{kind:"user"}}
+    : {source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:store.actors.get(ROOT_ACTOR_ID)?.messages.at(-1)?.id ?? "preview-request"}};
+}
+
 export function createActor(seed: ActorSeed): ActorStore {
   const ts = now();
-  const apps = seed.id === ROOT_ACTOR_ID ? ["actors","admin_actors"] : ["actors","apps_manager","files","terminal","web","browser_use","artifacts"];
+  const apps = seed.id === ROOT_ACTOR_ID ? ["actors","admin_actors"] : ["actors","apps_manager","files","web","browser_use","artifacts",...(process.env.DAAT_LOCUS_MOCK_PHONE === "1" ? ["phone_use"] : ["terminal","sudo","computer_use"])];
   const summary: ActorSummary = {
     id: seed.id,
     parent_id: seed.parent_id,
@@ -206,7 +220,7 @@ export function createActor(seed: ActorSeed): ActorStore {
     status: "idle",
     created_at_ms: ts,
     updated_at_ms: ts,
-    access: { view: true, converse: true, manage: true },
+    access: { view: true, converse: seed.id === ROOT_ACTOR_ID, manage: true },
   };
   const actor: ActorStore = {
     summary,

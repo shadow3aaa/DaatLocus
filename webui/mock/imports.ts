@@ -5,7 +5,7 @@ import { isActorBusy, submitTurn } from "./engine";
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 export async function importsRoute(path: string, req: Request): Promise<Response> {
-  const titles = ["检查消息滚动与输入框布局", "整理 MCP App 接入方案", "修复移动端导航", ...Array.from({length:27},(_,index)=>`WebUI 布局检查 ${index+1}`)];
+  const titles = ["Review message scrolling and the composer", "Plan MCP App integration", "Fix mobile navigation", ...Array.from({length:27},(_,index)=>`WebUI layout review ${index+1}`)];
   const entries = titles.map((title,index)=>({id:`codex-${index}`,title,updated_at_ms:Date.now()-index*86400000,archived:index>25}));
   if (req.method === "GET") {
     const query = new URL(req.url).searchParams;

@@ -70,7 +70,7 @@ test("recent contacts put working Actors first and paginate the entire sorted se
     expect(new Set(items.map(item=>item.actor.id)).size).toBe(items.length);
     expect(items.length).toBeGreaterThan(24);
     if(sort==="recent")expect(items.slice(0,3).map(item=>item.actor.id)).toEqual(["iris","atlas","athena"]);
-    else expect(items[0].actor.id).toBe("athena");
+    else expect(items[0].actor.id).toBe("achilles");
   }
   const invalid=await handle(new Request("http://127.0.0.1/v1/contacts?sort=invalid"));
   expect(invalid.status).toBe(422);

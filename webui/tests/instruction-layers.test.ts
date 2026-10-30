@@ -37,7 +37,7 @@ test("role membership is unordered and cannot disable built-in sources; removing
   const layer = await created.json() as InstructionLayerDetail;
   expect((await call("/v1/system-prompt/layers?role=core", "PUT", { revision: initial.revision, layer_ids: [layer.id, "concise"] })).status).toBe(200);
   const updated = await composition();
-  expect(updated.items.map(file => file.name)).toEqual(["identity.md", "communication.md", "简洁表达.md", "team.md"]);
+  expect(updated.items.map(file => file.name)).toEqual(["identity.md", "communication.md", "concise.md", "team.md"]);
   const content = await (await call(`/v1/system-prompt/3?revision=${updated.revision}`)).json();
   expect(content.content).toBe("# Team\n\nKeep original user files.");
   expect((await composition("others")).items.some(file => file.layer_id === layer.id)).toBe(false);

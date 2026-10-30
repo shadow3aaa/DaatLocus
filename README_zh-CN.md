@@ -1,74 +1,65 @@
-# Daat Locus
+<p align="center">
+  <img src="assets/wordmark.svg" alt="DaatLocus" width="640">
+</p>
+<p align="center"><sub>All in one 的 Agent 平台</sub></p>
+<p align="center"><a href="README.md">English</a></p>
 
-[English](README.md)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/home-dark.png">
+    <img src="assets/screenshots/home.png" alt="Daat Locus WebUI：在一个对话中并行推进任务" width="1120">
+  </picture>
+</p>
 
-Daat Locus 是只有一个对话入口的 Actor 系统：
+## 功能
 
-```text
-Actor = Agent 核心 + 安装的 App 实例
-```
+- 独特而简便的统一交互方式，一个窗口便可并行推进一切任务
+- 让任何设备互联形成强大的分布式 Agent 网络，当然也可单机使用
+- 适配多个平台的虚拟屏 ComputerUse，完全不受打扰地让 Agent 完成 GUI 操作
+- 强大的 Agent 浏览器，也可作为普通浏览器使用
+- 超低的内存占用，即使多个 Agent 同时工作
+- 优雅而简洁的界面
+- 支援绝大多数 LLM 提供商，包括 ChatGPT 订阅
+- 完善的 MCP 支持
 
-账号 Actor 接收请求并委派给持久 Actor。设备共享账号对话和模型上下文、提供工具，
-并可接管 worker；普通 Actor 保留宿主。点击 Actor 链接打开工作对话，没有常驻侧栏、
-TUI、Workflow 或 Sleep 框架。
+## 安装
 
-WebUI 提供消息、附件、排队引导、紧凑活动与结果。浮动菜单承载账号和设置，另一角
-保留对话搜索。界面支持中英文，默认跟随浏览器，也可在个性化中手动选择。
-访客分享与公开隧道已移除。账号支持纯本地运行，或通过公网中转连接同账号设备；
-中转通道保留设备认证与端到端加密，执行与协调仍属于设备。
+从 [Releases](https://github.com/shadow3aaa/DaatLocus/releases) 下载对应平台的软件包。
 
-## 运行
+| 平台 | 软件包 |
+| --- | --- |
+| Windows x64 | 桌面安装程序，使用 WebView2 |
+| macOS | 桌面安装包，使用系统 WebKit |
+| Linux | 服务归档，通过浏览器打开界面 |
+| Android | 内置服务的 APK |
 
-安装 Rust、Bun、wasm-pack：
+浏览器和电脑操作需要原生客户端。Linux 支持服务和 HTTP 网页读取，沙箱命令需要 bubblewrap 和可用的用户命名空间。Android 没有终端和 Sudo。
 
-```powershell
+从源码构建网页入口时，安装 [Rust](https://rustup.rs/)、[Bun](https://bun.sh/)、[wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) 和平台构建工具，然后运行：
+
+```sh
+git clone https://github.com/shadow3aaa/DaatLocus.git
+cd DaatLocus
 rustup target add wasm32-unknown-unknown
 bun scripts/build-webui.ts
-cargo run -- serve
+cargo run --locked -- serve
 ```
 
-先独立构建共享 WebUI 及认证 WASM，Cargo 再以 zstd 压缩嵌入 dist；Rust 构建脚本
-不调用前端工具链。纯无头服务关闭默认 feature。打开输出地址，在本机创建账号，或在新设备
-使用相同账号名和密码登录。OPAQUE 将密码留在客户端，浏览器使用 HttpOnly cookie。
-`--profile NAME` 隔离本机账号。纯本地模式不启动跨设备基础设施；互联模式通过公网 WSS
-中转自动发现、连接和同步。中转可部署在 CF Worker/DO 或普通服务器。
+打开服务输出的地址。桌面应用和 APK 的构建方法见[原生客户端指南](clients/app/README.md)。
 
-`daat-locus --help` 显示原有字符 Logo 与 clap 帮助。`serve` 前台运行；
-`start --open`、`status --json`、`stop`、`restart` 通过本机 OS-owner IPC 管理
-选定 profile。停止或重启保留 Actor 身份与历史。无界面首次注册使用
-`account create NAME --password-stdin`，密码不能放进命令参数。
+## 互联
 
-Windows/macOS 使用[统一 Tauri 客户端](clients/app/README.md)，复用现有 WebUI
-与账号接口。Tauri 管理原生资源及压缩，配套后台关闭 embedded-webui；按客户端
-指南构建后，将两个可执行文件放在同一目录，运行 `daat-locus-app`。`start --open` 优先打开已安装客户端。
-关窗仅隐藏窗口；托盘的“退出客户端”保留后台任务，服务维护通过 CLI 完成。
-后台不依赖 GUI。Linux 保留服务与浏览器入口；Android 将相同核心和 WebUI
-内置到 APK，可独立运行，无需终端。参见[客户端构建](clients/app/README.md#android)。
+推荐用 **Cloudflare Workers** 部署中转，无需自备服务器。在 `workers/signaling/wrangler.jsonc` 填入自己的 Cloudflare 账号和域名，然后运行：
 
-## 权限与恢复
+```sh
+cd workers/signaling
+bun install --frozen-lockfile
+bunx wrangler login
+bunx wrangler deploy
+```
 
-| 模式 | 行为 |
-| --- | --- |
-| 自动批准 | 独立模型只批准或拒绝，错误拒绝，不转人工 |
-| 请求批准 | Owner 审批不可修改的操作与请求范围 |
-| 完全访问 | 不做审批审查，仍执行身份与访问硬边界 |
+部署后，在每台设备的账号设置中选择中转模式，填写同一个公网 WSS 地址，再登录同一个 Daat Locus 账号。单机使用无需部署中转。更多配置见[中转部署说明](workers/signaling/README.md)。
 
-额外文件范围只作用于一次操作，不能改写 Actor 的只读身份或长期授权。
-工具限制、框架凭据和其他 Actor 私有数据继续受保护；原生隔离不可用时拒绝执行。
-文件编辑使用 SHA256 校验；统一资源描述跨设备不传本地路径，读取仍需 Actor 授权。
+## 许可证
 
-执行不设消息条数、ReAct 轮次或工具批次上限。上下文满时清空工作窗口并插入历史
-恢复提示，不生成摘要、不滑动裁剪。完整历史保留，中断或不明确的副作用不自动重放。
-账号 worker 保持健康亲和，由已同步设备接管。新设备作为同步副本加入，不增加永久
-投票依赖。账号授权节点失联时，已同步且可执行的设备在持久的本地恢复分支继续运行；
-重连后自动合并对话并保留原始分支，不重放结果未知的 App 操作。
-
-## 开发与打包
-
-详见[贡献指南](CONTRIBUTING_zh-CN.md)、[架构](docs/architecture.md)、
-[模型目录](docs/model-catalog.md)和[许可证归属](docs/license-attribution.md)。
-显式 `DAAT_LOCUS_BUILD_WEBUI=0` 为后台检查跳过 WebUI 资源嵌入。
-
-`cargo xtask package binary --target <triple>` 生成 binstall 归档；
-`package windows`、`package macos` 在对应系统构建安装包。binary 归档包含内置
-网页的独立服务；原生安装包包含 Tauri WebUI 与不重复嵌入页面的配套后台。项目无需 Git 子模块。
+本项目使用 [Apache-2.0](LICENSE)。所使用的部分开源项目的许可证说明见[第三方归属](docs/license-attribution.md)和 [NOTICE](NOTICE)。

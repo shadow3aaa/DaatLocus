@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { handle } from "../mock/routes";
 import { activateScenario, previewState, scenarios } from "../mock/scenarios";
 import { ROOT_ACTOR_ID, store } from "../mock/state";
+import { actorNames } from "../mock/actor-names";
 
 const request=(path:string,init?:RequestInit)=>handle(new Request(`http://127.0.0.1${path}`,init));
 describe("standalone WebUI preview",()=>{
@@ -23,9 +24,24 @@ describe("standalone WebUI preview",()=>{
     const prior=previewState.id;expect(activateScenario("unknown")).toBe(false);expect(previewState.id).toBe(prior);
     expect((await request("/__mock")).headers.get("content-type")).toContain("text/html");
   });
+  test("fixtures keep unique mythological Actor names and Owner input is Core-only",()=>{
+    const allowed=new Set<string>(actorNames);
+    for(const scene of scenarios){
+      activateScenario(scene.id);
+      const names=new Set<string>();
+      for(const actor of store.actors.values()){
+        expect(names.has(actor.summary.name)).toBe(false);names.add(actor.summary.name);
+        if(actor.summary.id!==ROOT_ACTOR_ID){
+          expect(allowed.has(actor.summary.name)).toBe(true);
+          expect(actor.detail.access?.converse).toBe(false);
+          for(const message of actor.messages)expect(["user","remote_user"].includes(message.source.kind)).toBe(false);
+        }
+      }
+    }
+  });
   test("completed exchanges attach their reply and activity to the request",()=>{
     activateScenario("work");const actor=store.actors.get("research")!;
-    expect(actor.messages).toHaveLength(1);expect(actor.messages[0].reply).toContain("消息区");
+    expect(actor.messages).toHaveLength(1);expect(actor.messages[0].reply).toContain("conversation area");
     expect(actor.tools.every(tool=>tool.result.message_id===actor.messages[0].id)).toBe(true);
   });
   test("motion preview covers sends, thinking, reply arrival and message removal through normal message facts",async()=>{

@@ -13,11 +13,11 @@ const icon="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AA
 export const browserSupported = () => true;
 function savedFixture<T>(key:string,fallback:T):T{try{return JSON.parse(localStorage.getItem(key)??"null")??fallback;}catch{return fallback;}}
 let bookmarks=savedFixture<BrowserBookmark[]>("dl.mock.browser.bookmarks",[{id:"docs",url:"https://developer.mozilla.org/",title:"MDN Web Docs",time:Date.now()}]);
-let searches=savedFixture<BrowserSearch[]>("dl.mock.browser.searches",[{id:"search-one",query:"WebView2 composition",time:Date.now()},{id:"search-two",query:"浏览器快捷键",time:Date.now()-60000}]);
+let searches=savedFixture<BrowserSearch[]>("dl.mock.browser.searches",[{id:"search-one",query:"WebView2 composition",time:Date.now()},{id:"search-two",query:"Browser shortcuts",time:Date.now()-60000}]);
 const demo="https://example.com/browser-demo";
-let state: BrowserWorkspace={pages:[{tab:"home",url:"about:blank",title:""},{tab:"demo",url:demo,title:"光标与输入演示",can_back:false,can_forward:false}],selected:"home"};
+let state: BrowserWorkspace={pages:[{tab:"home",url:"about:blank",title:""},{tab:"demo",url:demo,title:"Pointer and input preview",can_back:false,can_forward:false}],selected:"home"};
 const library:BrowserLibrary={history:[
-  {id:"demo",url:demo,title:"光标与输入演示",time:Date.now()-60000},
+  {id:"demo",url:demo,title:"Pointer and input preview",time:Date.now()-60000},
   {id:"github",url:"https://github.com/",title:"GitHub",time:Date.now()-120000},
   {id:"mdn",url:"https://developer.mozilla.org/",title:"MDN Web Docs",time:Date.now()-240000},
   {id:"cloudflare",url:"https://dash.cloudflare.com/",title:"Cloudflare Dashboard",time:Date.now()-360000},
@@ -39,9 +39,9 @@ if(scene==="downloads"){
   ].map((item,index)=>({...item,url:demo,time:Date.now()-index*60000}));
 }
 if(scene==="pagination"){
-  library.history=Array.from({length:75},(_,index)=>({id:`visit-${index}`,url:`https://example.com/page-${index+1}`,title:`历史记录 ${String(index+1).padStart(2,"0")}`,time:Date.now()-index*60000}));
+  library.history=Array.from({length:75},(_,index)=>({id:`visit-${index}`,url:`https://example.com/page-${index+1}`,title:`History ${String(index+1).padStart(2,"0")}`,time:Date.now()-index*60000}));
   library.downloads=Array.from({length:75},(_,index)=>({id:`download-${index}`,url:demo,name:`Download-${String(index+1).padStart(2,"0")}.txt`,time:Date.now()-index*60000,status:"complete",bytes:1024}));
-  bookmarks=Array.from({length:125},(_,index)=>({id:`bookmark-${index}`,url:`https://example.com/bookmark-${index+1}`,title:`书签 ${String(index+1).padStart(3,"0")}`,time:Date.now()-index*60000}));
+  bookmarks=Array.from({length:125},(_,index)=>({id:`bookmark-${index}`,url:`https://example.com/bookmark-${index+1}`,title:`Bookmark ${String(index+1).padStart(3,"0")}`,time:Date.now()-index*60000}));
 }
 for(const item of library.history)item.favicon=icon;
 for(const page of state.pages)if(page.url!=="about:blank")page.favicon=icon;
@@ -60,12 +60,12 @@ function render(){
   const initialBackground=frame.dataset.background??selected.background??"";
   frame.dataset.background=initialBackground;
   const escaped=selected.title.replaceAll("&","&amp;").replaceAll("<","&lt;");
-  const source=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light dark;font:16px system-ui}body{margin:0;padding:clamp(20px,5vw,64px);line-height:1.6;background:light-dark(#fff,#212121);color:light-dark(#171717,#eee)}main{max-width:760px;margin:auto}h1{font-size:28px;font-weight:600;margin:0 0 16px}p{color:light-dark(#666,#aaa)}nav{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}button,input{font:inherit;padding:9px 14px;border:1px solid #8886;border-radius:9px;background:transparent;color:inherit}button{cursor:pointer}button:hover{background:#8882}.target{min-height:190px;border:1px dashed #8888;border-radius:16px;display:grid;place-content:center;gap:12px;margin:24px 0}.target button{background:#5267df;color:white;border:0}input{width:min(320px,70vw)}output{min-height:24px;color:#5267df;display:block}section{margin:60px 0}</style><main><h1>${escaped || "Example Domain"}</h1><p>在下方选择一种操作，查看虚拟光标与动效。也可以直接点击、输入和滚动。</p><nav aria-label="光标演示">${["移动","点击","双击","拖动","滚动","键盘","连续播放","停止","边缘"].map((label,index)=>`<button data-demo="${index}">${label}</button>`).join("")}</nav><label><input id="reduced" type="checkbox" style="width:auto"> 减少动态效果</label><div class="target"><button id="target">点击按钮</button><input id="field" placeholder="试着输入文字" aria-label="演示输入"><output id="status" aria-live="polite"></output></div><button id="download">下载示例文件</button><section><h2>滚动区域</h2><p>光标不拦截鼠标事件，不改变输入焦点，也不会显示输入内容。</p></section><div style="height:650px;background:linear-gradient(transparent,#8881);border-radius:16px"></div></main><script>
+  const source=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light dark;font:16px system-ui}body{margin:0;padding:clamp(20px,5vw,64px);line-height:1.6;background:light-dark(#fff,#212121);color:light-dark(#171717,#eee)}main{max-width:760px;margin:auto}h1{font-size:28px;font-weight:600;margin:0 0 16px}p{color:light-dark(#666,#aaa)}nav{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}button,input{font:inherit;padding:9px 14px;border:1px solid #8886;border-radius:9px;background:transparent;color:inherit}button{cursor:pointer}button:hover{background:#8882}.target{min-height:190px;border:1px dashed #8888;border-radius:16px;display:grid;place-content:center;gap:12px;margin:24px 0}.target button{background:#5267df;color:white;border:0}input{width:min(320px,70vw)}output{min-height:24px;color:#5267df;display:block}section{margin:60px 0}</style><main><h1>${escaped || "Example Domain"}</h1><p>Choose an action to preview the pointer and motion. You can also click, type and scroll directly.</p><nav aria-label="Pointer preview">${["Move","Click","Double click","Drag","Scroll","Keyboard","Play sequence","Stop","Edges"].map((label,index)=>`<button data-demo="${index}">${label}</button>`).join("")}</nav><label><input id="reduced" type="checkbox" style="width:auto"> Reduce motion</label><div class="target"><button id="target">Click the button</button><input id="field" placeholder="Try typing here" aria-label="Example input"><output id="status" aria-live="polite"></output></div><button id="download">Download example file</button><section><h2>Scroll area</h2><p>The pointer does not intercept mouse input, change focus or reveal typed text.</p></section><div style="height:650px;background:linear-gradient(transparent,#8881);border-radius:16px"></div></main><script>
 const readBackground=()=>${backgroundScript};
 const reportBackground=()=>parent.postMessage({type:'dl-browser-background',background:readBackground()},'*');
 if(${JSON.stringify(initialBackground)})document.body.style.background=${JSON.stringify(initialBackground)};
-const palette=document.createElement('nav');palette.setAttribute('aria-label','页面背景');
-for(const [color,label] of [['#ffffff','浅色'],['#171717','深色'],['#1c3557','蓝色'],['#c88756','暖色']]){const button=document.createElement('button');button.textContent=label;button.onclick=()=>{document.body.style.background=color;document.body.style.color=['#171717','#1c3557'].includes(color)?'#fff':'#171717';reportBackground()};palette.append(button)}
+const palette=document.createElement('nav');palette.setAttribute('aria-label','Page background');
+for(const [color,label] of [['#ffffff','Light'],['#171717','Dark'],['#1c3557','Blue'],['#c88756','Warm']]){const button=document.createElement('button');button.textContent=label;button.onclick=()=>{document.body.style.background=color;document.body.style.color=['#171717','#1c3557'].includes(color)?'#fff':'#171717';reportBackground()};palette.append(button)}
 document.querySelector('main').prepend(palette);reportBackground();
 const nativeMatch=window.matchMedia.bind(window);let reduced=${new URLSearchParams(location.search).get('motion')==='full'?'false':new URLSearchParams(location.search).get('motion')==='reduce'?'true':"nativeMatch('(prefers-reduced-motion: reduce)').matches"};
 window.matchMedia=query=>query==='(prefers-reduced-motion: reduce)'?{matches:reduced}:nativeMatch(query);
@@ -99,8 +99,8 @@ function run(index){if(index===8){cursor({kind:'move',x:innerWidth-2,y:innerHeig
 document.querySelectorAll('[data-demo]').forEach(button=>button.onclick=()=>{const index=Number(button.dataset.demo);clearInterval(timer);if(index===7){cursor({kind:'hide'});return;}if(index===6){run(step++%6);timer=setInterval(()=>{if(!document.hidden)run(step++%6)},2200);}else run(index);});
 document.querySelector('#reduced').checked=reduced;
 document.querySelector('#reduced').onchange=event=>reduced=event.target.checked;
-let count=0;target.onclick=()=>status.textContent='已点击 '+(++count)+' 次';
-document.querySelector('#field').oninput=()=>status.textContent='已输入';
+let count=0;target.onclick=()=>status.textContent='Clicked '+(++count)+' times';
+document.querySelector('#field').oninput=()=>status.textContent='Text entered';
 document.querySelector('#download').onclick=()=>parent.postMessage({type:'dl-browser-download'},'*');
 </script>`;
   if(frame.srcdoc!==source)frame.srcdoc=source;

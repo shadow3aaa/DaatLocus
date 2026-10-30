@@ -13,6 +13,7 @@ import {
   emitEvent,
   getActor,
   newId,
+  nextActorName,
   now,
   ROOT_ACTOR_ID,
   resolveApprovalRecord,
@@ -120,12 +121,12 @@ function compose(actorName: string, input: string): { reasoning: string[]; assis
   const topic = input.trim().replace(/\s+/g, " ").slice(0, 120);
   return {
     reasoning: [
-      `${actorName} 需要处理：${topic}。`,
-      "先查看相关文件，再核对修改后的布局。",
+      `${actorName} needs to handle: ${topic}.`,
+      "Inspect the relevant files, then check the updated layout.",
     ],
     assistant: [
-      "我会先查看对话区域和输入框的布局。\n\n",
-      "重点检查滚动范围、窄屏换行，以及输入框展开后历史消息的位置。\n\n",
+      "I will inspect the conversation area and composer layout first.\n\n",
+      "I will focus on scrolling, narrow-screen wrapping and the reading position when the composer expands.\n\n",
     ],
   };
 }
@@ -160,21 +161,22 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       const imported = user.attachments.find(item => item.media_type === CODEX_IMPORT_MEDIA_TYPE);
       if (imported) {
         if (!(await rest(run, 700))) return cancelRun(actor, user, reply, "");
-        const id = newId(), config = actor.detail.config!;
-        const importedActor = createActor({id, name: "Athena", parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "web", "browser_use"], model: config.model, workspace: config.workspace, instructions: imported.name});
+        const id = newId(), config = actor.detail.config!, name = nextActorName();
+        const importedActor = createActor({id, name, parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "web", "browser_use"], model: config.model, workspace: config.workspace, instructions: imported.name});
         emitEvent(id, {type: "actor_changed", actor: importedActor.summary});
-        const callId = newId(), resultId = newId(), outcome = {id, name: "Athena", conversation_url: `/actors/${id}`};
-        addTool(actor, {id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__import_conversation", summary: "Imported conversation", error: null, model_content: "Actor prepared", arguments: {resource_id: imported.id, name: "Athena", instructions: imported.name}, outcome, payload: outcome});
+        const callId = newId(), resultId = newId(), outcome = {id, name, conversation_url: `/actors/${id}`};
+        addTool(actor, {id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__import_conversation", summary: "Imported conversation", error: null, model_content: "Actor prepared", arguments: {resource_id: imported.id, name, instructions: imported.name}, outcome, payload: outcome});
         emitEvent(actorId, {type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__import_conversation", result_id: resultId, summary: "Imported conversation", error: null, outcome});
-        completeRun(actor, user, reply, `已根据会话创建 [Athena](/actors/${id})，保留了原始上下文。它会等待你继续，尚未开始执行任务。`);
+        completeRun(actor, user, reply, `Created [${name}](/actors/${id}) from the conversation, preserving its context. The Actor is waiting for your next instruction and has not started work.`);
         return;
       }
       const callId = newId(), resultId = newId();
-      const text = "已经交给工作对话检查，完成后会把结果发到这里。";
+      const targetName = getActor("research")!.summary.name;
+      const text = `Assigned to ${targetName}. I will share progress here.`;
       emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__message" });
       if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
-      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: "检查消息滚动与输入框布局", error: null, arguments: { actor_id: "research", content: user.content }, model_content: "请求已送达。", outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" }, payload: null });
-      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: "检查消息滚动与输入框布局", error: null, outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" } });
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: `Message sent to ${targetName}`, error: null, arguments: { actor_id: "research", content: user.content }, model_content: "Request delivered.", outcome: { actor_id: "research", name: targetName }, payload: {sent_message:{conversation_url:"/actors/research",content:user.content}} });
+      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: `Message sent to ${targetName}`, error: null, outcome: { actor_id: "research", name: targetName } });
       completeRun(actor, user, reply, text);
       return;
     }
@@ -230,7 +232,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       outcome: { path: ".", entries: 3 },
     });
 
-    const closing = "\n已经找到相关文件，可以继续检查具体的布局规则。\n";
+    const closing = "\nFound the relevant files and can now check the layout rules.\n";
     for (const chunk of chunkAround(closing, 24)) {
       if (!(await rest(run, 30))) return cancelRun(actor, user, reply, assistantText);
       assistantText += chunk;

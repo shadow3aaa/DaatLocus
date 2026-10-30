@@ -1,7 +1,6 @@
 /**
- * Boot fixtures for the mock daemon: a root Actor (approval mode "ask"), one
- * read-only child Actor ("Research", approval mode "none") and a few completed
- * historical exchanges with tool results so the timeline renders immediately.
+ * Boot fixtures with one account assistant, a hosted Actor and completed
+ * exchanges. Hosted requests originate from Actors, just like the real service.
  */
 import type { JsonValue } from "../src/lib/actor-api";
 import {
@@ -15,6 +14,7 @@ import {
   newId,
   now,
   ROOT_ACTOR_ID,
+  requestOrigin,
   stageSettings,
   store,
   touchMessage,
@@ -45,12 +45,9 @@ export function resetStore(): void {
   store.idempotency.clear();
   configHolder.current = defaultConfig();
   Object.assign(stageSettings, {
-    label: "Mock Device",
-    listen: "0.0.0.0:45826",
-    interfaces: [],
+    label: "Workstation",
+    mode: "local",
     relay_origin: null,
-    stun: [],
-    ssh: {},
     compute_priority: 100,
   });
   clearRuns();
@@ -86,7 +83,7 @@ function seed(): void {
   });
   const research = createActor({
     id: "research",
-    name: "检查消息滚动与输入框布局",
+    name: "Metis",
     parent_id: ROOT_ACTOR_ID,
     apps: ["files", "web", "browser_use"],
     model: "mock-mini",
@@ -96,56 +93,51 @@ function seed(): void {
 
   seedHistory(root, [
     {
-      user: "帮我检查一下消息滚动和输入框布局。",
+      user: "Please check message scrolling and the composer layout.",
       reply:
-        "已经交给工作对话检查，完成后会把结果发到这里。",
+        "Metis is checking it. I will bring the results back here.",
       tool: {
         name: "actors__message",
-        summary: "检查消息滚动与输入框布局",
-        arguments: { actor_id: "research", content: "检查消息滚动与输入框布局。" },
+        summary: "Message sent to Metis",
+        arguments: { actor_id: "research", content: "Check message scrolling and the composer layout." },
         payload: {
-          path: ".",
-          entries: [
-            { name: "README.md", kind: "file", size_bytes: 4096 },
-            { name: "src", kind: "directory", size_bytes: null },
-            { name: "package.json", kind: "file", size_bytes: 1213 },
-          ],
-          next_cursor: null,
+          message_id: "layout-request",
+          sent_message: { conversation_url: "/actors/research", content: "Check message scrolling and the composer layout." },
         },
-        model_content: "README.md\nsrc/\npackage.json",
-        outcome: { actor_id: "research", name: "检查消息滚动与输入框布局" },
+        model_content: "Message delivered to Metis.",
+        outcome: { actor_id: "research", name: "Metis" },
       },
     },
     {
-      user: "手机上的长消息也一起看看，输入框不要挡住最后一句。",
+      user: "Check long messages on mobile too. The composer should not cover the last line.",
       reply:
-        "会一起检查。重点看窄屏换行、输入框展开后的留白，以及历史消息的位置是否保持稳定。",
+        "I will cover narrow-screen wrapping, spacing around the expanded composer and the stability of the reading position.",
     },
   ]);
 
   seedHistory(research, [
     {
-      user: "检查消息滚动与输入框布局，包含桌面和手机。",
+      user: "Check message scrolling and the composer on desktop and mobile.",
       reply:
-        "消息区现在铺满整个对话区域，输入框悬浮在底部。\n\n" +
-        "- 展开输入框时，正在阅读的历史消息位置保持不变。\n" +
-        "- 滚动到底部后，最后一句始终留在输入框上方。\n" +
-        "- 390px 窄屏下，代码、表格和长链接可以独立横向滚动。\n\n" +
-        "桌面和手机布局都已检查。",
+        "Messages now fill the conversation area, with the composer floating at the bottom.\n\n" +
+        "- Expanding the composer preserves the reading position.\n" +
+        "- At the bottom, the last line stays above the composer.\n" +
+        "- At 390px, code, tables and long links scroll horizontally on their own.\n\n" +
+        "Checked both desktop and mobile layouts.",
       tool: {
         name: "files__list_directory",
-        summary: "Listed 2 entries in ~/research",
-        arguments: { path: "~/research" },
+        summary: "Listed 2 entries in webui/src",
+        arguments: { path: "webui/src" },
         payload: {
-          path: "~/research",
+          path: "webui/src",
           entries: [
-            { name: "sse-protocol.md", kind: "file", size_bytes: 2210 },
-            { name: "fixtures.md", kind: "file", size_bytes: 980 },
+            { name: "App.tsx", kind: "file", size_bytes: 28412 },
+            { name: "index.css", kind: "file", size_bytes: 94816 },
           ],
           next_cursor: null,
         },
-        model_content: "sse-protocol.md\nfixtures.md",
-        outcome: { path: "~/research", entries: 2 },
+        model_content: "App.tsx\nindex.css",
+        outcome: { path: "webui/src", entries: 2 },
       },
     },
   ]);
@@ -157,8 +149,7 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
   for (const exchange of exchanges) {
     const user = addMessage(actor, {
       kind: "request",
-      source: { kind: "user" },
-      reply_to: { kind: "user" },
+      ...requestOrigin(actor),
       content: exchange.user,
       status: "completed",
     });
@@ -173,14 +164,12 @@ function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {
     const replyStarted = ts + 1_000;
     const reply = user;
     touchMessage(reply, {
-      created_at_ms: replyStarted,
       started_at_ms: replyStarted,
       finished_at_ms: ts + 5_000,
       updated_at_ms: ts + 5_000,
       reply: exchange.reply,
       final_generation: 1,
     });
-    emitEvent(actorId, { type: "message_added", message_id: reply.id });
     emitEvent(actorId, { type: "generation_started", message_id: reply.id, generation: 1 });
 
     if (exchange.tool) {

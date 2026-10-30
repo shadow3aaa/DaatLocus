@@ -15,7 +15,7 @@ export function resetApps(empty = false) {
           {
             id: "mcp_00000000000000000000000000000001",
             name: "Linear",
-            description: "查找问题、更新任务，跟进项目进展",
+            description: "Find issues, update tasks and track project progress",
             revision: 1,
             enabled: true,
             source: {
@@ -35,7 +35,7 @@ export function resetApps(empty = false) {
           {
             id: "mcp_00000000000000000000000000000002",
             name: "GitHub",
-            description: "浏览仓库、查看拉取请求和问题",
+            description: "Browse repositories, pull requests and issues",
             revision: 1,
             enabled: true,
             source: {
@@ -54,7 +54,7 @@ export function resetApps(empty = false) {
           {
             id: "mcp_00000000000000000000000000000003",
             name: "Notion",
-            description: "搜索笔记与文档",
+            description: "Search notes and documents",
             revision: 1,
             enabled: false,
             source: {
@@ -67,8 +67,8 @@ export function resetApps(empty = false) {
           },
           {
             id: "mcp_00000000000000000000000000000004",
-            name: "本地文件",
-            description: "读取工作文件夹中的文件",
+            name: "Local files",
+            description: "Read files in the working directory",
             revision: 1,
             enabled: true,
             source: { transport: "stdio" as const, command: "mcp-files" },
@@ -85,7 +85,7 @@ export function resetApps(empty = false) {
 }
 export function seedAppPages(retry = false) {
   const template = mockApps[0];
-  mockApps.splice(0, mockApps.length, ...Array.from({length:72},(_,index)=>({...template,id:`mcp_${(index+1).toString(16).padStart(32,"0")}`,name:`应用 ${String(index+1).padStart(2,"0")}`})));
+  mockApps.splice(0, mockApps.length, ...Array.from({length:72},(_,index)=>({...template,id:`mcp_${(index+1).toString(16).padStart(32,"0")}`,name:`App ${String(index+1).padStart(2,"0")}`})));
   failNextPage = retry;
 }
 resetApps();

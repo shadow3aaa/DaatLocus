@@ -34,7 +34,7 @@ test("empty builtin results offer no blank disclosure while screenshots and fail
 test("browser labels use document facts instead of native identifiers or a serialized summary",()=>{
   const result=toolExampleResult(toolExamples.find(item=>item.id==="browser-open_page")!);
   result.summary="browser_head INTERNAL";
-  expect(toolResultTitle(result)).toBe("Daat Locus · 浏览器预览");
+  expect(toolResultTitle(result)).toBe("Daat Locus · Browser preview");
   const html=renderToStaticMarkup(<ToolDetail result={result}/>);
   for(const forbidden of ["browser_head","page_id","state_id","resource_references"])expect(html).not.toContain(forbidden);
 });
@@ -74,5 +74,5 @@ test("Sudo wrapping an installed external tool preserves its generic result rend
   result.name="sudo__execute";
   result.outcome={operation:target};
   expect(isBuiltinTool(result)).toBe(false);
-  expect(renderToStaticMarkup(<ToolDetail result={result}/>)).toContain("第一段工具输出");
+  expect(renderToStaticMarkup(<ToolDetail result={result}/>)).toContain("First block of tool output.");
 });
