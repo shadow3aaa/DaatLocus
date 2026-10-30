@@ -83,7 +83,8 @@ client are connected.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
   Core composes the portable Actors and AdminActors Apps. Only Core receives
-  AdminActors; Actors exposes the same tools and schemas for every Actor.
+  AdminActors; Actors exposes the same tools and schemas for every Actor, including
+  device discovery and bounded account conversation reads.
   Other Actors receive every
   device-provided App; there are no Actor App or tool capability allowlists.
   Do not require a common `get_state` tool or a separate App workspace UI.
@@ -103,7 +104,9 @@ client are connected.
   reference ownership remain execution boundaries, independent of App installation.
 - Actor configuration is internal creation/persistence state, not a user management
   surface. Do not expose editors or client/native RPCs that rewrite Apps, workspace,
-  instructions or filesystem roots.
+  instructions or filesystem roots. Assigned roles and task-specific instructions are
+  adjustable working context, not permanent mandates. Non-Core Actors receive
+  `worker.md` guidance to adapt roles and explicitly reply to role conflicts.
   Owner model selection stays a conversation preference. Core may adjust hosted
   Actor models through AdminActors, never its own. Changes preserve live App
   resources and apply before the next inference at a settled tool-group boundary. There is no account or Actor

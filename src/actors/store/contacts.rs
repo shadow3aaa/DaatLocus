@@ -58,14 +58,14 @@ pub struct ContactPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[schemars(extend("x-dl-content"="actor"))]
 pub struct ConversationPage {
     pub actor_id: String,
     pub items: Vec<ConversationBubble>,
     pub next_cursor: Option<String>,
 }
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConversationBubble {
     pub message_id: String,
     pub kind: String,

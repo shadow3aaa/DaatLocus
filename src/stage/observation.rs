@@ -24,6 +24,11 @@ pub enum Query {
         id: String,
     },
     Actor,
+    Conversation {
+        cursor: Option<String>,
+        limit: u8,
+        budget: usize,
+    },
     Messages {
         before: Option<i64>,
         limit: u8,
@@ -73,6 +78,19 @@ impl Query {
                 (None, Some(*limit))
             }
             Self::Actor => (None, None),
+            Self::Conversation {
+                cursor,
+                limit,
+                budget,
+            } => {
+                if cursor.as_ref().is_some_and(|value| value.len() > 2048)
+                    || !(1024..=65536).contains(budget)
+                {
+                    return Err(StageError::Invalid("Invalid conversation page"));
+                }
+                (None, Some(*limit))
+            }
+
             Self::Messages { limit, .. }
             | Self::Approvals { limit, .. }
             | Self::Queue { limit, .. } => (None, Some(*limit)),
@@ -160,6 +178,8 @@ pub fn read(
             value["model_ready"] = crate::config_setup::readiness_for_config(&system.config()).is_complete().into();
             if manages{value["config"]=serde_json::to_value(&source.config).map_err(|_|StageError::Invalid("Invalid Actor config"))?;}Ok(value)
         },
+        Query::Conversation {cursor,limit,budget} => serde_json::to_value(
+            system.store().conversation_bubbles(&actor.actor_id,cursor.as_deref(),*limit as usize,*budget).map_err(fail)?),
         Query::Messages {before,limit} => {
             let page=system.store().messages(&actor.actor_id,*before,*limit as usize).map_err(fail)?;
             let mut value=serde_json::to_value(page).map_err(|_|StageError::Invalid("Invalid message page"))?;

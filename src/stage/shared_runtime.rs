@@ -158,6 +158,45 @@ impl Controller {
         }
         Ok(serde_json::json!({"devices":devices}))
     }
+    /// Read hosted conversation facts through the authenticated device channel,
+    /// independently of the Core worker or its execution epoch.
+    pub(crate) async fn read_actor_conversation(
+        &self,
+        stage: StageId,
+        actor: String,
+        cursor: Option<String>,
+        limit: usize,
+        budget: usize,
+    ) -> Result<serde_json::Value> {
+        let runtime = self.runtime()?;
+        let query = super::observation::Query::Conversation {
+            cursor,
+            limit: limit
+                .try_into()
+                .map_err(|_| StageError::Invalid("Invalid conversation page"))?,
+            budget,
+        };
+        query.validate()?;
+        let target = super::ActorAddress {
+            stage_id: stage,
+            actor_id: actor,
+        };
+        let handle = runtime.handle(stage)?;
+        let Body::Observation { actor, content } = handle
+            .rpc(Body::ReadQuery {
+                actor: target.clone(),
+                query,
+            })
+            .await?
+        else {
+            return Err(StageError::Invalid("Invalid conversation response"));
+        };
+        if actor != target {
+            return Err(StageError::Forbidden("Conversation targets another Actor"));
+        }
+        let bytes = handle.content(target, content).await?;
+        serde_json::from_slice(&bytes).map_err(|_| StageError::Invalid("Invalid conversation page"))
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
@@ -2767,7 +2806,7 @@ mod tests {
         let mut apps = core.model_apps().await.unwrap();
         let call = AgentToolCall {
             id: "sync-devices".into(),
-            name: "admin_actors__devices".into(),
+            name: "actors__devices".into(),
             arguments: json!({}),
         };
         apps.validate_tool_call(&call, &context).unwrap();

@@ -151,6 +151,7 @@ struct CreateActorArgs {
     workspace: Option<String>,
     /// Additional absolute read/write roots. The working directory is always included for recursive read/write access. Null adds no other roots.
     initial_authorization: Option<InitialAuthorizationGroup>,
+    /// Initial working role and task context. The Actor may adapt it for later requests; it grants no authority.
     instructions: Option<String>,
     /// Exact configured model name from the available models list; never inherited.
     model: String,
@@ -177,6 +178,16 @@ struct ListActorArgs {
     limit: Option<usize>,
 }
 
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ConversationArgs {
+    stage_id: Option<String>,
+    actor_id: String,
+    /// Opaque continuation returned by this query; null starts with the latest bubbles.
+    cursor: Option<String>,
+    limit: usize,
+}
 #[model_schema]
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -334,6 +345,8 @@ impl App for ActorApp {
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut tools = vec![
+            AppToolSpec{name:"devices".into(),description:"List authorized account devices and actual connectivity. Select an explicit stage_id for another device; offline targets stay on their original device.".into(),input_schema:model_schema_for::<EmptyAppArgs>()},
+            AppToolSpec{name:"read_conversation".into(),description:"Read a bounded page of an account Actor's conversation bubbles before coordinating work. Excludes tools, reasoning and model protocol; attachments are references. Null stage_id selects this device. Null cursor starts at the latest bubbles; follow next_cursor for older content. limit is 1 to 32.".into(),input_schema:model_schema_for::<ConversationArgs>()},
             AppToolSpec { name: "list".into(), description: "List account Actors and their names on the target device, including archived Actors. Follow next_cursor until null to read all names. Null stage_id selects the current device; null cursor starts the list; null limit uses 25 (maximum 100).".into(), input_schema: model_schema_for::<ListActorArgs>() },
             AppToolSpec { name: "create".into(), description: "Create a persistent owned Actor with a unique name and every device-provided App. Null stage_id selects the current device. Null workspace uses the current working directory. Initial authorization includes recursive read/write access to that directory plus any explicit roots. Core grants this group directly to the device without review; other Actors use the sandbox authorization flow. The group is not Actor configuration.".into(), input_schema: model_schema_for::<CreateActorArgs>() },
             AppToolSpec { name: "import_conversation".into(), description: "Prepare an idle Actor from this request's attached historical conversation. Read the evidence first, choose a name and concise factual context. Original prose is retained as a readable resource. Return its conversation_url to the user and wait for their explicit request before sending work or continuing the imported task. Uses the current workspace and device sandbox; does not queue work or replay effects. Repeated calls for this input return the same Actor.".into(), input_schema: model_schema_for::<ImportConversationArgs>() },
@@ -359,6 +372,66 @@ impl App for ActorApp {
         let caller = self.caller(context)?;
         self.check_import_operation(call, context)?;
         match call.name.as_str() {
+            "devices" => {
+                let _: EmptyAppArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                self.system.authorize_account_observation(caller)?;
+                let value = if let Some(core) = self.system.shared_core() {
+                    core.actor_devices().map_err(|error| miette!("{error}"))?
+                } else {
+                    json!({"devices":[{"stage_id":self.system.store().public_stage_id().map_err(|error|miette!("{error}"))?,"label":null,"online":true,"current":true}]})
+                };
+                Ok(AppToolExecutionResult::new("Account devices", value, None))
+            }
+            "read_conversation" => {
+                let args: ConversationArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let budget = context
+                    .tool_output_max_tokens
+                    .saturating_mul(crate::context_budget::APPROX_BYTES_PER_TOKEN)
+                    .clamp(1024, 65536);
+                let local = self
+                    .system
+                    .store()
+                    .public_stage_id()
+                    .map_err(|error| miette!("{error}"))?;
+                let stage = args
+                    .stage_id
+                    .as_ref()
+                    .map(|stage| serde_json::from_value::<crate::stage::StageId>(json!(stage)))
+                    .transpose()
+                    .map_err(|_| miette!("Invalid target device"))?
+                    .unwrap_or(local);
+                if stage != local {
+                    self.system.authorize_account_observation(caller)?;
+                    let core = self
+                        .system
+                        .shared_core()
+                        .ok_or_else(|| miette!("Remote device is unavailable"))?;
+                    let value = core
+                        .read_actor_conversation(
+                            stage,
+                            args.actor_id,
+                            args.cursor,
+                            args.limit,
+                            budget,
+                        )
+                        .await
+                        .map_err(|error| miette!("{error}"))?;
+                    self.system.authorize_account_observation(caller)?;
+                    let page: crate::actors::store::ConversationPage =
+                        serde_json::from_value(value).into_diagnostic()?;
+                    return AppToolExecutionResult::structured("Actor conversation", &page, None);
+                }
+                self.system.inspect_from_actor(&args.actor_id, caller)?;
+                let page = self.system.store().conversation_bubbles(
+                    &args.actor_id,
+                    args.cursor.as_deref(),
+                    args.limit,
+                    budget,
+                )?;
+                AppToolExecutionResult::structured("Actor conversation", &page, None)
+            }
             "appeal_approval" => {
                 let args: AppealApprovalArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;

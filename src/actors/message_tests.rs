@@ -1148,7 +1148,7 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
         .unwrap();
     wait_requests(&worker, 1).await;
     coordinator.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall{id:"inspect-remote-conversation".into(),name:"admin_actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
+        MockReply::Calls(vec![AgentToolCall{id:"inspect-remote-conversation".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
         AgentToolCall{id:"change-remote-model".into(),name:"admin_actors__set_model".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","model":"mock"})}]),
         MockReply::Answer("Observed progress without messaging the worker"),
     ]);
@@ -1184,7 +1184,7 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
     assert!(calls.iter().all(|call| call.error.is_none()));
     let observed = calls
         .iter()
-        .find(|call| call.name == "admin_actors__read_conversation")
+        .find(|call| call.name == "actors__read_conversation")
         .unwrap();
     let result = a.store().tool_result(&observed.id).unwrap();
     assert!(
@@ -1199,6 +1199,53 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
         1,
         "observation must not create another input"
     );
+    // A hosted worker can coordinate through the same read tools without using
+    // Core's inbox or borrowing its execution authority.
+    coordinator.replies.lock().extend([
+        MockReply::Calls(vec![
+            AgentToolCall {id:"worker-devices".into(),name:"actors__devices".into(),arguments:json!({})},
+            AgentToolCall {id:"worker-observe".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
+        ]),
+        MockReply::Answer("Observed from a hosted worker"),
+    ]);
+    let hosted_input = a
+        .send_user(
+            "root",
+            "Read the remote collaborator's progress".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    let done = wait_completed(&a, &hosted_input.id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    let summaries = a
+        .store()
+        .tool_summaries("root", &hosted_input.id, None, 8)
+        .unwrap()
+        .items;
+    assert_eq!(summaries.len(), 2);
+    assert!(
+        summaries.iter().all(|call| call.error.is_none()),
+        "{summaries:?}"
+    );
+    let read = summaries
+        .iter()
+        .find(|call| call.name == "actors__read_conversation")
+        .unwrap();
+    let page = a.store().tool_result(&read.id).unwrap();
+    assert!(
+        page.payload["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|bubble| bubble["content"] == "REMOTE_VISIBLE_PROGRESS")
+    );
+    assert_eq!(
+        worker.requests.lock().len(),
+        1,
+        "observation cannot interrupt the remote worker"
+    );
+    assert_eq!(b.store().messages("root", None, 16).unwrap().items.len(), 1);
     net_b.stop_abruptly().await;
     net_a.stop_abruptly().await;
     a.shutdown().await;

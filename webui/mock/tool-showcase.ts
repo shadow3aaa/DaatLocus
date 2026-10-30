@@ -97,7 +97,7 @@ export const toolSections = [
     sample("actor-resource-text","Full-output reference","actors__read_resource",{text:"This is the full attachment content."}),
     ...["yield","stop","archive","unarchive","import_conversation"].map(action=>sample(`actor-${action}`,`Collaboration · ${action}`,`${["stop","archive","unarchive"].includes(action)?"admin_actors":"actors"}__${action}`,{message:"Operation complete.",actor_id:"research"})),
     sample("actor-model","Change Actor model","admin_actors__set_model",{actor_id:"research",name:"Metis",model:"mock-mini"}),
-    sample("actor-conversation","Read Actor bubble history","admin_actors__read_conversation",{actor_id:"research",items:[{kind:"assistant",sender:"research",content:"Layout reviewed. Fixing the issues."}],next_cursor:null}),
+    sample("actor-conversation","Read Actor bubble history","actors__read_conversation",{actor_id:"research",items:[{kind:"assistant",sender:"research",content:"Layout reviewed. Fixing the issues."}],next_cursor:null}),
     sample("actor-error","Sending to an archived Actor fails","actors__message",{},{error:"The target Actor is archived and cannot receive new messages."}),
   ]},
   {id:"tools-apps",label:"Tools · AppsManager",examples:[

@@ -20,6 +20,7 @@ const labels: Record<string, string> = {
   computer_use__adjust_window: "computer_use.adjust_window",
   computer_use__list_apps: "computer_use.list_apps", computer_use__list_windows: "computer_use.list_windows", computer_use__launch_app: "computer_use.launch_app", computer_use__open_window: "computer_use.open_window", computer_use__get_window_state: "computer_use.observe", computer_use__click: "computer_use.click", computer_use__type_text: "computer_use.type_text", computer_use__press_key: "computer_use.press_key", computer_use__scroll: "computer_use.scroll", computer_use__drag: "computer_use.drag", computer_use__give_window: "computer_use.give_window", computer_use__release_window: "computer_use.release_window", computer_use__close_window: "computer_use.close_window",
   actors__appeal_approval: "tool_details.request_permission",
+  actors__devices: "tool_presentation.view_devices", actors__read_conversation: "tool_presentation.read_history",
   admin_actors__resolve_approval_appeal: "tool_presentation.resolve_permission", admin_actors__devices: "tool_presentation.view_devices",
   admin_actors__stop: "tool_presentation.stop_actor", admin_actors__archive: "tool_presentation.archive_actor", admin_actors__unarchive: "tool_presentation.unarchive_actor",
   actors__create: "tool_presentation.create_actor", actors__import_conversation: "imports.bubble_title", actors__message: "tool_presentation.message_actor", actors__list: "tool_presentation.view_actor", actors__read_history: "tool_presentation.read_history",

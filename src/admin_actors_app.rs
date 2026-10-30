@@ -3,7 +3,6 @@ use crate::{
     actors::ActorSystem,
     app::{
         ActorCallContext, App, AppId, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec,
-        EmptyAppArgs,
     },
     model_protocol::AgentToolCall,
     schema_utils::model_schema_for,
@@ -110,16 +109,6 @@ struct SetModelArgs {
     /// Configured model name; null selects the account main model.
     model: Option<String>,
 }
-#[model_schema]
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ConversationArgs {
-    stage_id: Option<String>,
-    actor_id: String,
-    /// Opaque continuation returned by this query; null starts with the latest bubbles.
-    cursor: Option<String>,
-    limit: usize,
-}
 #[async_trait]
 impl App for AdminActorsApp {
     fn id(&self) -> AppId {
@@ -133,13 +122,11 @@ impl App for AdminActorsApp {
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
-            AppToolSpec{name:"devices".into(),description:"List authorized account devices and actual connectivity. Use an explicit stage_id for another device; an offline target is never silently moved.".into(),input_schema:model_schema_for::<EmptyAppArgs>()},
             AppToolSpec{name:"stop".into(),description:"Stop a hosted Actor's entire current execution, including pending and suspended inputs, and wait for cleanup. Preserve identity, history and completed effects. Core cannot be targeted.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"archive".into(),description:"Archive a hosted Actor only on an explicit Owner request. Discard queued inputs, leave running work to finish, preserve history and reject new messages. Core cannot be archived.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"unarchive".into(),description:"Unarchive a hosted Actor only on an explicit Owner request, without replaying discarded inputs.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"resolve_approval_appeal".into(),description:"Resolve an immutable permission appeal from the user's authorization. Ask when authorization is missing or unclear. Approval remembers the original scopes and notifies the Actor without executing its operation.".into(),input_schema:model_schema_for::<ResolveApprovalAppealArgs>()},
             AppToolSpec{name:"set_model".into(),description:"Change a hosted Actor's model preference. It takes effect before the next inference after the current tool group settles, preserving tasks, history and App state. Cannot change Core's model.".into(),input_schema:model_schema_for::<SetModelArgs>()},
-            AppToolSpec{name:"read_conversation".into(),description:"Read a bounded page of an account Actor's conversation bubbles to understand progress without sending another message. Excludes tools, reasoning and model protocol; attachments are references. Null cursor starts at the latest bubbles; follow next_cursor for older content.".into(),input_schema:model_schema_for::<ConversationArgs>()},
         ]
     }
     async fn execute_tool(
@@ -211,16 +198,6 @@ impl App for AdminActorsApp {
                 ))
             }
 
-            "devices" => {
-                let _: EmptyAppArgs =
-                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                let value = if let Some(core) = self.system.shared_core() {
-                    core.actor_devices().map_err(|error| miette!("{error}"))?
-                } else {
-                    json!({"devices":[{"stage_id":self.system.store().public_stage_id().map_err(|error|miette!("{error}"))?,"label":null,"online":true,"current":true}]})
-                };
-                Ok(AppToolExecutionResult::new("Account devices", value, None))
-            }
             "set_model" => {
                 let args: SetModelArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
@@ -234,23 +211,6 @@ impl App for AdminActorsApp {
                     json!({"actor_id":actor.id,"name":actor.config.name,"model":actor.config.model}),
                     None,
                 ))
-            }
-            "read_conversation" => {
-                let args: ConversationArgs =
-                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
-                self.system.inspect_from_core(&args.actor_id, caller)?;
-                let budget = context
-                    .tool_output_max_tokens
-                    .saturating_mul(crate::context_budget::APPROX_BYTES_PER_TOKEN)
-                    .clamp(1024, 65536);
-                let page = self.system.store().conversation_bubbles(
-                    &args.actor_id,
-                    args.cursor.as_deref(),
-                    args.limit,
-                    budget,
-                )?;
-                AppToolExecutionResult::structured("Actor conversation", &page, None)
             }
             _ => Err(miette!("Unknown AdminActors tool")),
         }

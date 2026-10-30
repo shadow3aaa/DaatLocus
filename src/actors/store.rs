@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod approval_appeals;
 mod contacts;
+pub(crate) use contacts::ConversationPage;
 pub use contacts::{ActorContact, ContactMessage, ContactPage, ContactSort};
 #[cfg(test)]
 #[path = "store/history_handoff_tests.rs"]

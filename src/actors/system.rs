@@ -1363,22 +1363,42 @@ impl ActorSystem {
         self.store().publish_delivery(delivery)
     }
 
-    pub(crate) fn inspect_from_core(
-        &self,
-        target: &str,
-        caller: &ActorCallContext,
-    ) -> Result<ActorRecord> {
-        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
-        if !self.account_actor_ids(&core.id)?.contains(target)
+    pub(crate) fn authorize_account_observation(&self, caller: &ActorCallContext) -> Result<()> {
+        self.record_for_tool(&caller.actor_id, caller)?;
+        if !self
+            .account_actor_ids(&caller.actor_id)?
+            .contains(crate::stage::shared::ACTOR_ID)
             || self
                 .store()
                 .message(&caller.message_id)?
                 .remote_authority
-                .is_some()
+                .as_ref()
+                .is_some_and(|authority| authority.reply_for.is_none())
         {
             return Err(forbidden(
-                "Actor observation requires account Core authority",
+                "Observation is outside this input's account authority",
             ));
+        }
+        Ok(())
+    }
+    pub(crate) fn inspect_from_actor(
+        &self,
+        target: &str,
+        caller: &ActorCallContext,
+    ) -> Result<ActorRecord> {
+        self.record_for_tool(&caller.actor_id, caller)?;
+        if !self.account_actor_ids(&caller.actor_id)?.contains(target) {
+            return Err(forbidden("Actor belongs to another account"));
+        }
+        if let Some(authority) = self
+            .store()
+            .message(&caller.message_id)?
+            .remote_authority
+            .as_ref()
+            .filter(|authority| authority.reply_for.is_none())
+            && !self.remote_device_authority(authority, target)?.read
+        {
+            return Err(forbidden("Remote authority cannot read this Actor"));
         }
         self.actor(target)
     }
@@ -3273,6 +3293,9 @@ mod tests {
             serde_json::to_value(worker.tool_specs()).unwrap()
         );
         assert!(common.tool_specs().iter().any(|tool| tool.name == "reply"));
+        for spec in common.tool_specs() {
+            crate::schema_utils::validate_model_facing_schema(&spec.input_schema).unwrap();
+        }
         assert!(!common.tool_specs().iter().any(|tool| matches!(
             tool.name.as_str(),
             "stop" | "archive" | "set_model" | "deliver" | "report"
@@ -3335,16 +3358,60 @@ mod tests {
             .execution_context(&system.actor("root").unwrap(), &input)
             .unwrap();
         assert!(admin.execute_tool(&call, &worker_context).await.is_err());
+        let mut reader = crate::actor_app::ActorApp::new("root".into(), system.clone());
         call.name = "read_conversation".into();
         call.arguments =
             serde_json::json!({"stage_id":null,"actor_id":"core","cursor":null,"limit":8});
-        assert!(admin.execute_tool(&call, &worker_context).await.is_err());
+        assert!(reader.execute_tool(&call, &worker_context).await.is_ok());
+        let mut read_only_worker = worker_context.clone();
+        read_only_worker
+            .actor_call
+            .as_mut()
+            .unwrap()
+            .remote_read_only = true;
+        assert!(reader.execute_tool(&call, &read_only_worker).await.is_ok());
         system.store().stage_transaction(|tx|{tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id),account TEXT NOT NULL); INSERT INTO stage_account_actors VALUES('core','first'),('root','second');")?;Ok(())}).unwrap();
         call.arguments["actor_id"] = serde_json::json!("root");
-        assert!(admin.execute_tool(&call, &context).await.is_err());
+        reader = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        assert!(reader.execute_tool(&call, &context).await.is_err());
         call.name = "set_model".into();
         call.arguments = serde_json::json!({"stage_id":null,"actor_id":"root","model":"mock"});
         assert!(admin.execute_tool(&call, &context).await.is_err());
+        system.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn worker_prompt_treats_its_initial_role_as_context_without_changing_core_guidance() {
+        let (_directory, system) = fixture().await;
+        let mut worker = system.actor("root").unwrap();
+        worker.config.instructions = "Original task: only report the CI fix to Core".into();
+        let input = system
+            .send_user(
+                "root",
+                "A collaborator requests a new read-only review".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        system.store().claim_next("root").unwrap().unwrap();
+        let context = system.execution_context(&worker, &input).unwrap();
+        let prompt = super::super::prompt::SystemPrompt::load(&system, &worker, &context)
+            .await
+            .unwrap();
+        let guidance = prompt
+            .files
+            .iter()
+            .find(|file| file.name == "worker.md")
+            .unwrap();
+        assert_eq!(guidance.content, include_str!("../prompts/worker.md"));
+        assert!(
+            prompt.files[0]
+                .content
+                .contains(&worker.config.instructions),
+            "the role remains available as task context"
+        );
+        let core = super::super::prompt::SystemPrompt::for_role(&system, true).unwrap();
+        assert!(!core.files.iter().any(|file| file.name == "worker.md"));
         system.shutdown().await;
     }
 
