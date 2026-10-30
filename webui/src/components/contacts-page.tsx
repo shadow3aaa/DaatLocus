@@ -7,6 +7,7 @@ import { contactExcerpt, listContacts, type ActorContact, type ContactFocus, typ
 import { t } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import { GeneratedAvatar } from "@/components/generated-avatar";
+import { actorAvatarSeed } from "@/lib/conversation-avatars";
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FloatingSearchBar } from "@/components/floating-search";
@@ -69,7 +70,7 @@ export function ContactsPage({onNavigation,onActor,onAccessRevoked,active=true}:
     <div className="dl-contacts-scroll" id={results} aria-busy={loading}>
       {loading&&!items.length&&Array.from({length:6},(_,index)=><Skeleton key={index} className="mb-3 h-20 w-full rounded-xl"/>)}
       {!failed&&<ul className="dl-contact-list">{items.map(item=><li key={item.actor.conversation_url}>
-        <button className="dl-contact-heading" onClick={()=>open(item)}><GeneratedAvatar seed={`actor:${item.actor.id}`} /><span><strong><HighlightedText text={item.actor.name} query={text}/></strong><small className="dl-contact-meta"><span>{t(`contacts.${item.actor.status}`)}</span><span className="dl-contact-model" aria-label={t("contacts.model",{model:item.model??t("contacts.no_model")})}><CpuIcon aria-hidden="true"/>{item.model??t("contacts.no_model")}</span></small></span><ChevronRightIcon aria-hidden="true"/></button>
+        <button className="dl-contact-heading" onClick={()=>open(item)}><GeneratedAvatar seed={actorAvatarSeed(item.actor.id)} /><span><strong><HighlightedText text={item.actor.name} query={text}/></strong><small className="dl-contact-meta"><span>{t(`contacts.${item.actor.status}`)}</span><span className="dl-contact-model" aria-label={t("contacts.model",{model:item.model??t("contacts.no_model")})}><CpuIcon aria-hidden="true"/>{item.model??t("contacts.no_model")}</span></small></span><ChevronRightIcon aria-hidden="true"/></button>
         {item.messages.length>0&&<div className="dl-contact-matches">{item.messages.map(message=><button key={`${message.message_id}:${message.kind}:${message.result_id??message.generation??""}`} onClick={()=>open(item,message)}><small>{t(`contacts.${message.kind}`)}</small><span><HighlightedText text={contactExcerpt(message.content,text)} query={text}/></span></button>)}</div>}
       </li>)}</ul>}
       {!loading&&!failed&&!items.length&&!next&&<Empty><EmptyHeader><EmptyMedia variant="icon"><ContactRoundIcon/></EmptyMedia><EmptyTitle>{t(text?"contacts.no_results":"contacts.empty")}</EmptyTitle></EmptyHeader></Empty>}

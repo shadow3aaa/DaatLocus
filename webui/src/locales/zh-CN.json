@@ -100,6 +100,7 @@
   "conversation_content": {
     "sent_by": "由 {{name}} 发送",
     "sent_to": "发送给 {{name}}",
+    "recipient_caption": "发送给 <recipient/>",
     "interrupted": "已中断",
     "thinking": "正在思考",
     "reasoning": "思考过程",

@@ -100,6 +100,7 @@
   "conversation_content": {
     "sent_by": "Sent by {{name}}",
     "sent_to": "Sent to {{name}}",
+    "recipient_caption": "Sent to <recipient/>",
     "interrupted": "Interrupted",
     "thinking": "Thinking",
     "reasoning": "Reasoning",

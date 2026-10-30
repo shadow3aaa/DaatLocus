@@ -1513,6 +1513,12 @@ Selecting a hit fetches its exact scoped message and loads bounded activity page
 until its bubble is available, without sending input or changing Actor configuration.
 Contacts uses the existing floating search and automatic scroll boundary; Actor
 references keep the desktop dialog/mobile full-page conversation presentation.
+Conversation bubbles use the same identity-seeded avatars as Contacts and the
+account menu, with the sender's name above the bubble. Incoming Actor messages
+identify the sender through this name and avatar; outgoing messages show “Sent to”
+followed by a small avatar-and-name capsule inside the bubble. Its palette blends
+with the bubble's theme; other avatar placements retain their circles.
+Device-relative Actor references resolve in the conversation's device namespace.
 
 ### Conversation import
 

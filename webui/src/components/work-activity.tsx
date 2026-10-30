@@ -11,8 +11,10 @@ import { SentActorMessage } from "@/components/actor-message-bubble";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LazyPage } from "@/components/lazy-page";
+import { MessageBubbleRow } from "@/components/message-bubble-row";
+import { actorAvatarSeed } from "@/lib/conversation-avatars";
 
-export function WorkActivity({ focus, message, range, events, tools, onActor }: { focus?:ContactFocus|null; message: MessageRecord; range: ActivityRange; events: EventRecord[]; tools: ToolRef[]; onActor(id: string): void }) {
+export function WorkActivity({ focus, message, avatarActorId = message.actor_id, avatarActorName, range, events, tools, onActor }: { focus?:ContactFocus|null; message: MessageRecord; avatarActorId?: string; avatarActorName?: string; range: ActivityRange; events: EventRecord[]; tools: ToolRef[]; onActor(id: string): void }) {
   const { live } = range;
   const [history, setHistory] = useState<EventRecord[]>([]);
   const [cursor, setCursor] = useState<number | null | undefined>(undefined);
@@ -71,8 +73,8 @@ export function WorkActivity({ focus, message, range, events, tools, onActor }: 
   if (message.status === "queued") return null;
   return <>
     {loading && !segments.length && <Skeleton className="h-14 w-full" />}
-    {segments.map(segment => segment.kind === "message" ? <SentActorMessage key={segment.seq} actorId={message.actor_id} resultId={segment.resultId} onActor={onActor} /> : segment.kind === "text" ?
-      <div data-message-id={message.id} data-generation={segment.generation} className="dl-work-final dl-work-actor-reply" key={segment.seq}><div className="dl-bubble dl-bubble-actor"><Markdown content={segment.content} onActor={onActor} /></div><CopyMessage content={segment.content} /></div> :
+    {segments.map(segment => segment.kind === "message" ? <SentActorMessage key={segment.seq} actorId={message.actor_id} avatarActorId={avatarActorId} avatarActorName={avatarActorName} resultId={segment.resultId} onActor={onActor} /> : segment.kind === "text" ?
+      <div data-message-id={message.id} data-generation={segment.generation} className="dl-work-final dl-work-actor-reply" key={segment.seq}><MessageBubbleRow seed={actorAvatarSeed(avatarActorId)} actorId={avatarActorId} name={avatarActorName} own><div className="dl-bubble dl-bubble-actor"><Markdown content={segment.content} onActor={onActor} /></div><CopyMessage content={segment.content} /></MessageBubbleRow></div> :
       <Activities key={segment.seq} actorId={message.actor_id} tools={activity.filter(tool => segment.callIds.includes(tool.call_id))} thinking={segment.thinking} onActor={onActor} />)}
     {!complete && cursor != null && <LazyPage cursor={cursor} onLoad={more} errorMessage={t("work_activity.could_not_load_more_activity")} />}
     {error && <div className="dl-client-error" role="alert"><span>{error}</span><Button variant="ghost" size="sm" disabled={loading} onClick={() => { setError(""); setCursor(undefined); setRetry(value => value + 1); }}>{t("app.retry")}</Button></div>}

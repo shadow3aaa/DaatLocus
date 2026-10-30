@@ -704,16 +704,26 @@ html[data-desktop-platform="windows"] [data-window-drag-region] { user-select: n
 .dl-primary-turn[data-last-side="user"] + .dl-primary-turn[data-first-side="user"] { margin-top: 4px; }
 .dl-primary-inputs, .dl-primary-response { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
 .dl-primary-inputs > .dl-message, .dl-primary-response > .dl-message { width: 100%; margin: 0; }
-.dl-primary-bubble-row { display: flex; align-items: flex-end; gap: 4px; width: 100%; min-width: 0; }
-.dl-message-user > .dl-primary-bubble-row { flex-direction: row-reverse; }
-.dl-primary-bubble-row > .dl-bubble { min-width: 0; max-width: min(90%, calc(100% - 32px)); }
-.dl-primary-bubble-row > .dl-copy-message { position: static; flex-shrink: 0; margin-bottom: 6px; }
+.dl-message-bubble-row { display: flex; align-items: flex-start; gap: 8px; width: 100%; min-width: 0; }
+.dl-message-bubble-row-own { flex-direction: row-reverse; }
+.dl-message-avatar { width: 32px; height: 32px; }
+.dl-message-body { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: var(--dl-message-column-width, min(85%, calc(100% - 40px))); }
+.dl-message-bubble-row-own>.dl-message-body { align-items: flex-end; }
+.dl-message-sender { display: block; max-width: 100%; margin-bottom: 4px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.dl-message-content { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: 100%; }
+.dl-message-bubble-row-own .dl-message-content { align-items: flex-end; }
+.dl-message-bubble-row-own .dl-message-sender { text-align: right; }
+.dl-primary-bubble-row>.dl-message-body { max-width: calc(100% - 40px); }
+.dl-primary-bubble-row .dl-message-content { flex-direction: row; align-items: flex-end; gap: 4px; }
+.dl-primary-bubble-row.dl-message-bubble-row-own .dl-message-content { flex-direction: row-reverse; }
+.dl-primary-bubble-row .dl-bubble { min-width: 0; max-width: 100%; }
+.dl-primary-bubble-row .dl-copy-message { position: static; flex-shrink: 0; margin-bottom: 6px; }
 .dl-primary-response > :is(.dl-message-outcomes, .dl-approval, .dl-operation-note, .dl-operation-error) { margin: 0; }
 .dl-primary-response > .dl-message-outcomes { gap: 4px; }
 .dl-primary-conversation .dl-conversation-bottom { height: 0; }
 .dl-primary-turn .dl-bubble { border-radius: 22px; padding: 9px 16px; font-size: calc(var(--ui-font-size, 14px) * 16 / 14); line-height: calc(var(--ui-font-size, 14px) * 22 / 14); }
 .dl-primary-turn .dl-bubble-user { background: var(--chat-user); }
-.dl-message-receipt { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin: 6px 6px 0; }
+.dl-message-receipt { color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); margin: 6px 46px 0 6px; }
 .dl-receipt-presence { overflow: hidden; }
 .dl-message-flight { position: fixed; z-index: 100; pointer-events: none; margin: 0; overflow: hidden; border-radius: 22px; }
 .dl-message-flight>.dl-bubble { width: 100%; max-width: none; height: 100%; margin: 0; }
@@ -741,7 +751,7 @@ html[data-reduced-motion=true] .dl-primary-composer .dl-composer-textarea { tran
   .dl-primary-composer .dl-model-trigger { padding-inline: 4px; }
 }
 .dl-primary-composer .dl-send-button { background: var(--chat-user); color: var(--chat-user-foreground); }
-.dl-work-conversation { --dl-history-left: 14px; --dl-history-width: 36px; --dl-history-gap: 12px; container-type: inline-size; }
+.dl-work-conversation { --dl-history-left: 14px; --dl-history-width: 36px; --dl-history-gap: 12px; --dl-message-column-width: min(85%, calc(100% - 40px)); container-type: inline-size; }
 .dl-work-turn { scroll-margin: 0; }
 .dl-work-turn:empty { display: none; }
 .dl-work-conversation .dl-conversation-footer:empty { padding: 0; }
@@ -776,6 +786,7 @@ html[data-reduced-motion=true] .dl-primary-composer .dl-composer-textarea { tran
 .dl-work-final { position: relative; display: flex; flex-direction: column; align-items: flex-start; margin: 23px 0 12px; }
 .dl-work-actor-reply { align-items: flex-end; }
 .dl-work-final .dl-bubble { max-width: 85%; font: inherit; }
+.dl-work-conversation .dl-message-content>.dl-bubble { max-width: 100%; }
 .dl-work-final .dl-copy-message { position: static; margin-top: 6px; }
 .dl-work-final:hover .dl-copy-message, .dl-work-final:focus-within .dl-copy-message { opacity: 1; }
 .dl-disclosure:focus-visible,.dl-step-label:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 3px; }
@@ -801,7 +812,7 @@ html[data-reduced-motion=true] .dl-primary-composer .dl-composer-textarea { tran
 .dl-diff-line-removed .dl-diff-word { background: color-mix(in srgb, var(--change-removed) 18%, transparent); }
 .dl-code-block pre.dl-numbered-source { padding: 9px 0; }.dl-source-line { display: grid; grid-template-columns: 43px minmax(max-content,1fr); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.8; }
 .dl-source-number { text-align: right; padding-right: 12px; color: var(--muted-foreground); user-select: none; }.dl-source-line>span:last-child { padding-right: 13px; }
-.dl-work-conversation .dl-activities { margin: 16px 0 24px; gap: 2px; width: 100%; min-width: 0; }
+.dl-work-conversation .dl-activities { margin: 16px 40px 24px auto; gap: 2px; width: var(--dl-message-column-width); min-width: 0; }
 .dl-activity-heading { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--muted-foreground); font: inherit; font-size: var(--content-font-size, 16px); line-height: 1.5; text-align: left; }
 button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-activity-heading:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 3px; }
@@ -864,7 +875,7 @@ button.dl-activity-heading:hover { color: var(--foreground); }
   .dl-actor-dialog-heading>div { background: var(--background); }
   .dl-actor-dialog-title { gap: 9px; } .dl-conversation-compact { --dl-header-space: 60px; }
   .dl-actor-mobile-back { display: inline-flex; }
-  .dl-actor-dialog-title [data-slot=avatar], .dl-actor-dialog>[data-slot=dialog-close] { display: none; }
+  .dl-actor-dialog>[data-slot=dialog-close] { display: none; }
   .dl-conversation-compact .dl-message-list { padding: calc(var(--dl-header-space) + 18px) 13px calc(var(--dl-footer-space) + 18px); } .dl-conversation-compact .dl-conversation-footer { padding: 6px 12px max(12px,var(--dl-safe-bottom)); }
   .dl-search-dialog { padding: 21px; border-radius: 20px; }
 }
@@ -1381,7 +1392,12 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 .dl-actor-message { cursor: pointer; }
 .dl-actor-message-caption { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; margin-bottom: 6px; }
 .dl-actor-message-caption span { min-width: 0; overflow-wrap: anywhere; }
-.dl-actor-message-caption svg { width: 13px; height: 13px; flex-shrink: 0; margin-left: auto; opacity: .65; }
+.dl-actor-message-caption>svg { width: 13px; height: 13px; flex-shrink: 0; margin-left: auto; opacity: .65; }
+.dl-actor-recipient-avatar { --avatar-background: color-mix(in oklab, var(--avatar-palette-background) 30%, var(--background)); --avatar-ink: color-mix(in oklab, var(--avatar-palette-ink) 15%, var(--foreground)); --avatar-shell: color-mix(in oklab, var(--avatar-palette-shell) 45%, var(--avatar-background)); width: auto; max-width: calc(100% - 66px); height: 22px; background: var(--avatar-background); color: var(--foreground); }
+.dl-actor-recipient-avatar>[data-slot=avatar-fallback] { gap: 4px; justify-content: flex-start; padding: 2px 8px 2px 2px; background: inherit; }
+.dl-actor-recipient-avatar svg { width: 18px; height: 18px; flex: none; }
+.dl-actor-recipient-avatar small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
+.dl-bubble-user .dl-actor-recipient-avatar { --avatar-background: color-mix(in oklab, var(--avatar-palette-ink) 18%, var(--background)); }
 
 /* Account contacts share the shell navigation and floating conversation search. */
 .dl-contacts-page { --contact-inset-start: max(32px,var(--dl-safe-left)); --contact-inset-end: max(32px,var(--dl-safe-right)); position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; background: var(--background); border-radius: 16px 0 0 16px; padding-top: calc(12px + var(--dl-safe-top)); }

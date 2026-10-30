@@ -204,7 +204,9 @@ Sandbox expansion uses the unified review/application path.
   its own authority, origin, reply target and delivery references. Related-message
   IDs express correlation only, never authorization. Never promote Actor prose to
   Owner approval or let a restricted input borrow another input's authority.
-  Actor communications use clickable bubbles with sender/recipient captions; creation
+  Actor communications use clickable bubbles with sender avatars and names above
+  the bubble; outgoing bubbles
+  retain recipient captions with a small recipient avatar. Creation
   and status queries use ordinary tool rows. Core hides Actor communications and tools.
 - Core handles short coordination turns. Explicit durable deliveries can precede
   turn completion; yielding waits for the current tool protocol group to settle.

@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 // Identity is the seed: renaming or reordering a contact never changes its face.
@@ -21,12 +22,15 @@ const palettes = [
   ["#eeeccd", "#c0bf79", "#535330"],
 ] as const;
 
-export function GeneratedAvatar({ seed, className }: { seed: string; className?: string }) {
+export function GeneratedAvatar({ seed, className, label }: { seed: string; className?: string; label?: string }) {
   const pick = randomFrom(seed);
-  const [background, shell, ink] = palettes[pick(palettes.length)];
+  const [paletteBackground, paletteShell, paletteInk] = palettes[pick(palettes.length)];
+  const background = label ? "var(--avatar-background)" : paletteBackground;
+  const shell = label ? "var(--avatar-shell)" : paletteShell;
+  const ink = label ? "var(--avatar-ink)" : paletteInk;
   const shape = pick(3), antenna = pick(3), eyes = pick(4), mouth = pick(3);
   const tilt = pick(9) - 4;
-  return <Avatar className={className}><AvatarFallback>
+  return <Avatar className={className} style={label ? { "--avatar-palette-background": paletteBackground, "--avatar-palette-shell": paletteShell, "--avatar-palette-ink": paletteInk } as CSSProperties : undefined}><AvatarFallback>
     <svg viewBox="0 0 64 64" className="size-full" aria-hidden="true" focusable="false">
       <rect width="64" height="64" fill={background} />
       <g transform={`rotate(${tilt} 32 34)`} stroke={ink} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -39,5 +43,6 @@ export function GeneratedAvatar({ seed, className }: { seed: string; className?:
         {mouth === 0 ? <path d="M28 40Q32 44 36 40" fill="none" /> : mouth === 1 ? <path d="M29 40H35" /> : <ellipse cx="32" cy="40" rx="2" ry="2.5" fill={ink} stroke="none" />}
       </g>
     </svg>
+    {label && <small title={label}>{label}</small>}
   </AvatarFallback></Avatar>;
 }

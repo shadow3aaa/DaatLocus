@@ -3,6 +3,7 @@ import { t } from "@/lib/i18n";
 import type { Access } from "@/lib/actor-api";
 import { Button } from "@/components/ui/button";
 import { GeneratedAvatar } from "@/components/generated-avatar";
+import { accountAvatarSeed } from "@/lib/conversation-avatars";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -22,7 +23,7 @@ export function NavigationRail({access, settings, apps, virtualDisplays, virtual
 
 export function AccountMenu({access, onSettings, onLogout}: {access: Access; onSettings(): void; onLogout(): void}) {
   const name = access.account?.name || t("app.account");
-  const seed = `account:${access.account?.account_id || "local"}`;
+  const seed = accountAvatarSeed(access.account?.account_id);
   return <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="dl-profile-button" aria-label={t("navigation.profile_menu")}><GeneratedAvatar seed={seed} /></Button></DropdownMenuTrigger>
     <DropdownMenuContent align="start" side="right" sideOffset={12} className="dl-account-menu">
       <DropdownMenuLabel className="dl-account-menu-header"><GeneratedAvatar seed={seed} className="size-9" /><span><strong>{name}</strong><small>{t("app.signed_in")}</small></span></DropdownMenuLabel><DropdownMenuSeparator />
