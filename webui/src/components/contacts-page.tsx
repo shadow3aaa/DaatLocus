@@ -72,7 +72,7 @@ export function ContactsPage({onNavigation,onActor,onAccessRevoked,active=true}:
     try{localStorage.setItem("daat-locus.contacts-sort",value);}catch{/* Keep sorting available when storage is disabled. */}
   }
   return <section className="dl-contacts-page" aria-label={t("contacts.title")} data-search-open={searching}>
-    <header className="dl-apps-header" data-window-drag-region><div className="dl-apps-title"><Button variant="ghost" size="icon-sm" className="dl-apps-mobile-navigation" aria-label={t("navigation.open_sidebar")} onClick={onNavigation}><PanelLeftIcon/></Button><h1>{t("contacts.title")}</h1></div><Button variant="ghost" size="icon-sm" aria-label={t("contacts.search")} aria-keyshortcuts="Control+f Meta+f" onClick={()=>setSearching(true)}><SearchIcon/></Button></header>
+    <header className="dl-apps-header" data-window-drag-region><div className="dl-apps-title"><Button variant="ghost" size="icon-sm" className="dl-apps-mobile-navigation" aria-label={t("navigation.open_sidebar")} onClick={onNavigation}><PanelLeftIcon/></Button><h1>{t("contacts.title")}</h1></div><Button variant="ghost" size="icon-sm" className="dl-contacts-search-trigger" aria-label={t("contacts.search")} aria-keyshortcuts="Control+f Meta+f" onClick={()=>setSearching(true)}><SearchIcon/></Button></header>
     <FloatingSearchBar open={searching} query={query} onQueryChange={setQuery} onClose={()=>{setSearching(false);setQuery("");}} busy={loading} controls={results} label={t("contacts.search")} placeholder={t("contacts.search")}/>
     <ToggleGroup type="single" size="sm" value={sort} onValueChange={changeSort} className="dl-contacts-sort" aria-label={t("contacts.sort")}>
       <ToggleGroupItem value="alphabetical">{t("contacts.alphabetical")}</ToggleGroupItem>
