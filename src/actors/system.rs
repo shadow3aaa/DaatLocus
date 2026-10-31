@@ -80,7 +80,7 @@ struct Inner {
     execution_suspended: AtomicBool,
     account_gated: AtomicBool,
     stopping: AtomicBool,
-    idle_timeout: std::time::Duration,
+    idle_timeout: Mutex<std::time::Duration>,
     core: RwLock<Option<std::sync::Weak<crate::stage::shared_runtime::Controller>>>,
     local_core: AtomicBool,
 }
@@ -428,7 +428,7 @@ impl ActorSystem {
                 execution_suspended: AtomicBool::new(false),
                 account_gated: AtomicBool::new(false),
                 stopping: AtomicBool::new(false),
-                idle_timeout: std::time::Duration::from_secs(60),
+                idle_timeout: Mutex::new(std::time::Duration::from_secs(60)),
                 core: RwLock::new(None),
                 local_core: AtomicBool::new(false),
             }),
@@ -694,13 +694,14 @@ impl ActorSystem {
         Ok(())
     }
     pub(crate) fn idle_timeout(&self) -> std::time::Duration {
-        self.inner.idle_timeout
+        *self.inner.idle_timeout.lock()
     }
     #[cfg(test)]
     pub(crate) fn set_idle_timeout(&mut self, timeout: std::time::Duration) {
-        Arc::get_mut(&mut self.inner)
-            .expect("No workers or other owners yet")
-            .idle_timeout = timeout;
+        // Background resource cleanup retains a Weak reference even before any
+        // Actor worker starts. Updating this setting does not require exclusive
+        // ownership of the complete system allocation.
+        *self.inner.idle_timeout.lock() = timeout;
     }
     #[cfg(test)]
     pub(crate) fn resident_workers(&self) -> usize {
