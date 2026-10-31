@@ -51,6 +51,15 @@ public final class ReleaseStartupTest extends Instrumentation {
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
                 .setClassName(getTargetContext(), "io.shadow3aaa.daatlocus.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            if (arguments != null && "fixture-recovery-fork".equals(arguments.getString("mode"))) {
+                status.putString("test", "explicitLocalRecoveryBranch");
+                result.putString("checks", fixtureRecoveryFork(activity));
+                result.putString("diagnostics", syncDiagnostics());
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (native explicit recovery branch)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (arguments != null && "fixture-ui-cancel".equals(arguments.getString("mode"))) {
                 result.putString("checks", fixtureUiCancel(activity));
                 sendStatus(0, status);
@@ -158,6 +167,80 @@ public final class ReleaseStartupTest extends Instrumentation {
             SystemClock.sleep(100);
         }
         throw new AssertionError("Fixture stage query timed out");
+    }
+    private void fixtureWait(Activity activity, String predicate, String failure) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!Boolean.TRUE.equals(evaluate(activity, predicate))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError(failure);
+            SystemClock.sleep(100);
+        }
+    }
+    // Accessible names locate controls; assertions concern durable outcomes.
+    private String fixtureButton(String first, String second, boolean twice) {
+        return "(()=>{const labels=" + new JSONArray().put(first).put(second).toString()
+            + ";const scope=document.querySelector('[role=dialog]')||document;"
+            + "const button=[...scope.querySelectorAll('button')].find(node=>node.getClientRects().length&&labels.includes(node.textContent.trim()));"
+            + "if(!button||button.disabled)return false;button.click();" + (twice ? "button.click();" : "") + "return true;})()";
+    }
+    private String fixtureRecoveryFork(Activity activity) throws Exception {
+        fixtureWait(activity, "!!window.__TAURI_INTERNALS__", "Native shell unavailable");
+        fixtureStage(activity);
+        long sourceDeadline = SystemClock.elapsedRealtime() + 60000;
+        while (true) {
+            evaluate(activity, "window.__dlForkPreview=null;" + nativeFetch()
+                + "('/v1/stage/recovery/fork').then(async r=>window.__dlForkPreview={http:r.status,body:await r.json()});null");
+            fixtureWait(activity, "window.__dlForkPreview!==null", "Recovery preview timed out");
+            JSONObject preview = new JSONObject((String)evaluate(activity, "JSON.stringify(window.__dlForkPreview)"));
+            JSONObject body = preview.getJSONObject("body");
+            if (preview.getInt("http") == 200 && body.optBoolean("eligible") && body.getJSONArray("sources").length() == 1
+                && arguments.getString("source").equals(body.getJSONArray("sources").getJSONObject(0).getString("source"))) break;
+            if (SystemClock.elapsedRealtime() > sourceDeadline) throw new AssertionError("Expected one authorized surviving fixture source");
+            SystemClock.sleep(500);
+        }
+        evaluate(activity, "history.pushState(null,'','/settings/devices');dispatchEvent(new PopStateEvent('popstate'));null");
+        fixtureWait(activity, fixtureButton("Review recovery", "查看恢复选项", false), "Recovery settings action unavailable");
+        fixtureWait(activity, "!!document.querySelector('#dl-recovery-source')", "Recovery source did not load");
+        fixtureWait(activity, fixtureButton("Cancel", "取消", false), "Recovery dialog could not be cancelled");
+        fixtureWait(activity, "!document.querySelector('[role=dialog]')", "Cancelled recovery remained open");
+        fixtureWait(activity, fixtureButton("Review recovery", "查看恢复选项", false), "Recovery dialog could not reopen");
+        fixtureWait(activity, "!!document.querySelector('#dl-recovery-source')", "Recovery source did not reload");
+        fixtureWait(activity, fixtureButton("Create local recovery branch", "创建本地恢复分支", true), "Recovery confirmation unavailable");
+        long deadline = SystemClock.elapsedRealtime() + 120000;
+        JSONObject core;
+        while (true) {
+            core = fixtureStage(activity).optJSONObject("core");
+            if (core != null && core.optBoolean("ready") && "local_recovery".equals(core.optString("state"))
+                && !core.optString("recovery_branch").isEmpty()) break;
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Explicit recovery did not activate a ready branch: " + core);
+            SystemClock.sleep(200);
+        }
+        String history = arguments.getString("history");
+        if (!"completed".equals(fixtureCompletion(history))) throw new AssertionError("Completed source history was not preserved");
+        File database = new File(getTargetContext().getApplicationInfo().dataDir, "service/actors/actors.sqlite3");
+        try (SQLiteDatabase db = SQLiteDatabase.openDatabase(database.getPath(), null, SQLiteDatabase.OPEN_READONLY);
+             Cursor rows = db.rawQuery("SELECT count(*) FROM core_meta WHERE key LIKE 'fork_receipt/%'", null)) {
+            if (!rows.moveToFirst() || rows.getInt(0) != 1) throw new AssertionError("Repeated confirmation created duplicate recovery receipts");
+        }
+        fixtureWait(activity, "!!document.querySelector('.dl-composer-textarea:not(:disabled)')", "Recovered composer unavailable");
+        String content = "dl-release-fork-input-" + SystemClock.elapsedRealtime();
+        evaluate(activity, "(()=>{const node=document.querySelector('.dl-composer-textarea');"
+            + "Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(node," + JSONObject.quote(content)
+            + ");node.dispatchEvent(new Event('input',{bubbles:true}));})();null");
+        fixtureWait(activity, "!!document.querySelector('.dl-send-button:not(:disabled)')", "Recovered Send unavailable");
+        evaluate(activity, "document.querySelector('.dl-send-button').click();null");
+        JSONObject message;
+        deadline = SystemClock.elapsedRealtime() + 30000;
+        while ((message = fixtureMessage(content)) == null) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Recovered UI did not submit input");
+            SystemClock.sleep(100);
+        }
+        fixtureCompletion(message.getString("id"));
+        fixtureWait(activity, "!!document.getElementById(" + JSONObject.quote("message-core-" + message.getString("id"))
+            + ")?.querySelector('[data-message-side=reply]')?.textContent.includes('fixture acknowledgment')", "Recovered reply did not reach the UI");
+        return new JSONObject().put("branch", core.getString("recovery_branch")).put("history", history)
+            .put("new_input", message.getString("id")).put("source", arguments.getString("source"))
+            .put("dialog_cancel_reopen", true).put("duplicate_confirmation_clicks", 2).put("receipt_count", 1)
+            .put("state", core.getString("state")).put("reply_visible", true).toString();
     }
     private JSONObject fixtureMessage(String content) throws Exception {
         File file = new File(getTargetContext().getApplicationInfo().dataDir, "service/actors/actors.sqlite3");
