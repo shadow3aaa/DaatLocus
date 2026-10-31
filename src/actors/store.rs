@@ -372,10 +372,6 @@ fn save_resource(
     message_id: Option<&str>,
 ) -> Result<()> {
     let mut data = serde_json::to_value(&resource).into_diagnostic()?;
-    let used:i64=sql(tx.query_row("SELECT COALESCE(SUM(json_extract(record,'$.size_bytes')),0) FROM resources WHERE NOT(actor_id=?1 AND id=?2)",params![resource.actor_id,resource.id],|r|r.get(0)))?;
-    if (used as u64).saturating_add(resource.size_bytes) > 512 * 1024 * 1024 {
-        return Err(ActorError::Conflict("Account resource storage budget reached".into()).into());
-    }
     data["path"] = serde_json::to_value(&resource.path).into_diagnostic()?;
     data["message_id"] = serde_json::to_value(message_id).into_diagnostic()?;
     sql(tx.execute("INSERT INTO resources(actor_id,id,record) VALUES(?1,?2,?3) ON CONFLICT(actor_id,id) DO UPDATE SET record=excluded.record",params![resource.actor_id,resource.id,encode(&data)?]))?;
@@ -1024,10 +1020,6 @@ impl ActorStore {
                 if existing.content!=message.content || existing.attachments!=message.attachments {return Err(ActorError::Conflict("Idempotency key was used for another message".into()).into());}
                 return Ok(existing);
         }
-            let pending:i64=sql(tx.query_row("SELECT COUNT(*) FROM messages WHERE actor_id=?1 AND status IN ('\"queued\"','\"running\"')",[&message.actor_id],|r|r.get(0)))?;
-            if pending >= 256 {
-                return Err(ActorError::Unavailable("Actor mailbox is full".into()).into());
-            }
             let result = insert_message(&tx, message)?;
             if let Some(key) = key {
                 sql(tx.execute(
@@ -2224,12 +2216,6 @@ impl ActorStore {
                 }
                 return Ok(existing);
             }
-            if delivery.status == MessageStatus::Queued {
-                let pending:i64=sql(tx.query_row("SELECT count(*) FROM messages WHERE actor_id=?1 AND status IN ('\"queued\"','\"running\"')",[&delivery.actor_id],|r|r.get(0)))?;
-                if pending >= 256 {
-                    return Err(ActorError::Unavailable("Actor mailbox is full".into()).into());
-                }
-            }
             let delivery = insert_message(&tx, delivery)?;
             if delivery.actor_id != crate::stage::shared::ACTOR_ID
                 || delivery.kind != MessageKind::Delivery
@@ -2534,7 +2520,7 @@ impl ActorStore {
     }
     pub fn resource(&self, actor_id: &str, id: &str) -> Result<StoredResource> {
         database_io(|| {
-            decode(
+            let resource: StoredResource = decode(
                 sql(self
                     .db
                     .lock()
@@ -2545,7 +2531,17 @@ impl ActorStore {
                     )
                     .optional())?
                 .ok_or_else(|| missing("Resource"))?,
-            )
+            )?;
+            if resource
+                .expires_at_ms
+                .is_some_and(|expires| expires <= now())
+            {
+                return Err(ActorError::NotFound(
+                    "Temporary resource expired after 24 hours".into(),
+                )
+                .into());
+            }
+            Ok(resource)
         })
     }
     /// A process crash never replays an operation whose outcome may be unknown.

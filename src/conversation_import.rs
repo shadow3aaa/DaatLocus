@@ -202,6 +202,7 @@ pub(crate) fn prepare_evidence(
     let path = dir.join(&resource.id);
     crate::file_io::write_bytes(&base, &policy, &path.to_string_lossy(), &bytes, None)?;
     Ok(crate::actors::StoredResource {
+        expires_at_ms: None,
         id: resource.id.clone(),
         actor_id: target.into(),
         path,

@@ -6,7 +6,13 @@ use serde::{Deserialize, Serialize};
 
 // Input forwarding and background synchronization can install the same blob
 // concurrently. Keep immutable ledger checks and local publication together.
+mod temporary;
+pub(crate) use temporary::{cleanup_expired, output_root, storage_root};
+
 static INSTALLATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) fn lock_storage_lifecycle() -> parking_lot::MutexGuard<'static, ()> {
+    INSTALLATION.lock()
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
@@ -14,6 +20,8 @@ pub struct Resource {
     pub name: String,
     pub media_type: String,
     pub content: BlobRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
 }
 impl Resource {
     /// An internal locator, interpreted against an Actor ledger on every read.
@@ -22,6 +30,17 @@ impl Resource {
         format!("/v1/actors/{actor}/resources/{}", self.id)
     }
 
+    pub(crate) fn ensure_available(&self) -> Result<()> {
+        if self
+            .expires_at_ms
+            .is_some_and(|expires| expires <= chrono::Utc::now().timestamp_millis())
+        {
+            return Err(StageError::Unavailable(
+                "Temporary resource expired after 24 hours; do not replay the original operation",
+            ));
+        }
+        Ok(())
+    }
     pub fn validate(&self) -> Result<()> {
         self.content.validate()?;
         if self.id.is_empty()
@@ -72,6 +91,7 @@ pub fn resolve_reference(system: &ActorSystem, actor: &str, reference: &str) -> 
             "Use an existing resource ID or /v1/actors/<actor>/resources/<id> reference",
         ));
     }
+    temporary::ensure_reference_available(id)?;
     export(system, actor, id)
 }
 
@@ -126,6 +146,7 @@ pub fn publish(
         name: name.into(),
         media_type: media_type.into(),
         content,
+        expires_at_ms: None,
     };
     install(system, actor, &resource)?;
     Ok(resource)
@@ -133,6 +154,7 @@ pub fn publish(
 
 pub fn bytes(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<Vec<u8>> {
     resource.validate()?;
+    resource.ensure_available()?;
     if export(system, actor, &resource.id)? != *resource {
         return Err(StageError::Forbidden(
             "Resource does not belong to this Actor",
@@ -142,7 +164,7 @@ pub fn bytes(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<V
         .store()
         .resource(actor, &resource.id)
         .map_err(|_| StageError::Forbidden("Resource is outside its Actor ledger"))?;
-    let base = std::fs::canonicalize(system.actor_data_dir(actor))?;
+    let base = std::fs::canonicalize(storage_root(system, actor, resource.expires_at_ms))?;
     let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
     policy.filesystem.full_disk_read = false;
     policy.filesystem.readable_roots = vec![base.clone()];
@@ -351,15 +373,15 @@ pub fn bound_output(
     } else if let Some(instruction) = continuation {
         Some(instruction)
     } else {
-        let resource = publish(
+        let resource = temporary::publish_output(
             system,
             actor,
-            &format!("output-{}", &crate::stage::digest(call_id.as_bytes())[..12]),
-            "text/plain",
-            text.as_bytes(),
+            call_id,
+            text,
+            chrono::Utc::now().timestamp_millis(),
         )?;
         Some(format!(
-            "Read omitted output from resource {} (ID: {}) as needed.",
+            "Read omitted output from resource {} (ID: {}) within 24 hours of creation; expiration never authorizes replaying the original operation.",
             resource.uri(actor),
             resource.id
         ))
@@ -384,12 +406,17 @@ pub fn descriptor(system: &ActorSystem, actor: &str, id: &str) -> Result<Resourc
                 |r| r.get(0),
             )
             .optional()?;
-        serde_json::from_str(&data.ok_or(StageError::Unavailable("Resource is not synchronized"))?)
-            .map_err(|_| StageError::Invalid("Invalid resource ledger"))
+        let resource: Resource = serde_json::from_str(
+            &data.ok_or(StageError::Unavailable("Resource is not synchronized"))?,
+        )
+        .map_err(|_| StageError::Invalid("Invalid resource ledger"))?;
+        resource.ensure_available()?;
+        Ok(resource)
     })
 }
 fn remember(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<()> {
     resource.validate()?;
+    let root = storage_root(system, actor, resource.expires_at_ms);
     system.store().stage_transaction(|tx|{
         initialize(tx)?;let data=serde_json::to_string(resource).map_err(|_|StageError::Invalid("Invalid resource descriptor"))?;
         let previous:Option<String>=tx.query_row("SELECT record FROM stage_resources WHERE actor=?1 AND id=?2",params![actor,resource.id],|r|r.get(0)).optional()?;
@@ -397,13 +424,14 @@ fn remember(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<()
         tx.execute("INSERT OR IGNORE INTO stage_resources VALUES(?1,?2,?3)",params![actor,resource.id,data])?;
         let native:String=tx.query_row("SELECT record FROM resources WHERE actor_id=?1 AND id=?2",params![actor,resource.id],|r|r.get(0))?;
         let path=serde_json::from_str::<serde_json::Value>(&native).map_err(|_|StageError::Invalid("Invalid resource storage"))?["path"].as_str().ok_or(StageError::Invalid("Invalid resource path"))?.to_owned();
-        tx.execute("INSERT INTO stage_resource_files VALUES(?1,?2,?3,?4) ON CONFLICT(actor,id) DO UPDATE SET root=excluded.root,path=excluded.path",params![actor,resource.id,system.actor_data_dir(actor).to_string_lossy(),path])?;
+        tx.execute("INSERT INTO stage_resource_files VALUES(?1,?2,?3,?4) ON CONFLICT(actor,id) DO UPDATE SET root=excluded.root,path=excluded.path",params![actor,resource.id,root.to_string_lossy(),path])?;
         let core:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_dirty')",[],|r|r.get(0))?;
         if actor==crate::stage::shared::ACTOR_ID && core && previous.is_none(){tx.execute("INSERT INTO core_dirty VALUES('resources',?1,1) ON CONFLICT(entity,local_key) DO UPDATE SET revision=revision+1",[&resource.id])?;}
         Ok(())
     })
 }
 pub fn export(system: &ActorSystem, actor: &str, id: &str) -> Result<Resource> {
+    temporary::ensure_reference_available(id)?;
     if let Ok(resource) = descriptor(system, actor, id) {
         return Ok(resource);
     }
@@ -412,7 +440,7 @@ pub fn export(system: &ActorSystem, actor: &str, id: &str) -> Result<Resource> {
         .resource(actor, id)
         .map_err(|_| StageError::Forbidden("Resource is outside its Actor ledger"))?;
     let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-    let base = std::fs::canonicalize(system.actor_data_dir(actor))?;
+    let base = std::fs::canonicalize(storage_root(system, actor, record.expires_at_ms))?;
     policy.filesystem.full_disk_read = false;
     policy.filesystem.full_disk_write = false;
     policy.filesystem.readable_roots = vec![base.clone()];
@@ -425,6 +453,7 @@ pub fn export(system: &ActorSystem, actor: &str, id: &str) -> Result<Resource> {
         return Err(StageError::Conflict("Resource size changed"));
     }
     let resource = Resource {
+        expires_at_ms: record.expires_at_ms,
         id: record.id,
         name: record.name,
         media_type: record.media_type,
@@ -438,8 +467,8 @@ pub fn export(system: &ActorSystem, actor: &str, id: &str) -> Result<Resource> {
 pub fn export_all(system: &ActorSystem, actor: &str) -> Result<Vec<Resource>> {
     let ids = system.store().stage_transaction(|tx| {
         Ok(tx
-            .prepare("SELECT id FROM resources WHERE actor_id=?1 ORDER BY id")?
-            .query_map([actor], |r| r.get::<_, String>(0))?
+            .prepare("SELECT id FROM resources WHERE actor_id=?1 AND (json_extract(record,'$.expires_at_ms') IS NULL OR json_extract(record,'$.expires_at_ms')>?2) ORDER BY id")?
+            .query_map(params![actor, chrono::Utc::now().timestamp_millis()], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?)
     })?;
     ids.into_iter()
@@ -449,26 +478,22 @@ pub fn export_all(system: &ActorSystem, actor: &str) -> Result<Vec<Resource>> {
 pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<()> {
     let _installation = INSTALLATION.lock();
     resource.validate()?;
+    // Old snapshots may retain an expired reference. Consume its metadata
+    // without reinstalling bytes or blocking synchronization of other history.
+    if resource.ensure_available().is_err() {
+        return Ok(());
+    }
+    if let Ok(previous) = descriptor(system, actor, &resource.id) {
+        if previous != *resource {
+            return Err(StageError::Conflict("Resource identifier changed content"));
+        }
+        // Restoring a local snapshot must not depend on evictable blob-cache bytes.
+        if bytes(system, actor, resource).is_ok() {
+            return Ok(());
+        }
+    }
     let bytes = ContentStore::new(system.store()).verified_bytes(&resource.content)?;
     ContentStore::new(system.store()).store_source(actor, &bytes)?;
-    system.store().stage_transaction(|tx| {
-        let used: i64 = tx.query_row(
-            "SELECT COALESCE(SUM(json_extract(record,'$.size_bytes')),0) FROM resources",
-            [],
-            |r| r.get(0),
-        )?;
-        let existing: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM resources WHERE actor_id=?1 AND id=?2)",
-            params![actor, resource.id],
-            |r| r.get(0),
-        )?;
-        if !existing && (used as u64).saturating_add(resource.content.size) > 512 * 1024 * 1024 {
-            return Err(StageError::Capacity(
-                "Account resource storage budget reached",
-            ));
-        }
-        Ok(())
-    })?;
     if system.store().resource(actor, &resource.id).is_ok()
         && let Ok(previous) = export(system, actor, &resource.id)
         && previous != *resource
@@ -482,12 +507,10 @@ pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result
     {
         return Err(StageError::Conflict("Resource identifier changed content"));
     }
-    let base = system.actor_data_dir(actor);
+    let base = storage_root(system, actor, resource.expires_at_ms);
     let dir = base.join("synced");
-    crate::file_io::ensure_directory(&crate::sandbox::RuntimeSandboxPolicy::disabled(), &dir)
-        .map_err(|_| StageError::Unavailable("Cannot prepare resource storage"))?;
-    crate::actors::permissions::protect_private_path(&dir)
-        .map_err(|_| StageError::Forbidden("Cannot establish private resource storage"))?;
+    let directory = crate::file_io::guarded_directory::GuardedDirectory::open(&dir, true)?;
+    directory.protect_private()?;
     let path = dir.join(&resource.id);
     let base = std::fs::canonicalize(&base)?;
     let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
@@ -519,6 +542,7 @@ pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result
     if system
         .store()
         .register_resource(StoredResource {
+            expires_at_ms: resource.expires_at_ms,
             id: resource.id.clone(),
             actor_id: actor.into(),
             path: path.clone(),
@@ -674,6 +698,7 @@ mod tests {
         source
             .store()
             .register_resource(StoredResource {
+                expires_at_ms: None,
                 id: "upload-1".into(),
                 actor_id: "root".into(),
                 path: file.clone(),

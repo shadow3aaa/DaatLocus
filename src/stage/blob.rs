@@ -262,6 +262,29 @@ impl<'a> ContentStore<'a> {
             put(tx, actor, bytes)
         })
     }
+    /// File-backed temporary outputs retain only a manifest here. Native
+    /// transfer may hydrate the cache later; local output reads use the file.
+    pub(crate) fn register_file_source(&self, actor: &str, bytes: &[u8]) -> Result<Manifest> {
+        let manifest = Manifest::from_bytes(bytes)?;
+        self.store.stage_transaction(|tx| {
+            ledger::actor_exists(tx, actor)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO stage_blobs(hash,size,manifest,bytes) VALUES(?1,?2,?3,x'')",
+                params![
+                    manifest.content.hash,
+                    manifest.content.size as i64,
+                    serde_json::to_string(&manifest)
+                        .map_err(|_| StageError::Invalid("Invalid source manifest"))?
+                ],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO stage_blob_actors(actor,hash) VALUES(?1,?2)",
+                params![actor, manifest.content.hash],
+            )?;
+            Ok(())
+        })?;
+        Ok(manifest)
+    }
     pub fn manifest(
         &self,
         peer: StageId,

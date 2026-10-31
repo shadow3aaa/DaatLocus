@@ -899,6 +899,128 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
 }
 
 #[tokio::test]
+async fn queued_inputs_and_actor_replies_survive_beyond_the_former_mailbox_quota() {
+    let (_directory, system, _provider) = paused_runtime().await;
+    let original = system
+        .send_user("root", "Coordinate work".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let child = system
+        .create_owned("root", project_config(&system, "reporter"))
+        .unwrap();
+    let request = system
+        .message_from_actor("root", &original.id, &child.id, "Investigate".into())
+        .unwrap();
+    system.store().claim_next(&child.id).unwrap().unwrap();
+    for index in 0..300 {
+        system
+            .send_user("root", format!("Pending input {index}"), vec![], None)
+            .unwrap();
+    }
+    let progress = system
+        .deliver_from_actor(
+            &child.id,
+            &request.id,
+            "progress",
+            "Independent result",
+            false,
+        )
+        .unwrap();
+    assert!(
+        system
+            .store()
+            .message(&progress.id)
+            .unwrap()
+            .content
+            .ends_with("Independent result")
+    );
+    let count: i64 = system
+        .store()
+        .stage_transaction(|tx| {
+            Ok(tx.query_row(
+                "SELECT COUNT(*) FROM messages WHERE actor_id='root' AND status='\"queued\"'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 301);
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn actor_listing_spills_to_temporary_storage_without_failing_a_nearly_full_legacy_resource_ledger()
+ {
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "roster".into(),
+            name: "actors__list".into(),
+            arguments: json!({"stage_id":null,"cursor":null,"limit":100}),
+        }]),
+        MockReply::Answer("Roster inspected"),
+    ]));
+    let (_directory, system) = runtime(provider.clone()).await;
+    let mut config = system.config();
+    config
+        .models
+        .get_mut("mock")
+        .unwrap()
+        .tool_output_max_tokens = 512;
+    system.update_config(config).await.unwrap();
+    for index in 0..32 {
+        let id = format!("retained-{index}");
+        system.seed_test_actor(&id);
+        let mut actor = system.actor(&id).unwrap();
+        actor.config.name = format!(
+            "Collaborator {index} {}",
+            "long task description ".repeat(12)
+        );
+        system.store().save_actor(&actor).unwrap();
+    }
+    let path = system.actor_data_dir("root").join("retained-large.bin");
+    let size = 512 * 1024 * 1024 - 7553;
+    std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+    system
+        .store()
+        .register_resource(super::super::StoredResource {
+            expires_at_ms: None,
+            id: "retained-large".into(),
+            actor_id: "root".into(),
+            path,
+            name: "retained-large".into(),
+            media_type: "application/octet-stream".into(),
+            size_bytes: size,
+            uri: "/v1/actors/root/resources/retained-large".into(),
+        })
+        .unwrap();
+    let request = system
+        .send_user("root", "Inspect the roster".into(), vec![], None)
+        .unwrap();
+    let done = wait_completed(&system, &request.id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    assert_eq!(done.reply.as_deref(), Some("Roster inspected"));
+    let calls = system
+        .store()
+        .tool_summaries("root", &request.id, None, 8)
+        .unwrap()
+        .items;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].error.is_none());
+    let result = system.store().tool_result(&calls[0].id).unwrap();
+    let id:String=system.store().stage_transaction(|tx|Ok(tx.query_row("SELECT id FROM resources WHERE actor_id='root' AND json_extract(record,'$.expires_at_ms') IS NOT NULL",[],|row|row.get(0))?)).unwrap();
+    let resource = crate::resources::export(&system, "root", &id).unwrap();
+    let complete = crate::resources::bytes(&system, "root", &resource).unwrap();
+    assert!(complete.len() > 7553);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&complete).unwrap(),
+        result.payload
+    );
+    assert!(result.model_content.contains(&resource.uri("root")));
+    assert_eq!(provider.requests.lock().len(), 2);
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnostics_survive() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::Answer("Done"),
@@ -2497,6 +2619,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     std::fs::write(&image_path, image).unwrap();
     b.store()
         .register_resource(super::super::StoredResource {
+            expires_at_ms: None,
             id: "remote-image".into(),
             actor_id: shared::ACTOR_ID.into(),
             path: image_path,
@@ -2517,6 +2640,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     };
     b.store()
         .register_resource(super::super::StoredResource {
+            expires_at_ms: None,
             id: attachment.id.clone(),
             actor_id: shared::ACTOR_ID.into(),
             path: attachment_path,
@@ -4324,6 +4448,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
         .store()
         .register_resource_for_message(
             StoredResource {
+                expires_at_ms: None,
                 id: resource_id.clone(),
                 actor_id: deep.id.clone(),
                 path: path.clone(),

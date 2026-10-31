@@ -916,6 +916,9 @@ impl Controller {
                 }
                 for record in records {
                     record.validate()?;
+                    if record.ensure_available().is_err() {
+                        continue;
+                    }
                     self.content(peer, &record.content).await?;
                     crate::resources::install(system, shared::ACTOR_ID, &record)?;
                 }
@@ -1789,6 +1792,9 @@ impl Controller {
             let resource: crate::resources::Resource = serde_json::from_slice(&bytes)
                 .map_err(|_| StageError::Invalid("Invalid resource checkpoint"))?;
             resource.validate()?;
+            if resource.ensure_available().is_err() {
+                return Ok(());
+            }
             self.content(peer, &resource.content).await?;
             crate::resources::install(&runtime.host.system, shared::ACTOR_ID, &resource)?;
         }
@@ -2796,6 +2802,74 @@ mod tests {
             .unwrap();
         core.epoch.store(1, Ordering::Release);
         core.recovered_epoch.store(1, Ordering::Release);
+    }
+
+    #[tokio::test]
+    async fn expired_temporary_resources_do_not_require_bytes_to_restore_a_checkpoint() {
+        let (_directory, runtime, core, _context) = running_core().await;
+        let system = &runtime.host.system;
+        let expiry = chrono::Utc::now().timestamp_millis() - 1;
+        let resource = crate::resources::Resource {
+            id: format!("temporary-{expiry}-{}", super::super::digest(b"expired")),
+            name: "output".into(),
+            media_type: "text/plain".into(),
+            content: BlobRef {
+                hash: super::super::digest(b"unavailable original output"),
+                size: 27,
+                version: 1,
+            },
+            expires_at_ms: Some(expiry),
+        };
+        let descriptor = serde_json::to_vec(&resource).unwrap();
+        let change = shared_store::Change {
+            entity: shared_store::Entity::Resource,
+            key: resource.id.clone(),
+            revision: 1,
+            ordinal: 1,
+            content: ContentStore::new(system.store())
+                .store_source(shared::ACTOR_ID, &descriptor)
+                .unwrap()
+                .content,
+        };
+        // This peer has no connection. An expired body must never be fetched.
+        core.install_resource_change(StageId::new(), &change)
+            .await
+            .unwrap();
+        let page = super::super::shared_snapshot::Page {
+            token: uuid::Uuid::new_v4().to_string(),
+            account: runtime.host.account_id().unwrap(),
+            head: Head {
+                sequence: 1,
+                hash: super::super::digest(b"snapshot with expired output"),
+            },
+            page: 0,
+            last: true,
+            entries: vec![change],
+        };
+        assert!(
+            super::super::shared_snapshot::receive(system.store(), &page, &page.account).unwrap()
+        );
+        assert_eq!(shared_store::head(system.store()).unwrap(), page.head);
+        assert!(
+            system
+                .store()
+                .resource(shared::ACTOR_ID, &resource.id)
+                .is_err()
+        );
+        // Live resources still require installed bytes before accepting state.
+        let mut live = resource;
+        live.expires_at_ms = None;
+        live.id = "missing-live-resource".into();
+        let bytes = serde_json::to_vec(&live).unwrap();
+        let mut change = page.entries[0].clone();
+        change.key = live.id;
+        assert!(
+            system
+                .store()
+                .stage_transaction(|tx| shared_store::apply(tx, &change, &bytes, None))
+                .is_err()
+        );
+        system.shutdown().await;
     }
 
     #[tokio::test]

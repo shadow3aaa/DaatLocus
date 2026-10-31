@@ -400,6 +400,8 @@ pub struct ToolResultSummary {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredResource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
     pub id: String,
     pub actor_id: String,
     #[serde(skip_serializing)]

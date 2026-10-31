@@ -60,6 +60,7 @@ struct Inner {
     sudo_host: tokio::sync::Mutex<Option<Arc<crate::sudo_host::Client>>>,
     web_host: Arc<crate::web_host::Host>,
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
+    resource_cleanup: Mutex<Option<JoinHandle<()>>>,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
     instructions: crate::instruction_layers::InstructionStore,
@@ -402,6 +403,7 @@ impl ActorSystem {
                 sudo_host: tokio::sync::Mutex::new(None),
                 web_host: Arc::new(crate::web_host::Host::default()),
                 temporary: Mutex::new(Some(temporary)),
+                resource_cleanup: Mutex::new(None),
                 builtin_resources,
                 #[cfg(windows)]
                 computer_workspace: Mutex::new(None),
@@ -452,6 +454,34 @@ impl ActorSystem {
                 system.store().save_actor(&actor)?;
             }
         }
+        if let Err(error) = crate::resources::cleanup_expired(&system, now()) {
+            tracing::warn!(%error, "Temporary output startup cleanup deferred");
+        }
+        let weak = Arc::downgrade(&system.inner);
+        let cleanup = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                if inner.stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let system = Self { inner };
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::resources::cleanup_expired(&system, now())
+                })
+                .await;
+                if let Err(error) = result.unwrap_or_else(|error| {
+                    Err(crate::stage::StageError::Storage(std::io::Error::other(
+                        error.to_string(),
+                    )))
+                }) {
+                    tracing::warn!(%error, "Temporary output cleanup deferred");
+                }
+            }
+        });
+        *system.inner.resource_cleanup.lock() = Some(cleanup);
         system.start_queued_workers()?;
         Ok(system)
     }
@@ -554,11 +584,13 @@ impl ActorSystem {
         self.inner.data_dir.join("apps").join(id)
     }
     pub(crate) fn remove_reset_app_data(&self) -> Result<()> {
-        // Both directories are framework-owned, outside all Actor workspaces.
+        let _resources = crate::resources::lock_storage_lifecycle();
+        // These directories are framework-owned, outside all Actor workspaces.
         // std::fs::remove_dir_all does not follow symlinks/reparse points.
         for path in [
             self.inner.data_dir.join("apps"),
             self.inner.delivery_dir.clone(),
+            crate::resources::output_root(self),
         ] {
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
@@ -1882,6 +1914,9 @@ impl ActorSystem {
     pub async fn shutdown(&self) {
         let _lifecycle = self.inner.lifecycle.lock().await;
         self.inner.stopping.store(true, Ordering::Release);
+        if let Some(cleanup) = self.inner.resource_cleanup.lock().take() {
+            cleanup.abort();
+        }
         self.store().changed().notify_waiters();
         let workers: Vec<_> = self.inner.workers.lock().drain().collect();
         for (_, worker) in &workers {
@@ -2042,6 +2077,7 @@ impl ActorSystem {
         let current = self.store().current_message(actor_id)?;
         self.store().register_resource_for_message(
             StoredResource {
+                expires_at_ms: None,
                 id: name.into(),
                 actor_id: actor_id.into(),
                 path: destination,
