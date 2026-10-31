@@ -68,6 +68,17 @@ pub enum Request {
         authorization: crate::actors::ApprovalAppealAuthorization,
     },
     RecoveryStatus,
+    BeginRecoveryFork {
+        request: Box<super::recovery::ForkRequest>,
+    },
+    RecoveryForkPage {
+        id: String,
+        token: Option<String>,
+        page: u32,
+    },
+    ReleaseRecoveryFork {
+        id: String,
+    },
     RecoveryArchives {
         after: Option<i64>,
     },
@@ -141,6 +152,10 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    RecoveryForkDeferred,
+    RecoveryFork {
+        export: Box<super::recovery::ForkExport>,
+    },
     ApprovalSubmitted {
         record: Box<crate::actors::ApprovalRecord>,
     },

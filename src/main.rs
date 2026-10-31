@@ -72,6 +72,14 @@ fn main() -> std::process::ExitCode {
         || namespace.clone(),
         |name| namespace.join("profiles").join(name),
     );
+    if matches!(
+        command,
+        cli::Command::Serve | cli::Command::Start { .. } | cli::Command::Account { .. }
+    ) && let Err(error) = ensure_current_profile(&selected_root)
+    {
+        eprintln!("{error:?}");
+        return std::process::ExitCode::FAILURE;
+    }
     if matches!(command, cli::Command::Serve | cli::Command::Account { .. })
         && let Some(name) = arguments.profile.as_deref()
     {
@@ -108,6 +116,32 @@ fn main() -> std::process::ExitCode {
         std::process::exit(1);
     }
     std::process::ExitCode::SUCCESS
+}
+
+// 0.6.0 has no Session-runtime migration. Fence the old namespace before
+// creating directories, updating its rolling config backup or opening stores.
+fn ensure_current_profile(root: &std::path::Path) -> Result<()> {
+    let session_data = [
+        "runtime/sessions.json",
+        "memory/runtime_conversation.json",
+        "memory/runtime_conversation",
+    ]
+    .into_iter()
+    .try_fold(false, |found, name| {
+        root.join(name).try_exists().map(|exists| found || exists)
+    })
+    .into_diagnostic()?;
+    let config = match std::fs::read_to_string(root.join("config/config.toml")) {
+        Ok(text) => toml::from_str::<toml::Value>(&text).ok(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).into_diagnostic(),
+    };
+    if session_data || config.is_some_and(|value| value.get("efficient_model").is_some()) {
+        return Err(miette!(
+            "This profile contains data from an unsupported Daat Locus version. Keep the old directory and start with a new --profile NAME; automatic migration is unavailable"
+        ));
+    }
+    Ok(())
 }
 
 async fn dispatch(

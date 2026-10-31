@@ -1,5 +1,5 @@
 use super::*;
-use daat_locus_client_protocol::computer_use::{read_frame, verify, write_frame};
+use daat_locus_client_protocol::computer_use::{read_frame, socket_path, verify, write_frame};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
@@ -7,7 +7,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     os::unix::{
-        fs::{OpenOptionsExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -165,7 +165,25 @@ impl Server {
         let root = root.to_path_buf();
         let peer =
             fs::canonicalize(peer).map_err(|_| Error("Service executable unavailable".into()))?;
-        let socket = root.join("runtime/computer-use.sock");
+        let socket = socket_path(&root);
+        let parent = socket
+            .parent()
+            .ok_or_else(|| Error("Invalid GUI endpoint".into()))?;
+        match fs::DirBuilder::new().mode(0o700).create(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(Error("Cannot create private GUI directory".into())),
+        }
+        let directory = fs::symlink_metadata(parent)
+            .map_err(|_| Error("Cannot inspect private GUI directory".into()))?;
+        if !directory.is_dir()
+            || directory.uid() != unsafe { libc::geteuid() }
+            || directory.mode() & 0o777 != 0o700
+        {
+            return Err(Error(
+                "GUI directory must be private to the OS owner".into(),
+            ));
+        }
         // Only replace a socket after proving that no live host owns it.
         if socket.exists() {
             if UnixStream::connect(&socket).is_ok() {
@@ -1019,7 +1037,7 @@ mod host_transport_tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("runtime")).unwrap();
         let host = Server::start(root.path(), Path::new("/usr/bin/true")).unwrap();
-        let socket = root.path().join("runtime/computer-use.sock");
+        let socket = socket_path(root.path());
         assert_eq!(
             fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1038,5 +1056,24 @@ mod host_transport_tests {
             "An unrecognized executable must not reach native observation"
         );
         drop(host);
+    }
+
+    #[test]
+    fn long_profile_host_rejects_duplicates_and_recovers_stale_endpoints() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("long-profile-".repeat(15));
+        fs::create_dir(&root).unwrap();
+        let host = Server::start(&root, Path::new("/usr/bin/true")).unwrap();
+        let socket = socket_path(&root);
+        assert!(socket.exists());
+        assert!(Server::start(&root, Path::new("/usr/bin/true")).is_err());
+        drop(host);
+        assert!(!socket.exists());
+        std::thread::sleep(Duration::from_millis(50));
+        let stale = UnixListener::bind(&socket).unwrap();
+        drop(stale);
+        let restarted = Server::start(&root, Path::new("/usr/bin/true")).unwrap();
+        assert!(socket.exists());
+        drop(restarted);
     }
 }

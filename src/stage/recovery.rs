@@ -27,6 +27,121 @@ pub struct Status {
     #[serde(default)]
     pub archives_pending: bool,
 }
+
+/// An explicit Owner operation, bound to both the observed source and target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRequest {
+    pub id: String,
+    pub account: String,
+    pub target: StageId,
+    pub source: StageId,
+    pub source_branch: Branch,
+    pub source_head: Head,
+    pub expected_local_head: Head,
+    pub work_generation: Option<super::reset::Generation>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkExport {
+    pub request: ForkRequest,
+    pub branch: Branch,
+    pub head: Head,
+    pub epoch: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkReceipt {
+    pub request: ForkRequest,
+    pub branch: Branch,
+    pub head: Head,
+    pub source_archive: String,
+}
+
+pub fn fork_receipt(store: &ActorStore, id: &str) -> Result<Option<ForkReceipt>> {
+    store.stage_transaction(|tx| {
+        let data: Option<String> = tx
+            .query_row(
+                "SELECT value FROM core_meta WHERE key=?1",
+                [format!("fork_receipt/{id}")],
+                |r| r.get(0),
+            )
+            .optional()?;
+        data.map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|_| StageError::Invalid("Invalid recovery receipt"))
+        })
+        .transpose()
+    })
+}
+pub(crate) fn validate_fork_target(tx: &Transaction<'_>, export: &ForkExport) -> Result<()> {
+    let head: String = tx.query_row("SELECT value FROM core_meta WHERE key='head'", [], |r| {
+        r.get(0)
+    })?;
+    let head: Head =
+        serde_json::from_str(&head).map_err(|_| StageError::Invalid("Invalid recovery head"))?;
+    let synchronized: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE (key='synchronized' AND value='1') OR key='recovery_branch')", [], |r| r.get(0))?;
+    if head != export.request.expected_local_head
+        || head != Head::default()
+        || synchronized
+        || has_pending_inputs(tx)?
+    {
+        return Err(StageError::Conflict(
+            "Recovery requires a fresh, idle replica",
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn has_pending_inputs(tx: &Transaction<'_>) -> Result<bool> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id='core' AND status IN ('\"queued\"','\"running\"'))", [], |r| r.get(0))?)
+}
+/// Called in the same transaction which installs the last verified snapshot page.
+/// There is no crash window containing imported running work but no branch fence.
+pub(crate) fn finish_fork(tx: &Transaction<'_>, export: &ForkExport) -> Result<()> {
+    if has_pending_inputs(tx)? {
+        return Err(StageError::Conflict(
+            "Source work must settle before recovery",
+        ));
+    }
+    let epoch = export
+        .epoch
+        .checked_add(1)
+        .filter(|epoch| *epoch < 9_007_199_254_740_991)
+        .ok_or(StageError::Capacity("Recovery epoch exhausted"))?;
+    let branch = Branch {
+        id: export.request.id.clone(),
+        device: export.request.target,
+        base: export.head.clone(),
+        epoch,
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    // Retain the exact source context privately before new local work can begin.
+    let source_archive = archive(tx, export.request.source, &export.head)?;
+    let receipt = ForkReceipt {
+        request: export.request.clone(),
+        branch: branch.clone(),
+        head: export.head.clone(),
+        source_archive,
+    };
+    tx.execute(
+        "INSERT INTO core_meta VALUES('recovery_branch',?1)",
+        [serde_json::to_string(&branch)
+            .map_err(|_| StageError::Invalid("Invalid recovery branch"))?],
+    )?;
+    tx.execute(
+        "INSERT INTO core_meta VALUES(?1,?2)",
+        params![
+            format!("fork_receipt/{}", export.request.id),
+            serde_json::to_string(&receipt)
+                .map_err(|_| StageError::Invalid("Invalid recovery receipt"))?
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO core_meta VALUES('synchronized','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+        [],
+    )?;
+    Ok(())
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Archive {
     pub id: String,

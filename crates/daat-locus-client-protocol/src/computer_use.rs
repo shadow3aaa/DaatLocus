@@ -81,6 +81,7 @@ pub struct Reply {
 mod transport {
     use super::*;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::{
         io::{Read, Write},
         os::{fd::AsRawFd, unix::net::UnixStream},
@@ -89,6 +90,21 @@ mod transport {
     };
     unsafe extern "C" {
         fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
+    }
+    /// A profile-bound address that always fits macOS's 104-byte sun_path.
+    /// The host protects the short per-owner directory before binding, and
+    /// both peers still authenticate the OS owner and executable on connect.
+    pub fn socket_path(root: &Path) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let digest = Sha256::digest(root.as_os_str().as_bytes());
+        let name = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        PathBuf::from("/private/tmp")
+            .join(format!("dl-gui-{}", unsafe { libc::geteuid() }))
+            .join(format!("{name}.sock"))
     }
     fn executable(pid: i32) -> Result<PathBuf> {
         let mut bytes = vec![0u8; 4096];
@@ -160,7 +176,7 @@ mod transport {
     impl Client {
         pub fn new(root: &Path, peer: &Path) -> Self {
             Self {
-                socket: root.join("runtime/computer-use.sock"),
+                socket: socket_path(root),
                 peer: peer.into(),
             }
         }
@@ -214,17 +230,31 @@ mod transport {
             let root = tempfile::tempdir().unwrap();
             let peer = std::env::current_exe().unwrap();
             assert!(Client::new(root.path(), &peer).is_disconnected());
-            std::fs::create_dir(root.path().join("runtime")).unwrap();
-            let _listener = std::os::unix::net::UnixListener::bind(
-                root.path().join("runtime/computer-use.sock"),
-            )
-            .unwrap();
+            let socket = socket_path(root.path());
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(socket.parent().unwrap());
+            let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
             assert!(!Client::new(root.path(), &peer).is_disconnected());
+            std::fs::remove_file(socket).unwrap();
+        }
+        #[test]
+        fn socket_addresses_fit_long_profiles_and_resolve_aliases() {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("long-profile-".repeat(15));
+            std::fs::create_dir(&root).unwrap();
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            let socket = socket_path(&root);
+            assert!(socket.as_os_str().len() < 104);
+            assert_eq!(socket, socket_path(&alias));
+            assert_ne!(socket, socket_path(temp.path()));
         }
     }
 }
 #[cfg(target_os = "macos")]
-pub use transport::{Client, read_frame, verify, write_frame};
+pub use transport::{Client, read_frame, socket_path, verify, write_frame};
 
 #[cfg(test)]
 mod display_tests {

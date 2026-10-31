@@ -51,6 +51,44 @@ public final class ReleaseStartupTest extends Instrumentation {
             Activity activity = startActivitySync(new Intent(Intent.ACTION_MAIN)
                 .setClassName(getTargetContext(), "io.shadow3aaa.daatlocus.MainActivity")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            if (arguments != null && "fixture-ui-cancel".equals(arguments.getString("mode"))) {
+                result.putString("checks", fixtureUiCancel(activity));
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (native UI cancellation and draft retention)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if (arguments != null && "fixture-recovery".equals(arguments.getString("mode"))) {
+                fixtureRecovery(activity);
+                result.putString("diagnostics", syncDiagnostics());
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (native relay interruption and recovery)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if (arguments != null && "fixture-config".equals(arguments.getString("mode"))) {
+                fixtureConfig(activity);
+                JSONObject checked = new JSONObject(checkExistingAccount(activity));
+                if (!checked.getJSONObject("core").optBoolean("ready") || !checked.has("input")
+                    || checked.getJSONObject("input").optInt("http") / 100 != 2)
+                    throw new AssertionError("Fixture core/input not ready: " + checked);
+                checked.put("completion", fixtureCompletion(checked.getJSONObject("input").getString("id")));
+                result.putString("check", checked.toString());
+                result.putString("diagnostics", syncDiagnostics());
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (native fixture configuration and input)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            if (arguments != null && "fixture-login".equals(arguments.getString("mode"))) {
+                fixtureLogin(activity);
+                result.putString("checks", "Native WebUI OPAQUE fixture login completed");
+                result.putString("diagnostics", syncDiagnostics());
+                sendStatus(0, status);
+                result.putString("stream", "\nOK (native fixture login)\n");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             if (arguments != null && "browser".equals(arguments.getString("mode"))) {
                 result.putString("checks", BrowserBackgroundTest.run(this, (MainActivity) activity));
                 sendStatus(0, status);
@@ -103,6 +141,221 @@ public final class ReleaseStartupTest extends Instrumentation {
         }
     }
 
+    private JSONObject fixtureStage(Activity activity) throws Exception {
+        evaluate(activity, "window.__dlFixtureStage=null;" + nativeFetch()
+            + "('/v1/stage').then(async r=>window.__dlFixtureStage={http:r.status,body:await r.json()}).catch(()=>window.__dlFixtureStage={http:0});null");
+        long deadline = SystemClock.elapsedRealtime() + 10000;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            Object value = evaluate(activity, "JSON.stringify(window.__dlFixtureStage)");
+            if (value instanceof String && !"null".equals(value)) {
+                JSONObject reply = new JSONObject((String) value);
+                if (reply.optInt("http") != 200) throw new AssertionError("Fixture stage unavailable");
+                JSONObject stage = reply.getJSONObject("body");
+                if (!stage.optString("name").startsWith("dl-release-fixture-"))
+                    throw new AssertionError("Recovery is limited to a disposable fixture account");
+                return stage;
+            }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("Fixture stage query timed out");
+    }
+    private JSONObject fixtureMessage(String content) throws Exception {
+        File file = new File(getTargetContext().getApplicationInfo().dataDir, "service/actors/actors.sqlite3");
+        try (SQLiteDatabase db = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READONLY);
+             Cursor rows = db.rawQuery("SELECT record FROM messages ORDER BY seq DESC LIMIT 16", null)) {
+            while (rows.moveToNext()) {
+                JSONObject message = new JSONObject(rows.getString(0));
+                if (content.equals(message.optString("content"))) return message;
+            }
+        }
+        return null;
+    }
+    private String fixtureUiCancel(Activity activity) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!Boolean.TRUE.equals(evaluate(activity, "!!document.querySelector('.dl-composer-textarea:not(:disabled)')"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture Core composer unavailable");
+            SystemClock.sleep(100);
+        }
+        fixtureStage(activity);
+        String content = "dl-release-ui-cancel-" + SystemClock.elapsedRealtime();
+        String draft = "Retain this unsent 0.6.0 fixture draft";
+        String setText = "value=>{const node=document.querySelector('.dl-composer-textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(node,value);node.dispatchEvent(new Event('input',{bubbles:true}));}";
+        evaluate(activity, "(" + setText + ")(" + JSONObject.quote(content) + ");null");
+        while (!Boolean.TRUE.equals(evaluate(activity, "!!document.querySelector('.dl-send-button:not(:disabled)')"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture Send action unavailable");
+            SystemClock.sleep(100);
+        }
+        evaluate(activity, "document.querySelector('.dl-send-button').click();null");
+        JSONObject message;
+        while (true) {
+            message = fixtureMessage(content);
+            if (message != null && "running".equals(message.getString("status"))
+                && Boolean.TRUE.equals(evaluate(activity, "!!document.querySelector('.dl-stop-button:not(:disabled)')"))) break;
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture did not expose a running-task Stop action");
+            SystemClock.sleep(100);
+        }
+        fixturePhase("ui-running");
+        evaluate(activity, "(" + setText + ")(" + JSONObject.quote(draft) + ");null");
+        while (!draft.equals(evaluate(activity, "document.querySelector('.dl-composer-textarea')?.value"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture draft was not rendered");
+            SystemClock.sleep(100);
+        }
+        evaluate(activity, "(()=>{const stop=document.querySelector('.dl-stop-button');stop.click();stop.click();})();null");
+        deadline = SystemClock.elapsedRealtime() + 30000;
+        while (true) {
+            message = fixtureMessage(content);
+            String state = message.getString("status");
+            if (state.equals("cancelled") || state.equals("interrupted")) break;
+            if (state.equals("failed") || state.equals("completed")) throw new AssertionError("Fixture Stop did not cancel running work: " + state);
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture cancellation did not settle");
+            SystemClock.sleep(100);
+        }
+        if (message.isNull("started_at_ms") || !message.optBoolean("cancel_requested"))
+            throw new AssertionError("Fixture did not cancel an admitted running request");
+        while (!Boolean.TRUE.equals(evaluate(activity, "!document.querySelector('.dl-stop-button') && !!document.querySelector('.dl-send-button:not(:disabled)')"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture UI did not recover after Stop");
+            SystemClock.sleep(100);
+        }
+        if (!draft.equals(evaluate(activity, "document.querySelector('.dl-composer-textarea')?.value")))
+            throw new AssertionError("Stop discarded the unsent fixture draft");
+        if (!Boolean.TRUE.equals(evaluate(activity, "!!document.getElementById(" + JSONObject.quote("message-core-" + message.getString("id")) + ")")))
+            throw new AssertionError("Stop cleared the visible conversation");
+        return new JSONObject().put("message_id", message.getString("id")).put("status", message.getString("status"))
+            .put("draft_retained", true).put("transcript_retained", true).put("repeated_stop_clicks", 2).put("send_reenabled", true).toString();
+    }
+    private void fixturePhase(String phase) {
+        Bundle update = new Bundle(); update.putString("fixture_phase", phase); sendStatus(2, update);
+    }
+    private void fixtureRecovery(Activity activity) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!Boolean.TRUE.equals(evaluate(activity,
+            "document.readyState==='complete' && !!window.__TAURI_INTERNALS__ && !!document.getElementById('root')?.childElementCount"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture native UI did not finish loading");
+            SystemClock.sleep(100);
+        }
+        deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!"online".equals(fixtureStage(activity).getJSONObject("public_login").getString("state"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture relay was not initially online");
+            SystemClock.sleep(200);
+        }
+        fixturePhase("ready");
+        deadline = SystemClock.elapsedRealtime() + 60000;
+        while ("online".equals(fixtureStage(activity).getJSONObject("public_login").getString("state"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Relay interruption was not observed");
+            SystemClock.sleep(200);
+        }
+        fixturePhase("disconnected");
+        deadline = SystemClock.elapsedRealtime() + 120000;
+        while (true) {
+            JSONObject stage = fixtureStage(activity);
+            JSONObject core = stage.optJSONObject("core");
+            if ("online".equals(stage.getJSONObject("public_login").getString("state"))
+                && core != null && core.optBoolean("ready") && core.optBoolean("synchronized")) break;
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Relay did not recover a synchronized ready Core");
+            SystemClock.sleep(200);
+        }
+        fixturePhase("reconnected");
+        JSONObject checked = new JSONObject(checkExistingAccount(activity));
+        if (!checked.has("input") || checked.getJSONObject("input").optInt("http") / 100 != 2)
+            throw new AssertionError("Recovered Core did not admit new input: " + checked);
+        String id = checked.getJSONObject("input").getString("id");
+        fixtureCompletion(id);
+        deadline = SystemClock.elapsedRealtime() + 30000;
+        String visibleReply = "(()=>{const turn=document.getElementById(" + JSONObject.quote("message-core-" + id)
+            + ");return !!turn?.querySelector('[data-message-side=reply]')?.textContent.includes('fixture acknowledgment');})()";
+        while (!Boolean.TRUE.equals(evaluate(activity, visibleReply))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Recovered message completed but its reply did not reach the native UI");
+            SystemClock.sleep(100);
+        }
+        fixturePhase("ui-reply-observed");
+    }
+
+    private String fixtureCompletion(String id) throws Exception {
+        File database = new File(getTargetContext().getApplicationInfo().dataDir, "service/actors/actors.sqlite3");
+        long deadline = SystemClock.elapsedRealtime() + 60000;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            try (SQLiteDatabase db = SQLiteDatabase.openDatabase(database.getPath(), null, SQLiteDatabase.OPEN_READONLY);
+                 Cursor rows = db.rawQuery("SELECT record FROM messages WHERE id=?", new String[]{id})) {
+                if (rows.moveToFirst()) {
+                    JSONObject message = new JSONObject(rows.getString(0));
+                    String state = message.getString("status");
+                    if (state.equals("failed") || state.equals("cancelled"))
+                        throw new AssertionError("Fixture message did not complete: " + state + ": " + message.optString("error"));
+                    if (state.equals("completed")) return state;
+                }
+            }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("Fixture terminal state did not replicate to Android");
+    }
+
+    private void fixtureConfig(Activity activity) throws Exception {
+        JSONObject config = new JSONObject(new String(android.util.Base64.decode(
+            arguments.getString("fixture"), android.util.Base64.NO_WRAP), java.nio.charset.StandardCharsets.UTF_8));
+        JSONArray providers = config.getJSONArray("providers");
+        if (providers.length() != 1 || !providers.getJSONObject(0).getString("name").startsWith("fixture-")
+            || !providers.getJSONObject(0).getString("base_url").startsWith("http://127.0.0.1:"))
+            throw new AssertionError("Only a disposable loopback model may be configured");
+        long deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!Boolean.TRUE.equals(evaluate(activity, "!!window.__TAURI_INTERNALS__"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Native shell unavailable");
+            SystemClock.sleep(100);
+        }
+        fixtureStage(activity); // Never change a personal account's model settings.
+        evaluate(activity, "window.__dlFixtureConfig=null;" + nativeFetch()
+            + "('/v1/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:"
+            + JSONObject.quote(config.toString()) + "}).then(async r=>window.__dlFixtureConfig={http:r.status,body:await r.json()}).catch(()=>window.__dlFixtureConfig={http:0});null");
+        while (SystemClock.elapsedRealtime() < deadline) {
+            Object value = evaluate(activity, "JSON.stringify(window.__dlFixtureConfig)");
+            if (value instanceof String && !"null".equals(value)) {
+                JSONObject reply = new JSONObject((String) value);
+                if (reply.optInt("http") / 100 != 2) throw new AssertionError("Fixture model configuration rejected: " + reply);
+                return;
+            }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("Fixture model configuration timed out");
+    }
+
+    // Explicit disposable loopback fixtures only. This drives the shipped
+    // React form and OPAQUE WASM; no credential files or cookies are imported.
+    private void fixtureLogin(Activity activity) throws Exception {
+        JSONObject fixture = new JSONObject(new String(android.util.Base64.decode(
+            arguments.getString("fixture"), android.util.Base64.NO_WRAP), java.nio.charset.StandardCharsets.UTF_8));
+        String relay = fixture.getString("relay"), name = fixture.getString("name");
+        if (!relay.startsWith("ws://127.0.0.1:") || !name.startsWith("dl-release-fixture-"))
+            throw new AssertionError("Use an explicitly disposable loopback account");
+        long deadline = SystemClock.elapsedRealtime() + 30000;
+        while (!Boolean.TRUE.equals(evaluate(activity, "!!document.querySelector('#dl-account-name')"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture login form did not load");
+            SystemClock.sleep(100);
+        }
+        // Configure the existing OS-owner bootstrap after the form loaded.
+        // The production UI requires WSS; the backend's existing loopback-only
+        // WS test transport is configured without weakening TLS or changing UI.
+        evaluate(activity, "window.__dlFixtureConnection=null;window.__TAURI_INTERNALS__.invoke('desktop_account',{input:{kind:'connection',relay_origin:"
+            + JSONObject.quote(relay) + "}}).then(r=>window.__dlFixtureConnection=r.status).catch(()=>window.__dlFixtureConnection=0);null");
+        while (!Integer.valueOf(204).equals(evaluate(activity, "window.__dlFixtureConnection"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture connection setup failed");
+            SystemClock.sleep(100);
+        }
+        evaluate(activity, "(()=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"
+            + "for(const [id,value] of " + new JSONArray().put(new JSONArray().put("dl-account-name").put(name))
+                .put(new JSONArray().put("dl-access-credential").put(fixture.getString("password"))).toString()
+            + "){const node=document.getElementById(id);set.call(node,value);node.dispatchEvent(new Event('input',{bubbles:true}));}return true})()");
+        while (!Boolean.TRUE.equals(evaluate(activity, "document.querySelector('button[type=submit]')?.disabled===false"))) {
+            if (SystemClock.elapsedRealtime() > deadline) throw new AssertionError("Fixture form remained disabled");
+            SystemClock.sleep(100);
+        }
+        evaluate(activity, "document.querySelector('form').requestSubmit();null");
+        deadline = SystemClock.elapsedRealtime() + 120000;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (Boolean.TRUE.equals(evaluate(activity, "!document.querySelector('#dl-account-name')"))) return;
+            SystemClock.sleep(200);
+        }
+        throw new AssertionError("Native fixture OPAQUE login did not complete");
+    }
+
     // Exercises the normal Owner cookie/Origin API inside the main WebView.
     // Login is completed by the human on the phone; no credentials are read.
     private String checkExistingAccount(Activity activity) throws Exception {
@@ -121,7 +374,7 @@ public final class ReleaseStartupTest extends Instrumentation {
         }
         if (!state.has("core") || state.isNull("core") || !state.getJSONObject("core").optBoolean("ready")) return state.toString();
         String key = "sync-device-test-" + java.util.UUID.randomUUID();
-        evaluate(activity, "window.__dlSyncInput=null;" + nativeFetch() + "('/v1/actors/core/messages',{method:'POST',headers:{'Content-Type':'application/json','X-Daat-Request':'1','Idempotency-Key':'"+key+"'},body:JSON.stringify({content:'设备同步实测：请仅回复收到，不要委派任务或执行其他操作。',attachments:[]})}).then(async r=>{let d=await r.json();window.__dlSyncInput={http:r.status,id:d.id||null,status:d.status||null,code:d.code||null};}).catch(()=>{window.__dlSyncInput={http:0};});null");
+        evaluate(activity, "window.__dlSyncInput=null;" + nativeFetch() + "('/v1/core/messages',{method:'POST',headers:{'Content-Type':'application/json','X-Daat-Request':'1','Idempotency-Key':'"+key+"'},body:JSON.stringify({content:'设备同步实测：请仅回复收到，不要委派任务或执行其他操作。',attachments:[]})}).then(async r=>{let d=await r.json();window.__dlSyncInput={http:r.status,id:d.id||null,status:d.status||null,code:d.code||null};}).catch(()=>{window.__dlSyncInput={http:0};});null");
         long inputDeadline = SystemClock.elapsedRealtime() + 30000;
         while (SystemClock.elapsedRealtime() < inputDeadline) {
             Object value = evaluate(activity, "JSON.stringify(window.__dlSyncInput)");

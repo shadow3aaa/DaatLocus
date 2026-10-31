@@ -2133,6 +2133,317 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_account_replica_can_recover_history_after_the_only_voter_is_lost() {
+    use crate::stage::{host::Host, recovery, runtime::Runtime, shared, shared_store};
+    let original_model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Original result",
+    )]));
+    let survivor_model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Surviving branch result",
+    )]));
+    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
+        device_pair(original_model.clone(), survivor_model.clone()).await;
+    let original = a
+        .send_user(
+            shared::ACTOR_ID,
+            "Before authority loss".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        wait_completed(&a, &original.id).await.reply.as_deref(),
+        Some("Original result")
+    );
+    crate::stage::test_relay::wait(|| {
+        b.store()
+            .message(&original.id)
+            .is_ok_and(|message| message.reply.as_deref() == Some("Original result"))
+    })
+    .await
+    .unwrap();
+    let original_voters = net_b
+        .coordination
+        .read()
+        .clone()
+        .unwrap()
+        .raft
+        .metrics()
+        .borrow()
+        .membership_config
+        .clone();
+    net_a.stop_abruptly().await;
+    crate::stage::test_relay::wait(|| net_b.core.read().as_ref().unwrap().permitted())
+        .await
+        .unwrap();
+    assert!(recovery::branch(b.store()).unwrap().is_some());
+    let survivor = b
+        .send_user(
+            shared::ACTOR_ID,
+            "After authority loss".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        wait_completed(&b, &survivor.id).await.reply.as_deref(),
+        Some("Surviving branch result")
+    );
+
+    let replacement_model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Replacement result",
+    )]));
+    let (_c_dir, c) = runtime(replacement_model.clone()).await;
+    let host_c = Host::load(c.clone()).unwrap();
+    let request = host_c.initialize(false).unwrap();
+    host_c
+        .join(
+            fixture_enrollment(&net_b.host, &request, true, Default::default()).unwrap(),
+            &net_b.host.account_id().unwrap(),
+        )
+        .unwrap();
+    host_c
+        .discover_member(net_b.host.enrollment().unwrap())
+        .unwrap();
+    let mut settings = host_c.settings();
+    settings.mode = crate::stage::host::Connectivity::Relay;
+    settings.relay_origin = net_b.host.settings().relay_origin;
+    host_c.save_settings(settings).unwrap();
+    let net_c = Runtime::new(host_c);
+    net_c.start().await.unwrap();
+    crate::stage::test_relay::wait(|| net_c.connected(net_b.host.local))
+        .await
+        .unwrap();
+    crate::stage::test_relay::wait(|| {
+        !shared_store::pending(b.store()).unwrap()
+            && net_b.core.read().as_ref().unwrap().permitted()
+    })
+    .await
+    .unwrap();
+    let observed = net_b
+        .core
+        .read()
+        .as_ref()
+        .unwrap()
+        .recovery_status()
+        .unwrap();
+    let request = recovery::ForkRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        account: net_b.host.account_id().unwrap(),
+        target: net_c.host.local,
+        source: net_b.host.local,
+        source_branch: observed.branch.unwrap(),
+        source_head: observed.head,
+        expected_local_head: shared::Head::default(),
+        work_generation: None,
+    };
+    let controller = net_c.core.read().clone().unwrap();
+    let mut stale = request.clone();
+    stale.source_head.hash = "0".repeat(64);
+    assert!(controller.fork_recovery(stale).await.is_err());
+    assert_eq!(
+        shared_store::head(c.store()).unwrap(),
+        shared::Head::default()
+    );
+    let ledger = crate::stage::ledger::StageLedger::attach(b.store(), net_b.host.local);
+    ledger
+        .import_peer(
+            net_c.host.enrollment().unwrap(),
+            crate::stage::ledger::DeviceAuthority {
+                read_only: true,
+                ..Default::default()
+            },
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    assert!(
+        controller.fork_recovery(request.clone()).await.is_err(),
+        "read-only peers cannot freeze a source or import execution context"
+    );
+    assert!(net_b.core.read().as_ref().unwrap().permitted());
+    assert!(recovery::branch(c.store()).unwrap().is_none());
+    ledger
+        .import_peer(
+            net_c.host.enrollment().unwrap(),
+            Default::default(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+    let mut foreign = request.clone();
+    foreign.account = "another-account".into();
+    assert!(controller.fork_recovery(foreign).await.is_err());
+    survivor_model
+        .replies
+        .lock()
+        .push_back(MockReply::PendingOnEveryRequest);
+    let busy = b
+        .send_user(
+            shared::ACTOR_ID,
+            "Keep the source busy".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
+    crate::stage::test_relay::wait(|| survivor_model.requests.lock().len() == 2)
+        .await
+        .unwrap();
+    let busy_status = net_b
+        .core
+        .read()
+        .as_ref()
+        .unwrap()
+        .recovery_status()
+        .unwrap();
+    let mut busy_request = request.clone();
+    busy_request.id = uuid::Uuid::new_v4().to_string();
+    busy_request.source_head = busy_status.head;
+    assert!(
+        controller.fork_recovery(busy_request).await.is_err(),
+        "a live task must not be copied or interrupted by recovery"
+    );
+    assert_eq!(
+        b.store().message(&busy.id).unwrap().status,
+        MessageStatus::Running
+    );
+    assert!(!b.store().message(&busy.id).unwrap().cancel_requested);
+    assert!(net_b.core.read().as_ref().unwrap().permitted());
+    assert_eq!(
+        shared_store::head(c.store()).unwrap(),
+        shared::Head::default()
+    );
+    b.cancel(shared::ACTOR_ID, &busy.id).unwrap();
+    assert_eq!(
+        wait_completed(&b, &busy.id).await.status,
+        MessageStatus::Cancelled
+    );
+    crate::stage::test_relay::wait(|| {
+        !shared_store::pending(b.store()).unwrap()
+            && net_b.core.read().as_ref().unwrap().permitted()
+    })
+    .await
+    .unwrap();
+    let settled = net_b
+        .core
+        .read()
+        .as_ref()
+        .unwrap()
+        .recovery_status()
+        .unwrap();
+    let mut request = request;
+    request.source_head = settled.head;
+    let preview = controller.recovery_fork_status().await.unwrap();
+    assert_eq!(preview["eligible"], true);
+    assert!(
+        preview["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["source"] == net_b.host.local.to_string())
+    );
+    let receipt = controller.fork_recovery(request.clone()).await.unwrap();
+    assert_eq!(
+        controller.fork_recovery(request.clone()).await.unwrap(),
+        receipt,
+        "retry must not create another branch"
+    );
+    let mut changed_retry = request.clone();
+    changed_retry.source_head.hash = "0".repeat(64);
+    assert!(controller.fork_recovery(changed_retry).await.is_err());
+    let ready = tokio::time::timeout(Duration::from_secs(15), async {
+        while !net_c.core.read().as_ref().unwrap().permitted()
+            || !c
+                .store()
+                .message(&survivor.id)
+                .is_ok_and(|message| message.reply.as_deref() == Some("Surviving branch result"))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let status = net_c.core.read().as_ref().unwrap().status();
+    let head = shared_store::head(c.store()).unwrap();
+    // Joining cannot invent a voter or repair unavailable authority by assertion.
+    assert_eq!(
+        net_b
+            .coordination
+            .read()
+            .clone()
+            .unwrap()
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config,
+        original_voters
+    );
+    assert_eq!(net_c.voting_member(net_c.host.local), Some(false));
+    assert!(
+        replacement_model.requests.lock().is_empty(),
+        "copying history must not replay completed work"
+    );
+    if ready.is_ok() {
+        assert_eq!(status["state"], "local_recovery");
+        assert_eq!(
+            c.store().message(&original.id).unwrap().reply.as_deref(),
+            Some("Original result")
+        );
+        assert_eq!(
+            c.store().message(&busy.id).unwrap().status,
+            MessageStatus::Cancelled
+        );
+        let input = c
+            .send_user(
+                shared::ACTOR_ID,
+                "Continue on the explicit branch".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            wait_completed(&c, &input.id).await.reply.as_deref(),
+            Some("Replacement result")
+        );
+        net_a.start().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while [&a, &b, &c]
+                .iter()
+                .any(|system| recovery::branch(system.store()).unwrap().is_some())
+                || shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
+                || shared_store::head(a.store()).unwrap() != shared_store::head(c.store()).unwrap()
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("returning authority did not reconcile the explicit fork");
+        for system in [&a, &b, &c] {
+            for (id, answer) in [
+                (&original.id, "Original result"),
+                (&survivor.id, "Surviving branch result"),
+                (&input.id, "Replacement result"),
+            ] {
+                assert_eq!(
+                    system.store().message(id).unwrap().reply.as_deref(),
+                    Some(answer)
+                );
+            }
+        }
+        assert_eq!(original_model.requests.lock().len(), 1);
+        assert_eq!(survivor_model.requests.lock().len(), 2);
+        assert_eq!(replacement_model.requests.lock().len(), 1);
+    }
+    net_c.stop_abruptly().await;
+    net_b.stop_abruptly().await;
+    net_a.stop_abruptly().await;
+    a.shutdown().await;
+    b.shutdown().await;
+    c.shutdown().await;
+    assert!(
+        ready.is_ok(),
+        "new learner did not recover from surviving branch: status={status}, head={head:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connected_learners_continue_after_authority_loss_and_rejoin_without_replaying_work() {
     use crate::stage::{host::Host, recovery, runtime::Runtime, shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![]));

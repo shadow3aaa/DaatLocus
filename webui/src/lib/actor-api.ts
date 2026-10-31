@@ -373,6 +373,7 @@ export const listMessages = (actor: string, options: FetchOptions & {
   limit?: number;
 } = {}) => request<ConversationPage>(query(`${actorPath(actor)}/messages`, { before: options.before, limit: options.limit ?? 30 }), options);
 export const getMessage = (actor: string, id: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(id)}`, options);
+export const cancelMessage = (actor: string, id: string) => request<void>(`${actorPath(actor)}/messages/${segment(id)}/cancel`, { method: "POST", empty: true });
 export const sendCoreMessage = (input: {
   content: string;
   attachments: string[];

@@ -178,6 +178,44 @@ pub async fn input(window: &Webview, input: BrowserInput) -> Result<(), String> 
     if let Some(editing) = &editing {
         keys::begin(window, editing).await?;
     }
+    if let BrowserInput::Scroll { x, y, .. } = &input {
+        // The content process owns hover state. Wait for native pointer
+        // acknowledgment before the wheel can overtake it on another IPC route.
+        // The Owner's cursor, selected tab and keyboard focus stay untouched.
+        send_input(window, BrowserInput::Move { x: *x, y: *y }).await?;
+        pending_mouse_events(window).await?;
+    }
+    send_input(window, input).await?;
+    if let Some(editing) = editing {
+        keys::finish(window, editing).await?;
+    }
+    Ok(())
+}
+async fn pending_mouse_events(window: &Webview) -> Result<(), String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .with_webview(move |platform| unsafe {
+            let web = &*platform.inner().cast::<WKWebView>();
+            if !web.respondsToSelector(sel!(_doAfterProcessingAllPendingMouseEvents:)) {
+                let _ = sender.send(Err("Native browser pointer acknowledgment unavailable"));
+                return;
+            }
+            let sender = Mutex::new(Some(sender));
+            let completion = block2::RcBlock::new(move || {
+                if let Some(sender) = sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let _ = sender.send(Ok(()));
+                }
+            });
+            let _: () = msg_send![web, _doAfterProcessingAllPendingMouseEvents: &*completion];
+        })
+        .map_err(|_| "WKWebView event loop unavailable")?;
+    tokio::time::timeout(Duration::from_secs(8), receiver)
+        .await
+        .map_err(|_| "Browser pointer acknowledgment timed out; observe before continuing")?
+        .map_err(|_| "Browser pointer acknowledgment interrupted; do not replay")?
+        .map_err(str::to_owned)
+}
+async fn send_input(window: &Webview, input: BrowserInput) -> Result<(), String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     window
         .with_webview(move |platform| unsafe {
@@ -198,9 +236,6 @@ pub async fn input(window: &Webview, input: BrowserInput) -> Result<(), String> 
         .await
         .map_err(|_| "Browser input timed out; observe before continuing")?
         .map_err(|_| "Browser input interrupted; do not replay")??;
-    if let Some(editing) = editing {
-        keys::finish(window, editing).await?;
-    }
     Ok(())
 }
 #[cfg(feature = "web-contract")]
@@ -256,6 +291,10 @@ fn dispatch_input(web: &WKWebView, input: BrowserInput) -> Result<(), String> {
                 if !web.respondsToSelector(sel!(_simulateMouseMove:)) {
                     return Err("Native browser hover requires macOS 13 or newer".into());
                 }
+                // IME mediation is asynchronous even for hover. Bypass only
+                // this page's input context during local pointer dispatch so
+                // its mouse event enters WebKit's acknowledged queue now.
+                let _context = mouse::PointerContext::new(web)?;
                 let _: () = msg_send![web, _simulateMouseMove: &*event];
             }
             BrowserInput::Drag { x, y, to_x, to_y } => {

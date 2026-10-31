@@ -132,7 +132,7 @@
     "preparing": "Preparing execution on this device…",
     "service_unavailable": "Execution status is temporarily unavailable.",
     "recovery_blocked": "Recovery is paused. Conversation records and your draft are retained.",
-    "local_recovery": "Continuing on this device while disconnected.",
+    "local_recovery": "Continuing in an independent local recovery branch. The original shared conversation has not been restored.",
     "offline": "The other device is offline. Your draft is retained.",
     "reconciling": "Restoring the shared conversation…",
     "recovering": "Recovering on this device…",
@@ -938,5 +938,18 @@
     "detail_cache_rate": "Cache hit rate",
     "archived": "Archived",
     "unavailable": "—"
+  },
+  "recovery_fork": {
+    "section": "Conversation recovery",
+    "title": "Recover from a surviving device",
+    "summary": "For a new or reinstalled device when the shared conversation is unavailable.",
+    "open": "Review recovery",
+    "warning": "Copy the selected device’s history into an independent local recovery branch. The original shared conversation and device membership are preserved; this does not recreate its shared authority.",
+    "idle_source": "Stop running and queued work on the source device first. Completed and uncertain outcomes are retained and are not automatically replayed.",
+    "not_fresh": "This operation is available only on a new replica with no synchronized conversation or pending work.",
+    "no_source": "No available recovery branch was found. Keep the surviving device online and refresh.",
+    "source": "Copy from device",
+    "confirm": "Create local recovery branch",
+    "refresh": "Refresh recovery sources"
   }
 }

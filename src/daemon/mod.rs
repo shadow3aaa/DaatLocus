@@ -43,7 +43,7 @@ pub fn open_client(status: &control::Status) -> Result<()> {
 use crate::daat_locus_paths::daat_locus_paths;
 use miette::{IntoDiagnostic, Result, miette};
 use std::{
-    io::{Seek, Write as _},
+    io::{Read, Seek, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -77,6 +77,32 @@ impl DaemonLock {
         crate::persistence::set_private_file_permissions(path).into_diagnostic()?;
         file.try_lock()
             .map_err(|_| miette!("Daemon already running for this profile"))?;
+        // Public v0.5.0 only creates a JSON PID marker; it never takes an OS
+        // file lock. Do not truncate that marker while its recorded PID lives.
+        // This is an upgrade fence, not authority to signal the old process.
+        let mut previous = Vec::new();
+        (&mut file)
+            .take(4096)
+            .read_to_end(&mut previous)
+            .into_diagnostic()?;
+        let legacy_pid = serde_json::from_slice::<serde_json::Value>(&previous)
+            .ok()
+            .filter(|value| {
+                value
+                    .get("started_at_ms")
+                    .is_some_and(serde_json::Value::is_i64)
+            })
+            .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
+            .and_then(|pid| u32::try_from(pid).ok());
+        if legacy_pid.is_some_and(|pid| {
+            sysinfo::System::new_all()
+                .process(sysinfo::Pid::from_u32(pid))
+                .is_some()
+        }) {
+            return Err(miette!(
+                "A live PID is recorded by a legacy profile lock; stop the previous Daat Locus version before upgrading"
+            ));
+        }
         file.set_len(0).into_diagnostic()?;
         file.rewind().into_diagnostic()?;
         writeln!(file, "{}", std::process::id()).into_diagnostic()?;
@@ -262,3 +288,52 @@ unsafe fn fork_parent_exit(label: &str) -> Result<()> {
 
 #[cfg(not(unix))]
 const fn daemonize_current_process() {}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::DaemonLock;
+
+    #[test]
+    fn active_legacy_pid_lock_is_not_replaced_by_a_native_file_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.lock");
+        // Public v0.5.0 uses a create-new JSON PID marker, not an OS file lock.
+        let previous = serde_json::to_vec(&serde_json::json!({
+            "pid": std::process::id(), "started_at_ms": 1
+        }))
+        .unwrap();
+        std::fs::write(&path, &previous).unwrap();
+        assert!(
+            DaemonLock::acquire_at_path(&path).is_err(),
+            "A live legacy runtime must retain its profile lock"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+    }
+
+    #[test]
+    fn retired_legacy_pid_recovers_without_weakening_native_exclusivity() {
+        let mut process = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = process.id();
+        assert!(process.wait().unwrap().success());
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.lock");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"pid":pid,"started_at_ms":1})).unwrap(),
+        )
+        .unwrap();
+        let mut lock = DaemonLock::acquire_at_path(&path).unwrap();
+        assert!(DaemonLock::acquire_at_path(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            std::process::id().to_string()
+        );
+        lock.release();
+        assert!(DaemonLock::acquire_at_path(&path).is_ok());
+    }
+}

@@ -69,7 +69,7 @@ describe("fixed presentation and chronological source", () => {
     expect(html).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
     expect(html).not.toContain('disabled=""');
   });
-  test("the composer renders exactly one action for its current draft and execution state", () => {
+  test("the idle composer renders one send action for its draft and submission state", () => {
     const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
     const attachment = {id:"file",name:"report.txt",media_type:"text/plain",size_bytes:10,uri:"/v1/actors/root/resources/file"};
     const cases = [
@@ -89,6 +89,19 @@ describe("fixed presentation and chronological source", () => {
       expect(actions![0].includes('disabled=""')).toBe(disabled);
       expect(html).not.toContain(`aria-label="${other}"`);
     }
+  });
+  test("running work has an independent stop action while an unsent draft remains sendable", () => {
+    const props: Parameters<typeof Composer>[0] = {value:"Retain this draft",onValueChange:()=>{},onSubmit:()=>{},onStop:()=>{},working:true,attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
+    const button = (html: string, key: string) => html.match(new RegExp(`<button[^>]*aria-label="${i18n.t(key)}"[^>]*>`))?.[0];
+    const active = renderToStaticMarkup(<Composer {...props} />);
+    expect(active).toContain("Retain this draft");
+    expect(button(active,"composer.send_message")).not.toContain('disabled=""');
+    expect(button(active,"composer.stop_task")).toBeDefined();
+    expect(button(active,"composer.stop_task")).not.toContain('disabled=""');
+    const pending = renderToStaticMarkup(<Composer {...props} stopping />);
+    expect(button(pending,"composer.stop_task")).toContain('disabled=""');
+    expect(button(pending,"composer.send_message")).not.toContain('disabled=""');
+    expect(renderToStaticMarkup(<Composer {...props} working={false} />)).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
   });
   test("Core shows newly queued user messages before the running input finishes", () => {
     const queued = {...message,id:"new-input",actor_id:"core",status:"queued" as const,content:"NEW_IM_INPUT"};

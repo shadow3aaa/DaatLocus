@@ -1057,3 +1057,73 @@ impl daat_locus::core::ModelProvider for CoreViewModel {
         "core-view-fixture".into()
     }
 }
+
+#[tokio::test]
+async fn recovery_fork_requires_owner_origin_and_request_header() {
+    use reqwest::Method;
+    let fixture = Fixture::new().await;
+    let cookie = fixture.cookie.read().clone();
+    let source = daat_locus::stage::StageId::new();
+    let head = json!({"sequence":0,"hash":"0".repeat(64)});
+    let request = json!({"id":uuid::Uuid::new_v4().to_string(),"account":fixture.stage.host.account_id(),"target":fixture.stage.host.local,"source":source,
+        "source_branch":{"id":uuid::Uuid::new_v4().to_string(),"device":source,"base":head,"epoch":1,"created_at_ms":1},"source_head":head,"expected_local_head":head,"work_generation":null});
+    let path = "/v1/stage/recovery/fork";
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}{path}", fixture.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fixture
+            .client
+            .post(format!("{}{path}", fixture.url))
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for origin in [None, Some("https://untrusted.invalid")] {
+        let mut call = fixture
+            .client
+            .post(format!("{}{path}", fixture.url))
+            .header("cookie", cookie.clone())
+            .header("x-daat-request", "1");
+        if let Some(origin) = origin {
+            call = call.header("origin", origin);
+        }
+        assert_eq!(
+            call.json(&request).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        fixture
+            .client
+            .post(format!("{}{path}", fixture.url))
+            .header("cookie", cookie.clone())
+            .header("origin", &fixture.url)
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        fixture
+            .owner(Method::GET, path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an authenticated request must reach the missing-controller check"
+    );
+}

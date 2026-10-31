@@ -60,8 +60,13 @@ function mergeMessages(current: api.MessageRecord[], incoming: api.MessageRecord
   const values = new Map(current.map(message => [message.id, message]));
   for (const message of incoming) {
     const previous = values.get(message.id);
+    // An input may be admitted on another device whose wall clock is ahead of
+    // its worker. Completion is authoritative even when its timestamp is lower.
+    if (previous && terminal(previous.status) && !terminal(message.status)) continue;
     if (previous?.status === "running" && message.status === "queued" && message.updated_at_ms === previous.updated_at_ms) continue;
-    if (!previous || message.updated_at_ms > previous.updated_at_ms ||
+    if (!previous || (!terminal(previous.status) && terminal(message.status)) ||
+      (previous.status === message.status && previous.finished_at_ms == null && message.finished_at_ms != null) ||
+      message.updated_at_ms > previous.updated_at_ms ||
       (message.updated_at_ms === previous.updated_at_ms && (!terminal(previous.status) || terminal(message.status))))
       values.set(message.id, message);
   }

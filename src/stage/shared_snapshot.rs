@@ -117,7 +117,7 @@ pub(super) fn produce_at(
     })
 }
 pub fn receive(store: &ActorStore, page: &Page, account: &str) -> Result<bool> {
-    receive_inner(store, page, account, None)
+    receive_inner(store, page, account, None, None)
 }
 pub(crate) fn receive_recovery(
     store: &ActorStore,
@@ -125,13 +125,31 @@ pub(crate) fn receive_recovery(
     account: &str,
     device: super::StageId,
 ) -> Result<bool> {
-    receive_inner(store, page, account, Some(device))
+    receive_inner(store, page, account, Some(device), None)
+}
+pub(crate) fn receive_fork(
+    store: &ActorStore,
+    page: &Page,
+    account: &str,
+    export: &super::recovery::ForkExport,
+) -> Result<bool> {
+    if page.head != export.head {
+        return Err(StageError::Conflict("Recovery source changed"));
+    }
+    receive_inner(
+        store,
+        page,
+        account,
+        Some(export.request.target),
+        Some(export),
+    )
 }
 fn receive_inner(
     store: &ActorStore,
     page: &Page,
     account: &str,
     recovery: Option<super::StageId>,
+    fork: Option<&super::recovery::ForkExport>,
 ) -> Result<bool> {
     if page.account != account
         || page.entries.len() > PAGE
@@ -141,6 +159,7 @@ fn receive_inner(
     }
     page.head.validate()?;
     store.stage_transaction(|tx|{
+        if page.last && let Some(export) = fork { super::recovery::validate_fork_target(tx, export)?; }
         initialize(tx)?;let now=chrono::Utc::now().timestamp_millis();
         tx.execute("DELETE FROM core_snapshot_incoming WHERE token IN (SELECT token FROM core_snapshot_age WHERE touched<?1)",[now-300000])?;
         tx.execute("DELETE FROM core_snapshot_content WHERE token IN (SELECT token FROM core_snapshot_age WHERE touched<?1)",[now-300000])?;
@@ -191,6 +210,7 @@ fn receive_inner(
             let event = crate::actors::ActorEvent::ConversationRestored { archive_id };
             tx.execute("INSERT INTO events(actor_id,created_at,record) VALUES('core',?1,?2)",params![now,serde_json::to_string(&event).map_err(|_|StageError::Invalid("Cannot record conversation recovery"))?])?;
         }
+        if let Some(export) = fork { super::recovery::finish_fork(tx, export)?; }
         Ok(true)
     })
 }

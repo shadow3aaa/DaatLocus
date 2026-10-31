@@ -561,7 +561,12 @@ pub fn ensure_directory(policy: &RuntimeSandboxPolicy, path: &Path) -> Result<()
     guarded_directory::local_path(path)
         .map_err(|_| miette!("remote or device directory paths are unsupported"))?;
     policy.ensure_path_readable(path, "workspace directory")?;
-    let guard = guarded_directory::GuardedDirectory::open_with(path, true, |created| {
+    // Resolve existing aliases (including macOS /var and /tmp) before
+    // walking pinned, no-follow ancestors. Recheck the resolved authority and
+    // every missing component; canonicalization alone never authorizes I/O.
+    let resolved = daat_locus_sandbox::resolve_path_for_check(path);
+    policy.ensure_path_readable(&resolved, "resolved workspace directory")?;
+    let guard = guarded_directory::GuardedDirectory::open_with(&resolved, true, |created| {
         policy
             .ensure_path_writable(created, "new directory")
             .map_err(|_| {
@@ -572,7 +577,7 @@ pub fn ensure_directory(policy: &RuntimeSandboxPolicy, path: &Path) -> Result<()
             })
     })
     .map_err(|error| miette!("unable to safely create directory: {error}"))?;
-    check_opened_file(guard.handle(), path, policy, false)
+    check_opened_file(guard.handle(), &resolved, policy, false)
 }
 
 pub(crate) fn read_authorized_bytes(
@@ -2170,6 +2175,33 @@ mod tests {
         }];
         assert!(ensure_directory(&policy, &root.join("ungranted/parent/target")).is_err());
         assert!(!root.join("ungranted").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_directory_resolves_aliases_without_granting_their_replacements() {
+        let temp = non_temporary_scratch();
+        let root = temp.path().canonicalize().unwrap();
+        let allowed = root.join("allowed");
+        let outside = root.join("outside");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&allowed, &alias).unwrap();
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.filesystem.full_disk_read = false;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.readable_roots = vec![allowed.clone()];
+        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
+            root: allowed.clone(),
+            read_only_subpaths: vec![],
+        }];
+        ensure_directory(&policy, &alias.join("new/nested")).unwrap();
+        assert!(allowed.join("new/nested").is_dir());
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&outside, &alias).unwrap();
+        assert!(ensure_directory(&policy, &alias.join("denied")).is_err());
+        assert!(!outside.join("denied").exists());
     }
 
     #[test]

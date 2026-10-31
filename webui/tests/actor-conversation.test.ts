@@ -5,6 +5,21 @@ import { partitionConversationMessages } from "../src/lib/conversation-messages"
 const event = (seq: number, value: ActorEvent, actor = "root"): EventRecord => ({ seq, actor_id: actor, created_at_ms: seq, event: value });
 const message = (id: string, seq: number, status: MessageRecord["status"] = "queued"): MessageRecord => ({ id, seq, actor_id: "root", kind: "request", source: { kind: "user", }, reply_to: { kind: "user", }, in_reply_to: null, content: id, attachments: [], status, cancel_requested: false, reply: null, error: null, created_at_ms: 1, updated_at_ms: 1 });
 describe("conversation semantic reducer", () => {
+  test("worker completion survives an admitting device clock ahead of the worker", () => {
+    const admitted = { ...message("cross-device", 1), created_at_ms: 1200, updated_at_ms: 1200 };
+    const completed = { ...admitted, status: "completed" as const, reply: "worker reply", updated_at_ms: 1100, finished_at_ms: 1100 };
+    let state = conversationReducer(initialConversation("root"), { type: "message", message: admitted });
+    state = conversationReducer(state, { type: "message", message: completed });
+    expect(state.messages[0]).toEqual(completed);
+    state = conversationReducer(state, { type: "page", page: { items: [admitted], next_cursor: null } });
+    expect(state.messages[0]).toEqual(completed);
+
+    // A semantic status notice can precede the hydrated record after recovery.
+    state = conversationReducer(initialConversation("root"), { type: "message", message: admitted });
+    state = conversationReducer(state, { type: "event", record: event(2, { type: "message_updated", message_id: admitted.id, status: "completed" }) });
+    state = conversationReducer(state, { type: "message", message: completed });
+    expect(state.messages[0]).toEqual(completed);
+  });
   test("the initial page restores an older active input without a queue request", () => {
     const active = message("active", 1, "running");
     let state = conversationReducer(initialConversation("root"), {type:"page",initial:true,page:{items:[message("latest", 100)],active,next_cursor:100,event_cursor:7}});

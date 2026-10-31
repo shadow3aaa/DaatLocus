@@ -15,9 +15,9 @@ export const getDevices = (options: FetchOptions & { after?: string } = {}) => r
 );
 export const saveDeviceSettings = (preferences: DevicePreferences) => request<DeviceSettings>("/v1/stage/settings", {method:"PATCH",body:preferences});
 
-export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null };
+export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null; recovery_branch?: string | null };
 export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus; work_generation?: WorkGeneration | null}>("/v1/stage/status", options);
-export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "conversation_pane.preparing" | "conversation_pane.service_unavailable";
+export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "conversation_pane.preparing" | "conversation_pane.service_unavailable" | "conversation_pane.local_recovery";
 export function coreConversationReady(core: CoreStatus | null | undefined, localReady: boolean): boolean {
   return core ? core.ready || core.model_ready : localReady;
 }
@@ -35,3 +35,11 @@ export function coreConnectionMessage(core: CoreStatus | null | undefined): Conv
 }
 
 export type PublicLoginStatus = { state: "not_configured" | "waiting_for_account" | "connecting" | "online" | "reconnecting"; error_code: string | null; changed_at_ms: number; last_confirmed_at_ms: number | null; retry_at_ms: number | null };
+
+export type RecoveryHead = {sequence: number; hash: string};
+export type RecoveryBranch = {id: string; device: string; base: RecoveryHead; epoch: number; created_at_ms: number};
+export type RecoverySource = {source: string; label: string | null; branch: RecoveryBranch; head: RecoveryHead};
+export type RecoveryForkStatus = {account: string; target: string; head: RecoveryHead; branch: RecoveryBranch | null; eligible: boolean; sources: RecoverySource[]; work_generation: WorkGeneration | null};
+export type RecoveryForkRequest = {id: string; account: string; target: string; source: string; source_branch: RecoveryBranch; source_head: RecoveryHead; expected_local_head: RecoveryHead; work_generation: WorkGeneration | null};
+export const getRecoveryForkStatus = (options?: FetchOptions) => request<RecoveryForkStatus>("/v1/stage/recovery/fork", options);
+export const recoverFromBranch = (body: RecoveryForkRequest) => request<{branch:RecoveryBranch}>("/v1/stage/recovery/fork", {method:"POST",body});

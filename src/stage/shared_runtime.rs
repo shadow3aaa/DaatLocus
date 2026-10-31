@@ -26,6 +26,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod approval;
+mod fork;
 pub struct Controller {
     runtime: Weak<Runtime>,
     fence: Mutex<Fence>,
@@ -45,6 +46,9 @@ pub struct Controller {
     frozen: Mutex<Option<(StageId, Instant)>>,
     failure: RwLock<Option<&'static str>>,
     last_confirmed: Mutex<Instant>,
+    forking: AtomicBool,
+    fork_operation: tokio::sync::Mutex<()>,
+    fork_export: Mutex<Option<super::recovery::ForkExport>>,
 }
 
 impl Controller {
@@ -96,6 +100,9 @@ impl Controller {
             frozen: Mutex::new(None),
             failure: RwLock::new(None),
             last_confirmed: Mutex::new(Instant::now()),
+            forking: AtomicBool::new(false),
+            fork_operation: tokio::sync::Mutex::new(()),
+            fork_export: Mutex::new(None),
         }))
     }
     fn runtime(&self) -> Result<Arc<Runtime>> {
@@ -119,6 +126,7 @@ impl Controller {
     pub(crate) fn execution_permitted(&self) -> bool {
         self.runtime().is_ok_and(|runtime| {
             !self.draining.load(Ordering::Acquire)
+                && !self.forking.load(Ordering::Acquire)
                 && self.frozen.lock().is_none()
                 && self.recovered_epoch.load(Ordering::Acquire) == self.epoch()
                 && self.fence.lock().permits(
@@ -354,7 +362,7 @@ impl Controller {
         } else {
             "connecting"
         };
-        serde_json::json!({"worker_stage_id":leader,"epoch":self.fence.lock().epoch(),"synchronized":synchronized,"ready":ready && !frozen,"model_ready":model_ready,"state":state,"error_code":failure,"config_revision":config_revision})
+        serde_json::json!({"worker_stage_id":leader,"epoch":self.fence.lock().epoch(),"synchronized":synchronized,"ready":ready && !frozen,"model_ready":model_ready,"state":state,"error_code":failure,"config_revision":config_revision,"recovery_branch":self.recovery.read().as_ref().map(|branch|branch.id.clone())})
     }
     fn model_ready(&self) -> bool {
         self.runtime().is_ok_and(|runtime| {
@@ -705,6 +713,9 @@ impl Controller {
                 .peer(peer, chrono::Utc::now().timestamp_millis())?;
         }
         match request {
+            request @ (Request::BeginRecoveryFork { .. }
+            | Request::RecoveryForkPage { .. }
+            | Request::ReleaseRecoveryFork { .. }) => self.handle_fork(peer, request).await,
             Request::SubmitApproval {
                 epoch,
                 message,
@@ -772,6 +783,8 @@ impl Controller {
             }
             Request::FreezeRecovery => {
                 self.require_authority(peer).await?;
+                let _operation = self.fork_operation.lock().await;
+                self.fork_export.lock().take();
                 self.freeze(peer).await?;
                 Ok(Response::RecoveryStatus {
                     status: self.recovery_status()?,
@@ -1688,6 +1701,7 @@ impl Controller {
             .ok_or(StageError::Unavailable("Device consensus is unavailable"))?;
         coordinator.authorize(runtime.host.local)?;
         if self.draining.load(Ordering::Acquire)
+            || self.forking.load(Ordering::Acquire)
             || self.recovery_authority_available(&runtime).await?
             || self.last_confirmed.lock().elapsed() < Duration::from_secs(6)
             || !super::recovery::synchronized(runtime.host.system.store())?
@@ -2614,6 +2628,11 @@ impl Controller {
         Ok(())
     }
     async fn advance(&self) -> Result<()> {
+        if self.forking.load(Ordering::Acquire) {
+            return Err(StageError::Unavailable(
+                "Conversation reconciliation is in progress",
+            ));
+        }
         if self.draining.load(Ordering::Acquire) {
             return Err(StageError::Unavailable("Device is stopping"));
         }

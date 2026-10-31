@@ -14,7 +14,7 @@ import { PrimaryTranscript, WorkTranscript } from "@/components/conversation-tur
 import { partitionConversationMessages } from "@/lib/conversation-messages";
 import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
-import { accessKey, actorModelReady, patchActorPreferences, type Access, type ActorDetail } from "@/lib/actor-api";
+import { accessKey, actorModelReady, cancelMessage, patchActorPreferences, type Access, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
@@ -22,8 +22,8 @@ import { matchingConversationMessages, matchesConversationText } from "@/lib/con
 import { FloatingSearchBar } from "@/components/floating-search";
 import { LazyPage } from "@/components/lazy-page";
 
-export function ConversationPane({ focus, connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
-  focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null;
+export function ConversationPane({ focus, connectionMessage, localRecovery = false, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
+  localRecovery?: boolean; focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null;
   actorId: string; access: Access; onActor(id: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
   compact?: boolean; refreshVersion?: number; searchOpen?: boolean; onSearchOpenChange?(open: boolean): void; onActorLoaded?(actor: ActorDetail): void;
   onConfigureModels?(): void;
@@ -45,6 +45,8 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
   const olderAnchor = useRef<{node: HTMLElement; top: number} | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [changing, setChanging] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const stopPending = useRef(false);
   const [localError, setLocalError] = useState("");
   const [preparingFiles, setPreparingFiles] = useState(false);
   const filePreparation = useRef({ actorId, busy: false });
@@ -231,6 +233,23 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
     const bounds = footer.current?.querySelector(".dl-composer")?.getBoundingClientRect();
     void chat.send(undefined, undefined, message => { if (bounds) setSendOrigin({messageId:message.id,left:bounds.left,top:bounds.top,width:bounds.width,height:bounds.height}); }).catch(() => {});
   }
+  async function stop() {
+    if (!active || stopPending.current) return;
+    stopPending.current = true;
+    setStopping(true);
+    setLocalError("");
+    try {
+      await cancelMessage(actorId, active.id);
+      // Keep the visible conversation through a transient reconnect. Reloading
+      // the whole pane here would clear history before its reads can succeed.
+      await chat.revealMessage(active.id, AbortSignal.timeout(5000));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : String(error));
+    } finally {
+      stopPending.current = false;
+      setStopping(false);
+    }
+  }
   async function earlier(signal: AbortSignal) {
     const node = visibleAnchor();
     olderAnchor.current = node ? {node, top: node.getBoundingClientRect().top} : null;
@@ -264,11 +283,11 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
       </div>
       {!primaryView && !searchOpen && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
       <div ref={footer} className="dl-conversation-footer">
-        <ConversationConnection message={waitingMessage} />
+        <ConversationConnection message={waitingMessage ?? (localRecovery ? "conversation_pane.local_recovery" : null)} />
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
-        {primaryView && <Composer key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
+        {primaryView && <Composer key={actorId} value={chat.draft} onValueChange={chat.setDraft} onSubmit={submit} working={Boolean(active)} stopping={stopping} onStop={()=>{void stop();}} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
       </div>
   </section>;
 }

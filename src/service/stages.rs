@@ -16,6 +16,10 @@ pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/v1/stage", get(info))
         .route("/v1/stage/status", get(status))
+        .route(
+            "/v1/stage/recovery/fork",
+            get(fork_status).post(fork_recovery),
+        )
         .route("/v1/stage/recovery/archives", get(recovery_archives))
         .route(
             "/v1/stage/recovery/archives/{archive}/messages",
@@ -73,6 +77,44 @@ async fn status(State(state): State<ServiceState>, headers: HeaderMap) -> ApiRes
     let public_login = runtime.public_login_status().await;
     Ok(Json(json!({"core": core,"public_login": public_login,
         "work_generation": crate::stage::reset::generation(&runtime.host).map_err(failure)?})))
+}
+async fn fork_status(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    let runtime = runtime(&state)?;
+    let controller = runtime
+        .core
+        .read()
+        .clone()
+        .ok_or_else(ApiError::unavailable)?;
+    Ok(Json(
+        controller.recovery_fork_status().await.map_err(failure)?,
+    ))
+}
+async fn fork_recovery(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(request): Json<crate::stage::recovery::ForkRequest>,
+) -> ApiResult<Json<Value>> {
+    manage(&state, &headers).await?;
+    let runtime = runtime(&state)?;
+    let controller = runtime
+        .core
+        .read()
+        .clone()
+        .ok_or_else(ApiError::unavailable)?;
+    let receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        controller.fork_recovery(request),
+    )
+    .await
+    .map_err(|_| ApiError::unavailable())?
+    .map_err(failure)?;
+    Ok(Json(
+        serde_json::to_value(receipt).map_err(|_| ApiError::internal())?,
+    ))
 }
 async fn settings(
     State(state): State<ServiceState>,

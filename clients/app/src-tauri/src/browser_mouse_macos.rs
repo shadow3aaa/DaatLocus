@@ -56,3 +56,55 @@ impl Drop for Buttons {
         BUTTONS.with(|buttons| buttons.set(self.previous));
     }
 }
+
+// NSTextInputContext may enqueue a pointer event after the caller has already
+// queued a wheel. Hover never edits text: suppress IME mediation for this exact
+// page and synchronous dispatch only. Owner/keyboard events retain their context.
+type InputContext =
+    unsafe extern "C-unwind" fn(&objc2::runtime::AnyObject, Sel) -> *mut objc2::runtime::AnyObject;
+static INPUT_CONTEXT: OnceLock<InputContext> = OnceLock::new();
+thread_local! {static POINTER_TARGET: Cell<usize> = const { Cell::new(0) };}
+unsafe extern "C-unwind" fn pointer_context(
+    view: &objc2::runtime::AnyObject,
+    selector: Sel,
+) -> *mut objc2::runtime::AnyObject {
+    if POINTER_TARGET.with(|target| target.get()) == std::ptr::from_ref(view) as usize {
+        std::ptr::null_mut()
+    } else {
+        unsafe { INPUT_CONTEXT.get().unwrap()(view, selector) }
+    }
+}
+pub(crate) struct PointerContext {
+    method: &'static Method,
+    original: Imp,
+    previous: usize,
+}
+impl PointerContext {
+    pub(crate) fn new(view: &objc2_web_kit::WKWebView) -> Result<Self, String> {
+        MainThreadMarker::new().ok_or("Browser pointer input requires the native main thread")?;
+        let method = objc2_web_kit::WKWebView::class()
+            .instance_method(sel!(inputContext))
+            .ok_or("Native pointer input context unavailable")?;
+        INPUT_CONTEXT.get_or_init(|| unsafe {
+            std::mem::transmute::<Imp, InputContext>(method.implementation())
+        });
+        let previous =
+            POINTER_TARGET.with(|target| target.replace(std::ptr::from_ref(view) as usize));
+        let original = unsafe {
+            method.set_implementation(std::mem::transmute::<InputContext, Imp>(pointer_context))
+        };
+        Ok(Self {
+            method,
+            original,
+            previous,
+        })
+    }
+}
+impl Drop for PointerContext {
+    fn drop(&mut self) {
+        unsafe {
+            self.method.set_implementation(self.original);
+        }
+        POINTER_TARGET.with(|target| target.set(self.previous));
+    }
+}

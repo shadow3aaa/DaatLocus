@@ -2,7 +2,7 @@ import { resourceSource } from "@/lib/transport";
 import { t } from "@/lib/i18n";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { isAndroid } from "@/lib/mobile";
-import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, PlusIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, ChevronDownIcon, FileIcon, FolderIcon, PaperclipIcon, PlusIcon, SquareIcon, XIcon } from "lucide-react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
@@ -12,8 +12,9 @@ import { cn } from "@/lib/utils";
 export type ComposerModel = { name: string; label: string; effort?: string; isDefault?: boolean };
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 
-export function Composer({ value, onValueChange, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
+export function Composer({ value, onValueChange, onSubmit, onStop, working = false, stopping = false, attachments, onFiles, onRemoveAttachment, uploading, busy, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
+  onStop?(): void; working?: boolean; stopping?: boolean;
   onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean;
   disabled?: boolean; submissionDisabled?: boolean; canManage: boolean;
   models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean;
@@ -76,6 +77,7 @@ export function Composer({ value, onValueChange, onSubmit, attachments, onFiles,
             {models.map(model => <DropdownMenuRadioItem value={model.name} key={model.name}><span className="dl-menu-choice"><span>{model.label}</span>{(model.effort || model.name !== model.label) && <small>{effortLabel(model.effort) || model.name}</small>}</span></DropdownMenuRadioItem>)}
           </DropdownMenuRadioGroup></DropdownMenuContent>
         </DropdownMenu>}
+        {working && onStop && <InputGroupButton size="icon-sm" className="dl-stop-button" aria-label={t("composer.stop_task")} disabled={disabled || stopping} onClick={onStop}>{stopping ? <Spinner /> : <SquareIcon />}</InputGroupButton>}
         <InputGroupButton size="icon-sm" variant="default" className="dl-send-button" aria-label={t("composer.send_message")} disabled={!canSend} onClick={onSubmit}>{busy ? <Spinner /> : <ArrowUpIcon />}</InputGroupButton>
       </InputGroupAddon>
     </InputGroup>

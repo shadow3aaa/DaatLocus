@@ -16,6 +16,110 @@ impl Drop for Service {
 }
 
 #[tokio::test]
+async fn unsupported_profiles_are_untouched_and_a_new_named_profile_stays_independent() {
+    let temp = tempfile::tempdir().unwrap();
+    for (index, marker) in ["runtime/sessions.json", "config/config.toml"]
+        .into_iter()
+        .enumerate()
+    {
+        let root = temp.path().join(format!("old-{index}"));
+        let path = root.join(marker);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let previous = if marker.ends_with(".json") {
+            br#"{"sessions":{}}"#.as_slice()
+        } else {
+            b"main_model='old'\nefficient_model='old'\n"
+        };
+        std::fs::write(&path, previous).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let backup = root.join("config/config.toml.bak");
+        std::fs::write(&backup, b"keep the original backup").unwrap();
+        let invoke = |profile: Option<&str>| {
+            let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_daat-locus"));
+            command
+                .arg("start")
+                .env("DAAT_LOCUS_HOME", &root)
+                .env_remove("DAAT_LOCUS_PROFILE_NAME")
+                .stdin(Stdio::null())
+                .kill_on_drop(true);
+            if let Some(name) = profile {
+                command.args(["--profile", name]);
+            }
+            command
+        };
+        let rejected = tokio::time::timeout(Duration::from_secs(10), invoke(None).output())
+            .await
+            .expect("Unsupported profiles must be rejected before spawning a service")
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"keep the original backup");
+        assert!(!root.join("actors").exists());
+        assert!(!root.join("runtime/daemon.lock").exists());
+        // An explicit new profile must not inspect or rewrite its namespace's
+        // old data. Use foreground serve with a private workspace/listen port.
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_daat-locus"));
+        command
+            .args([
+                "serve",
+                "--profile",
+                "fresh",
+                "--listen",
+                "127.0.0.1:0",
+                "--workspace",
+            ])
+            .arg(temp.path().join(format!("workspace-{index}")))
+            .env("DAAT_LOCUS_HOME", &root)
+            .env_remove("DAAT_LOCUS_PROFILE_NAME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let profile = root.join("profiles/fresh");
+        let status = tokio::time::timeout(Duration::from_secs(20), control::wait_ready(&profile))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.pid, child.id().unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"keep the original backup");
+        control::stop(&profile).await.unwrap();
+        assert!(child.wait().await.unwrap().success());
+    }
+}
+
+#[tokio::test]
+async fn startup_preserves_a_live_legacy_profile_lock_before_opening_actor_storage() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    std::fs::create_dir_all(root.join("runtime")).unwrap();
+    // The released Session runtime writes this PID marker without an OS lock.
+    let lock = root.join("runtime/daemon.lock");
+    let previous = serde_json::to_vec(&serde_json::json!({
+        "pid":std::process::id(), "started_at_ms":1
+    }))
+    .unwrap();
+    std::fs::write(&lock, &previous).unwrap();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_daat-locus"));
+    command
+        .args(["serve", "--listen", "127.0.0.1:0", "--workspace"])
+        .arg(temp.path().join("workspace"))
+        .env("DAAT_LOCUS_HOME", &root)
+        .env_remove("DAAT_LOCUS_PROFILE_NAME")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .expect("A legacy lock must be rejected before service startup")
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(lock).unwrap(), previous);
+    assert!(!root.join("actors/actors.sqlite3").exists());
+    assert!(!root.join("config/config.toml").exists());
+}
+
+#[tokio::test]
 async fn replacing_a_running_executable_preserves_control_and_rejects_a_stale_process_generation() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("profile");

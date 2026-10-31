@@ -9,6 +9,7 @@ import * as api from "@/lib/stage-api";
 import { PublicLoginStatusView } from "./public-login-status";
 import { DeviceList } from "./device-list";
 import { ResetWork } from "./reset-work";
+import { RecoveryFork } from "./recovery-fork";
 export function AccountEditor({ onChanged }: {onChanged: () => void}) {
   const [info,setInfo]=useState<api.StageInfo|null>(null);const [devices,setDevices]=useState<api.Device[]>([]);
   const [publication,setPublication]=useState<api.PublicLoginStatus|null>(null);
@@ -94,6 +95,7 @@ export function AccountEditor({ onChanged }: {onChanged: () => void}) {
       {settings.mode==="relay"&&<SettingsRow label={t("account_editor.public_login_status")}><PublicLoginStatusView status={publicationError ? null : publication} /></SettingsRow>}
       <StatusNote text={validation} error/>
     </SettingsGroup></SettingsSection>}
+    {info?.account_id && settings?.mode === "relay" && <RecoveryFork />}
     {info?.account_id && <ResetWork />}
   </div>;
 }

@@ -29,16 +29,29 @@ impl Fixture {
         let stop = Arc::new(AtomicBool::new(false));
         let quitting = stop.clone();
         let worker = thread::spawn(move || {
+            let collector = Arc::new(collector);
+            let mut connections = Vec::new();
             while !quitting.load(Ordering::Relaxed) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request);
+                // WebKit opens speculative connections without immediately
+                // sending a request. They must not block another page's HTML.
+                let collector = collector.clone();
+                connections.push(thread::spawn(move || {
+                // BSD accept inherits O_NONBLOCK from the listener. A missing
+                // first packet is not a request for the default fixture page.
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                while request.len() < 4096 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut buffer = [0u8; 1024];
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => return,
+                        Ok(count) => request.extend_from_slice(&buffer[..count]),
+                    }
+                }
                 let request = String::from_utf8_lossy(&request);
                 if request.starts_with("GET /shell.css ") {
                     let body = include_str!("../../../../webui/src/index.css");
@@ -48,17 +61,17 @@ impl Fixture {
                     );
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.write_all(body.as_bytes());
-                    continue;
+                    return;
                 }
                 if request.starts_with("GET /collector.js ") {
-                    let body = collector.as_ref().expect("Collector fixture unavailable");
+                    let body = collector.as_ref().as_ref().expect("Collector fixture unavailable");
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(header.as_bytes());
                     let _ = stream.write_all(body);
-                    continue;
+                    return;
                 }
                 let body = if request.starts_with("GET /shell ") {
                     r#"<!doctype html><html data-native-browser><meta charset="utf-8"><link rel="stylesheet" href="/shell.css"><style>html,body{margin:0;background:transparent}header{height:100px;box-sizing:border-box}button{position:fixed;left:100px;top:200px;width:200px;height:200px;border:0;background:rgba(255,0,0,.5);box-shadow:0 0 20px #0008}.dl-browser-progress{position:fixed;left:0;right:0;top:138px}</style><header class="dl-browser-tabs">Shell</header><div class="dl-browser-progress"></div><div id="viewport" style="position:fixed;left:80px;top:140px;right:0;bottom:0"><div style="position:absolute;left:350px;top:60px;width:100px;height:100px;background:rgba(0,0,255,.5)" onclick="window.tips=(window.tips||0)+1"></div></div><script type="module">import {browserForeground} from "/collector.js";window.DLComposition={browserForeground};</script><button onclick="window.clicks=(window.clicks||0)+1">Overlay</button>"#
@@ -102,6 +115,10 @@ canvas.addEventListener('wheel',event=>{
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
+                }));
+            }
+            for connection in connections {
+                let _ = connection.join();
             }
         });
         Self {
@@ -116,6 +133,30 @@ impl Drop for Fixture {
         self.stop.store(true, Ordering::Relaxed);
         self.worker.take().unwrap().join().unwrap();
     }
+}
+
+#[test]
+fn fixture_handles_idle_preconnections_and_split_request_headers() {
+    let fixture = Fixture::start(None);
+    let address = fixture
+        .address
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let idle = std::net::TcpStream::connect(address).unwrap();
+    let mut request = std::net::TcpStream::connect(address).unwrap();
+    request
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    request.write_all(b"GET /back").unwrap();
+    thread::sleep(Duration::from_millis(15));
+    request
+        .write_all(b"ground HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    request.read_to_string(&mut response).unwrap();
+    assert!(response.contains("<title>Background fixture</title>"));
+    assert!(response.contains("<canvas>"));
+    drop(idle);
 }
 
 #[cfg(windows)]
@@ -351,6 +392,7 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
             {"action":"observe","tab":b},
             input(&b,json!({"kind":"scroll","x":0.75,"y":0.5,"delta_x":0,"delta_y":80})),
             input(&b,json!({"kind":"scroll","x":0.75,"y":0.5,"delta_x":40,"delta_y":0})),
+            input(&b,json!({"kind":"scroll","x":0.75,"y":0.5,"delta_x":-20,"delta_y":-40})),
             input(&b,json!({"kind":"scroll","x":0.1,"y":0.65,"delta_x":0,"delta_y":120})),
             {"action":"close","tab":b}
         ]
@@ -370,7 +412,7 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_daat-locus-app"))
         .arg("--web-probe")
-        .arg(path)
+        .arg(&path)
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(100);
@@ -386,8 +428,14 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
         thread::sleep(Duration::from_millis(20));
     };
     assert!(status.success(), "{:?}", std::fs::read_to_string(&output));
+    if let Some(evidence) = std::env::var_os("DAAT_LOCUS_NATIVE_TEST_EVIDENCE") {
+        let evidence = std::path::PathBuf::from(evidence);
+        std::fs::create_dir_all(&evidence).unwrap();
+        std::fs::copy(&path, evidence.join("manifest.json")).unwrap();
+        std::fs::copy(&output, evidence.join("result.json")).unwrap();
+    }
     let steps: Vec<Value> = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
-    assert_eq!(steps.len(), 13);
+    assert_eq!(steps.len(), 14);
     for (index, step) in steps.iter().enumerate() {
         assert!(
             step["reply"]["error"].is_null(),
@@ -439,8 +487,10 @@ fn background_tabs_do_not_change_owner_selection_or_keyboard_focus() {
         steps[10]["tab_states"][&b]["native_control"]["trusted"],
         true
     );
+    assert_eq!(steps[11]["tab_states"][&b]["native_control"]["x"], 20);
+    assert_eq!(steps[11]["tab_states"][&b]["native_control"]["y"], 40);
     assert!(
-        steps[11]["tab_states"][&b]["scrollY"].as_f64().unwrap() > 0.0,
+        steps[12]["tab_states"][&b]["scrollY"].as_f64().unwrap() > 0.0,
         "native document scrolling must still work outside the canvas"
     );
     let bytes = base64::engine::general_purpose::STANDARD
