@@ -135,11 +135,6 @@ pub(super) fn tool_to_responses_tool(tool: AgentToolSpec) -> Value {
 
 #[cfg(test)]
 pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::Response {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .unwrap();
-    let address = listener.local_addr().unwrap();
     let mut body = events
         .iter()
         .map(|event| format!("data: {event}\n\n"))
@@ -147,6 +142,17 @@ pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::
     if done {
         body.push_str("data: [DONE]\n\n");
     }
+    test_stream_response(body, "text/event-stream").await
+}
+
+#[cfg(test)]
+pub(super) async fn test_stream_response(body: String, content_type: &str) -> reqwest::Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let content_type = content_type.to_owned();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
@@ -157,7 +163,7 @@ pub(super) async fn test_sse_response(events: &[Value], done: bool) -> reqwest::
             assert!(request.len() <= 4096, "test request header limit exceeded");
         }
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nX-Request-Id: stream-fixture\r\nSet-Cookie: private-session=do-not-log\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();

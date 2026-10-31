@@ -54,6 +54,7 @@ mod responses_protocol;
 mod compatibility;
 #[cfg(test)]
 mod compatibility_tests;
+mod stream_diagnostics;
 mod transport;
 use transport::{Authentication, BackendHttp};
 mod failure;

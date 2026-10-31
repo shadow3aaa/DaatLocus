@@ -252,6 +252,29 @@ pub struct AgentTurnStreamResult {
 }
 
 impl AgentTurnStreamResult {
+    /// A transport success without model output is a retryable inference failure.
+    /// Tool effects have not been dispatched at this boundary.
+    pub(crate) fn ensure_model_output(&self) -> miette::Result<()> {
+        let nonempty = |text: &Option<String>| text.as_ref().is_some_and(|s| !s.trim().is_empty());
+        if self.items.iter().any(|item| match item {
+            AgentTurnItem::AssistantMessage { content } => !content.trim().is_empty(),
+            AgentTurnItem::ToolCall { .. } => true,
+        }) || nonempty(&self.last_assistant_message)
+            || nonempty(&self.last_reasoning_content)
+            || (self.raw_stream_follow_up
+                && self
+                    .responses_output
+                    .as_ref()
+                    .is_some_and(|items| !items.is_empty()))
+        {
+            return Ok(());
+        }
+        Err(crate::providers::ModelRequestFailure::report(
+            crate::providers::ModelFailureKind::Failed,
+            "Model response contained no assistant text, reasoning or tool calls".into(),
+        ))
+    }
+
     pub fn protocol(self) -> AgentTurnResponse {
         let mut assistant_messages = Vec::new();
         let mut tool_calls = Vec::new();

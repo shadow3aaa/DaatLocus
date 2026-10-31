@@ -220,10 +220,30 @@ impl AnthropicCompatibleClient {
 
     async fn parse_messages_stream(
         &self,
-        progress: Option<&ModelProgressSink>,
+        options: &ModelRequestOptions,
         response: reqwest::Response,
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
+        let mut diagnostics = super::stream_diagnostics::StreamDiagnostics::new(
+            &response,
+            "anthropic-messages",
+            &self.model,
+            options.conversation_id.as_deref(),
+        );
+        let result = self
+            .parse_messages_stream_body(options, response, emit_progress, &mut diagnostics)
+            .await;
+        diagnostics.finish(result)
+    }
+
+    async fn parse_messages_stream_body(
+        &self,
+        options: &ModelRequestOptions,
+        response: reqwest::Response,
+        emit_progress: bool,
+        diagnostics: &mut super::stream_diagnostics::StreamDiagnostics,
+    ) -> Result<AgentTurnStreamResult> {
+        let progress = options.progress.as_ref();
         let url = self.url();
         let mut buffer = super::io::SseBuffer::default();
         let mut state = AnthropicStreamState::default();
@@ -233,7 +253,7 @@ impl AnthropicCompatibleClient {
             "phase=message_stream".to_string(),
         ];
 
-        while !state.completed {
+        'receive: while !state.completed {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
@@ -258,6 +278,7 @@ impl AnthropicCompatibleClient {
                     &err,
                 )
             })?;
+            diagnostics.received(chunk.len());
             buffer.extend_from_slice(&chunk);
             buffer.normalize();
 
@@ -267,14 +288,17 @@ impl AnthropicCompatibleClient {
                     continue;
                 }
                 if data == "[DONE]" {
-                    state.completed = true;
-                    break;
+                    diagnostics.done_marker();
+                    break 'receive;
                 }
                 let Ok(value) = serde_json::from_str::<Value>(&data) else {
-                    // Anthropic sends an `event:` line alongside `data:`; keep
-                    // tolerating any non-JSON keepalive payloads.
-                    continue;
+                    diagnostics.invalid_json();
+                    return Err(super::ModelRequestFailure::report(
+                        super::ModelFailureKind::Failed,
+                        "Anthropic stream contained an invalid JSON event".into(),
+                    ));
                 };
+                diagnostics.event(&value);
                 state.apply_event(&value)?;
                 if emit_progress {
                     state.emit_progress(progress, false);
@@ -282,14 +306,16 @@ impl AnthropicCompatibleClient {
             }
         }
 
+        // Retain usage actually reported by the provider even if its stream
+        // closes early. Only complete output can advance inference or tools.
+        if let Some(usage) = state.token_usage() {
+            self.record_last_usage(usage);
+        }
+        state.validate_completed()?;
         if emit_progress {
             state.emit_progress(progress, true);
         }
 
-        let usage = state.token_usage();
-        if let Some(usage) = usage {
-            self.record_last_usage(usage);
-        }
         Ok(state.into_stream_result())
     }
 }
@@ -375,7 +401,7 @@ impl ModelProvider for AnthropicCompatibleClient {
             ));
         };
         let result = self
-            .parse_messages_stream(options.progress.as_ref(), response, false)
+            .parse_messages_stream(&options, response, false)
             .await?;
         if let Some(call) = result.items.iter().find_map(|item| match item {
             AgentTurnItem::ToolCall { call } if call.name == tool_name => Some(call.clone()),
@@ -423,9 +449,7 @@ impl ModelProvider for AnthropicCompatibleClient {
             let status = response.status();
             if status.is_success() {
                 negotiation.succeeded();
-                return self
-                    .parse_messages_stream(options.progress.as_ref(), response, true)
-                    .await;
+                return self.parse_messages_stream(&options, response, true).await;
             }
             let url = self.url();
             let body = read_response_text_with_timeout(
@@ -1280,6 +1304,20 @@ impl AnthropicStreamState {
                         .unwrap_or("")
                         .to_string();
                     entry.input_start = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    entry.text = block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .into();
+                    entry.thinking = block
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .into();
+                    self.pending_assistant.push_str(&entry.text);
+                    self.assistant_char_len += entry.text.chars().count();
+                    self.pending_reasoning.push_str(&entry.thinking);
+                    self.reasoning_char_len += entry.thinking.chars().count();
                     if let Some(signature) = block.get("signature").and_then(Value::as_str) {
                         entry.signature.push_str(signature);
                     }
@@ -1355,6 +1393,38 @@ impl AnthropicStreamState {
             .map(|block| block.text.as_str())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    fn validate_completed(&self) -> Result<()> {
+        let failure = |detail: &str| {
+            super::ModelRequestFailure::report(super::ModelFailureKind::Failed, detail.into())
+        };
+        if !self.completed {
+            return Err(failure(
+                "Anthropic stream closed before message_stop; partial output was not accepted",
+            ));
+        }
+        for block in self
+            .blocks
+            .values()
+            .filter(|block| block.kind == "tool_use")
+        {
+            if block.tool_id.is_empty() || block.tool_name.is_empty() {
+                return Err(failure("Anthropic stream returned an incomplete tool call"));
+            }
+            let valid_arguments = if block.partial_json.trim().is_empty() {
+                block.input_start.is_object()
+            } else {
+                serde_json::from_str::<Value>(&block.partial_json)
+                    .is_ok_and(|value| value.is_object())
+            };
+            if !valid_arguments {
+                return Err(failure(
+                    "Anthropic stream returned invalid tool arguments; the call was not accepted",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn reasoning_text(&self) -> String {
@@ -1644,6 +1714,173 @@ mod tests {
         let request = compatibility_review_request();
         let options = ModelRequestOptions::for_prompt(client, &request, None).unwrap();
         client.complete_json(request, options).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_failures_are_retryable_and_preserve_safe_response_diagnostics() {
+        use super::super::responses_protocol::{test_sse_response, test_stream_response};
+        let client = test_client("claude-opus-5-5");
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user("Work")],
+            tools: vec![],
+        };
+        let options =
+            ModelRequestOptions::for_agent_turn(&client, &request, Some("fixture-actor".into()))
+                .unwrap();
+        let start = json!({"type":"message_start","message":{"id":"msg_empty","usage":{"input_tokens":663}}});
+        let stop = json!({"type":"message_stop"});
+        let delta = json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}});
+        let cases = [
+            (vec![], false, "before message_stop"),
+            (vec![], true, "before message_stop"),
+            (
+                vec![start.clone(), delta, stop.clone()],
+                false,
+                "no assistant text",
+            ),
+            (
+                vec![
+                    start.clone(),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"partial"}}),
+                ],
+                false,
+                "before message_stop",
+            ),
+            (
+                vec![
+                    start.clone(),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"write","input":{"path":"never.txt"}}}),
+                ],
+                false,
+                "before message_stop",
+            ),
+            (
+                vec![
+                    start.clone(),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"write"}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+                    stop,
+                ],
+                false,
+                "invalid tool arguments",
+            ),
+        ];
+        for (events, done, expected) in cases {
+            let client = test_client("claude-opus-5-5");
+            let response = test_sse_response(&events, done).await;
+            let error = client
+                .parse_messages_stream(&options, response, false)
+                .await
+                .err()
+                .unwrap();
+            let detail = error.to_string();
+            assert!(detail.contains(expected), "{detail}");
+            assert!(crate::core::should_retry_agent_turn_error(&error));
+            assert!(
+                error
+                    .downcast_ref::<super::super::ModelRequestFailure>()
+                    .is_some()
+            );
+            let diagnostics: Value =
+                serde_json::from_str(detail.split("Model stream diagnostics: ").nth(1).unwrap())
+                    .unwrap();
+            assert_eq!(diagnostics["actor"], "fixture-actor");
+            assert_eq!(diagnostics["http_status"], 200);
+            assert_eq!(diagnostics["request_id"], "stream-fixture");
+            assert_eq!(diagnostics["outcome"], "error");
+            if !events.is_empty() {
+                assert_eq!(client.token_usage_info().last_token_usage.input_tokens, 663);
+            }
+            if expected == "no assistant text" {
+                assert_eq!(diagnostics["terminal_event"], "message_stop");
+                assert_eq!(diagnostics["stop_reason"], "end_turn");
+                assert_eq!(diagnostics["upstream_id"], "msg_empty");
+                assert_eq!(diagnostics["events"], 3);
+                assert_eq!(diagnostics["input_tokens"], 663);
+                assert_eq!(diagnostics["output_tokens"], 0);
+            }
+            assert!(!detail.contains("private-session") && !detail.contains("do-not-log"));
+        }
+        for (body, media_type, expected) in [
+            (
+                "{\"error\":\"private-body\"}",
+                "application/json",
+                "before message_stop",
+            ),
+            (
+                "data: private-body\n\n",
+                "text/event-stream",
+                "invalid JSON event",
+            ),
+        ] {
+            let response = test_stream_response(body.into(), media_type).await;
+            let error = client
+                .parse_messages_stream(&options, response, false)
+                .await
+                .err()
+                .unwrap();
+            let detail = error.to_string();
+            assert!(detail.contains(expected), "{detail}");
+            assert!(detail.contains(media_type));
+            assert!(!detail.contains("private-body"));
+            assert!(crate::core::should_retry_agent_turn_error(&error));
+            let diagnostics: Value =
+                serde_json::from_str(detail.split("Model stream diagnostics: ").nth(1).unwrap())
+                    .unwrap();
+            assert_eq!(diagnostics["received_bytes"], body.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_stream_preserves_initial_block_text_and_reasoning() {
+        let client = test_client("claude-opus-5-5");
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user("Work")],
+            tools: vec![],
+        };
+        let options = ModelRequestOptions::for_agent_turn(&client, &request, None).unwrap();
+        for (kind, field, text) in [
+            ("text", "text", "完整回答"),
+            ("thinking", "thinking", "consider the task"),
+        ] {
+            let mut block = json!({"type":kind});
+            block[field] = json!(text);
+            let response = super::super::responses_protocol::test_sse_response(
+                &[
+                    json!({"type":"message_start","message":{"id":"msg_valid"}}),
+                    json!({"type":"content_block_start","index":0,"content_block":block}),
+                    json!({"type":"message_stop"}),
+                ],
+                false,
+            )
+            .await;
+            let result = client
+                .parse_messages_stream(&options, response, false)
+                .await
+                .unwrap();
+            let actual = if kind == "text" {
+                result.last_assistant_message
+            } else {
+                result.last_reasoning_content
+            };
+            assert_eq!(actual.as_deref(), Some(text));
+        }
+        // Some compatible gateways label a valid SSE body as plain text.
+        // Validate actual protocol completion rather than rejecting its MIME label.
+        let response = super::super::responses_protocol::test_stream_response(
+            [json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"gateway reply"}}), json!({"type":"message_stop"})]
+                .iter().map(|event| format!("data: {event}\n\n")).collect(),
+            "text/plain; charset=utf-8",
+        ).await;
+        assert_eq!(
+            client
+                .parse_messages_stream(&options, response, false)
+                .await
+                .unwrap()
+                .last_assistant_message
+                .as_deref(),
+            Some("gateway reply")
+        );
     }
 
     #[tokio::test]

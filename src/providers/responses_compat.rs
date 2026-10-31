@@ -138,6 +138,26 @@ impl ResponsesCompatibleClient {
         progress: Option<&ModelProgressSink>,
         response: reqwest::Response,
         emit_progress: bool,
+        actor: Option<&str>,
+    ) -> Result<AgentTurnStreamResult> {
+        let mut diagnostics = super::stream_diagnostics::StreamDiagnostics::new(
+            &response,
+            "responses",
+            &self.model,
+            actor,
+        );
+        let result = self
+            .parse_responses_stream_body(progress, response, emit_progress, &mut diagnostics)
+            .await;
+        diagnostics.finish(result)
+    }
+
+    async fn parse_responses_stream_body(
+        &self,
+        progress: Option<&ModelProgressSink>,
+        response: reqwest::Response,
+        emit_progress: bool,
+        diagnostics: &mut super::stream_diagnostics::StreamDiagnostics,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
         let mut buffer = super::io::SseBuffer::default();
@@ -188,6 +208,7 @@ impl ResponsesCompatibleClient {
                     &err,
                 )
             })?;
+            diagnostics.received(chunk.len());
             buffer.extend_from_slice(&chunk);
             buffer.normalize();
 
@@ -202,14 +223,20 @@ impl ResponsesCompatibleClient {
                     continue;
                 }
                 if data == "[DONE]" {
+                    diagnostics.done_marker();
+                    if !completed {
+                        return Err(miette!("Responses stream closed before response.completed"));
+                    }
                     break;
                 }
                 let value: Value = serde_json::from_str(&data).map_err(|err| {
+                    diagnostics.invalid_json();
                     miette!(
                         "responses-compatible stream event is not valid JSON: {err}; data={}",
                         truncate_for_error(&data)
                     )
                 })?;
+                diagnostics.event(&value);
                 match responses_event_kind(&value) {
                     Some("response.output_text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
@@ -438,7 +465,12 @@ impl ModelProvider for ResponsesCompatibleClient {
             ));
         }
         let result = self
-            .parse_responses_stream(options.progress.as_ref(), response, false)
+            .parse_responses_stream(
+                options.progress.as_ref(),
+                response,
+                false,
+                options.conversation_id.as_deref(),
+            )
             .await?;
         let content = result.last_assistant_message.as_deref().unwrap_or_default();
         if let Some(value) = extract_json_value_from_content(content) {
@@ -480,7 +512,12 @@ impl ModelProvider for ResponsesCompatibleClient {
             if status.is_success() {
                 negotiation.succeeded();
                 return self
-                    .parse_responses_stream(options.progress.as_ref(), response, true)
+                    .parse_responses_stream(
+                        options.progress.as_ref(),
+                        response,
+                        true,
+                        options.conversation_id.as_deref(),
+                    )
                     .await;
             }
             let url = self.url();
@@ -1090,7 +1127,7 @@ mod tests {
         )
         .await;
         let result = client
-            .parse_responses_stream(None, response, false)
+            .parse_responses_stream(None, response, false, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1116,6 +1153,22 @@ mod tests {
             1
         );
 
+        let response = super::super::responses_protocol::test_sse_response(&[
+            json!({"type":"response.completed","response":{"id":"resp_empty","status":"completed","output":[],"usage":{"output_tokens":0}}}),
+        ], false).await;
+        let error = client
+            .parse_responses_stream(None, response, false, Some("fixture-actor"))
+            .await
+            .err()
+            .unwrap();
+        assert!(crate::core::should_retry_agent_turn_error(&error));
+        let detail = error.to_string();
+        assert!(
+            detail.contains("no assistant text")
+                && detail.contains("stream-fixture")
+                && detail.contains("resp_empty")
+        );
+
         for done in [false, true] {
             let response = super::super::responses_protocol::test_sse_response(
                 &[json!({"type": "response.output_text.delta", "delta": "partial"})],
@@ -1123,7 +1176,7 @@ mod tests {
             )
             .await;
             let error = client
-                .parse_responses_stream(None, response, false)
+                .parse_responses_stream(None, response, false, None)
                 .await
                 .err()
                 .unwrap();
@@ -1135,7 +1188,7 @@ mod tests {
         )
         .await;
         let error = client
-            .parse_responses_stream(None, response, false)
+            .parse_responses_stream(None, response, false, None)
             .await
             .err()
             .unwrap();

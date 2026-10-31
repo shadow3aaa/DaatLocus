@@ -856,6 +856,89 @@ async fn partial_answers_and_reasoning_continue_until_a_final_response() {
 }
 
 #[tokio::test]
+async fn empty_model_responses_retry_inference_without_replaying_completed_tool_effects() {
+    let provider = Arc::new(ReplayProvider::new(vec![
+        MockReply::Calls(vec![AgentToolCall {
+            id: "one-effect".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":"once.txt","content":"ONE_EFFECT","expected_sha256":null}),
+        }]),
+        MockReply::Answer(""),
+        MockReply::Answer("Completed after retry"),
+    ]));
+    let (_directory, system) = runtime(provider.clone()).await;
+    let request = system
+        .send_user("root", "Complete the task".into(), vec![], None)
+        .unwrap();
+    let done = wait_completed(&system, &request.id).await;
+    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
+    assert_eq!(done.reply.as_deref(), Some("Completed after retry"));
+    assert_eq!(
+        std::fs::read_to_string(
+            system
+                .actor("root")
+                .unwrap()
+                .config
+                .workspace
+                .join("once.txt")
+        )
+        .unwrap(),
+        "ONE_EFFECT"
+    );
+    assert_eq!(
+        system
+            .store()
+            .tool_summaries("root", &request.id, None, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let requests = provider.requests.lock().clone();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&requests[1]).unwrap(),
+        serde_json::to_value(&requests[2]).unwrap()
+    );
+    let dump = std::fs::read_to_string(
+        system
+            .actor_state_dir("root")
+            .join("diagnostics/last_response.txt"),
+    )
+    .unwrap();
+    assert!(dump.contains("status=ok") && dump.contains("attempt=2"));
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn empty_model_response_retry_exhaustion_is_a_model_failure_with_private_diagnostics() {
+    let provider = Arc::new(ReplayProvider::new(
+        (0..6).map(|_| MockReply::Answer("")).collect(),
+    ));
+    let (_directory, system) = runtime(provider.clone()).await;
+    let request = system
+        .send_user("root", "Complete the task".into(), vec![], None)
+        .unwrap();
+    let done = wait_completed(&system, &request.id).await;
+    assert_eq!(done.status, MessageStatus::Failed);
+    assert_eq!(done.error.as_deref(), Some("model_request_failed"));
+    assert_eq!(provider.requests.lock().len(), 6);
+    let dump = std::fs::read_to_string(
+        system
+            .actor_state_dir("root")
+            .join("diagnostics/last_response.txt"),
+    )
+    .unwrap();
+    assert!(
+        dump.contains("status=error")
+            && dump.contains("attempt=6")
+            && dump.contains("will_retry=false")
+    );
+    assert!(dump.contains("no assistant text"));
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_attempt() {
     let provider = Arc::new(ReplayProvider::new(vec![
         MockReply::ReasoningOnly,
@@ -5019,12 +5102,15 @@ async fn full_context_is_cleared_with_an_archive_recovery_prompt_and_persistent_
 
 #[tokio::test]
 async fn failed_or_invalid_handoff_never_resets_context_or_executes_tools() {
-    for reply in [
-        MockReply::Failure("invalid_request_error: handoff failed"),
-        MockReply::Answer(""),
-        MockReply::Calls(vec![call("must-not-execute")]),
+    for (replies, attempts) in [
+        (
+            vec![MockReply::Failure("invalid_request_error: handoff failed")],
+            1,
+        ),
+        ((0..6).map(|_| MockReply::Answer("")).collect(), 6),
+        (vec![MockReply::Calls(vec![call("must-not-execute")])], 1),
     ] {
-        let provider = Arc::new(ReplayProvider::new(vec![reply]));
+        let provider = Arc::new(ReplayProvider::new(replies));
         provider
             .auto_compact_threshold
             .store(40_000, Ordering::Relaxed);
@@ -5063,7 +5149,7 @@ async fn failed_or_invalid_handoff_never_resets_context_or_executes_tools() {
                 .items
                 .is_empty()
         );
-        assert_eq!(provider.requests.lock().len(), 1);
+        assert_eq!(provider.requests.lock().len(), attempts);
         system.shutdown().await;
     }
 }

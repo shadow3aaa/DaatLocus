@@ -1298,6 +1298,10 @@ async fn generate(
             handle_progress(system, actor, message, generation, &mut pending, progress)?;
         }
         pending.flush(system, actor, message, *generation)?;
+        let result = result.and_then(|response| {
+            response.ensure_model_output()?;
+            Ok(response)
+        });
         let usage = provider.token_usage_info();
         let delta = usage.total_token_usage.delta_from(&usage_before);
         system.store().record_model_usage(
