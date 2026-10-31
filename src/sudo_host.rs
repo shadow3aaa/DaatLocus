@@ -587,9 +587,6 @@ async fn handle(
             stdin,
         } => {
             let mut processes = processes.lock().await;
-            if processes.len() >= 256 {
-                return Err(miette!("Too many active elevated processes"));
-            }
             let process = next
                 .fetch_add(1, Ordering::Relaxed)
                 .checked_add(1)

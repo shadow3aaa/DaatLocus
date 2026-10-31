@@ -156,7 +156,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: RelaySocket) -> Result<()>
                     Some(Command::Connect(peer)) => {
                         if runtime.connected(peer) || tunnels.values().any(|t|t.peer==peer) || !super::connection::automatic_dialer(runtime.host.local,peer) { continue; }
                         if !online.contains(&peer) { runtime.peer_failed(peer,&StageError::Unavailable("Relay peer is offline"));continue; }
-                        if tunnels.len() >= 32 || runtime.begin_relay(peer).is_err() { continue; }
+                        if runtime.begin_relay(peer).is_err() { continue; }
                         let id = Uuid::new_v4();
                         let (mut entry, stream) = tunnel(id,peer,&tx,&mut jobs);
                         entry.pending = Some(stream); tunnels.insert(id,entry);
@@ -186,7 +186,7 @@ async fn connected(runtime: Arc<Runtime>, mut socket: RelaySocket) -> Result<()>
                     },
                     RelayEvent::Incoming {channel,source} => {
                         let member = super::ledger::StageLedger::attach(runtime.host.system.store(),runtime.host.local).peer(source,chrono::Utc::now().timestamp_millis());
-                        if source >= runtime.host.local || member.is_err() || tunnels.len() >= 32 || tunnels.contains_key(&channel) || tunnels.values().any(|entry|entry.peer==source) || runtime.connected(source) {
+                        if source >= runtime.host.local || member.is_err() || tunnels.contains_key(&channel) || tunnels.values().any(|entry|entry.peer==source) || runtime.connected(source) {
                             socket.control("close",channel,None).await?;continue;
                         }
                         let (entry,stream)=tunnel(channel,source,&tx,&mut jobs);

@@ -12,7 +12,6 @@ use std::{
 use tokio::sync::Notify;
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_RECORD: usize = 16 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialBundle {
@@ -149,18 +148,13 @@ impl AccountStore {
         &self.changed
     }
     pub fn current(&self) -> Result<Option<CredentialBundle>> {
-        let file = match std::fs::File::open(&self.path) {
+        let mut file = match std::fs::File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).into_diagnostic(),
         };
         let mut bytes = Zeroizing::new(Vec::new());
-        file.take(MAX_RECORD as u64 + 1)
-            .read_to_end(&mut bytes)
-            .into_diagnostic()?;
-        if bytes.len() > MAX_RECORD {
-            return Err(miette!("Account credential budget exceeded"));
-        }
+        file.read_to_end(&mut bytes).into_diagnostic()?;
         let record: CredentialBundle = serde_json::from_slice(&bytes).into_diagnostic()?;
         record.validate()?;
         Ok(Some(record))
@@ -191,9 +185,6 @@ impl AccountStore {
             }
         }
         let bytes = Zeroizing::new(serde_json::to_vec(&record).into_diagnostic()?);
-        if bytes.len() > MAX_RECORD {
-            return Err(miette!("Account credential budget exceeded"));
-        }
         write_bytes_atomic_sync(&self.path, &bytes, PersistenceFileMode::Private)
             .into_diagnostic()?;
         self.changed.notify_waiters();

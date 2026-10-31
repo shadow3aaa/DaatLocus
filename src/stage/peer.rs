@@ -1814,7 +1814,6 @@ impl PeerLink {
                 Ok(())
             }
             Body::Subscribe { actor, cursor, .. } => {
-                if self.publishing.len()>=8&&!self.publishing.values().any(|sub|matches!(&sub.request.body,Body::Subscribe{actor:existing,..}if existing==actor)){return Err(StageError::Capacity("Peer subscription limit reached"));}
                 self.publishing.retain(|_,sub|!matches!(&sub.request.body,Body::Subscribe{actor:existing,..}if existing==actor));
                 let response = receiver.handle_request(&self.channel.peer, &frame);
                 match response {

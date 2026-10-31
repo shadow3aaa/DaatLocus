@@ -19,7 +19,6 @@ use std::{
 };
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
-const MAX_BYTES: usize = 48 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -183,18 +182,13 @@ impl ConfigurationStore {
     }
     pub fn current(&self) -> Result<Option<Record>> {
         use std::io::Read;
-        let file = match std::fs::File::open(&self.path) {
+        let mut file = match std::fs::File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).into_diagnostic(),
         };
         let mut bytes = Zeroizing::new(vec![]);
-        file.take(MAX_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .into_diagnostic()?;
-        if bytes.len() > MAX_BYTES {
-            return Err(miette!("Account configuration budget exceeded"));
-        }
+        file.read_to_end(&mut bytes).into_diagnostic()?;
         Ok(Some(serde_json::from_slice(&bytes).map_err(|_| {
             miette!("Invalid private account configuration")
         })?))
@@ -241,9 +235,6 @@ impl ConfigurationStore {
             serde_json::to_vec(record)
                 .map_err(|_| miette!("Cannot encode private account configuration"))?,
         );
-        if bytes.len() > MAX_BYTES {
-            return Err(miette!("Account configuration budget exceeded"));
-        }
         crate::persistence::write_bytes_atomic_sync(
             &self.path,
             &bytes,

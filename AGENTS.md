@@ -430,6 +430,11 @@ schemas; do not silently repair them through provider-specific normalization.
 
 ## Data And Presentation
 
+- Persisted account data and active work have no arbitrary aggregate size/count quotas.
+  Long tool-output files live in profile-local temporary storage and expire 24 hours
+  after creation, including across restarts. Keep Actor-resource authorization,
+  safe cleanup, bounded reads, provider limits and transport backpressure.
+
 - Shared activity and tool observations describe source facts with the natural
   structure of each domain. They must not contain rendered rows, glyphs,
   truncation, preview text, layout, colors, or expanded/collapsed state.

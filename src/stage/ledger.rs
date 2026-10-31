@@ -432,7 +432,7 @@ impl<'a> StageLedger<'a> {
     ) -> Result<()> {
         content.validate()?;
         self.store.stage_transaction(|tx|{peer(tx,peer_id,now)?;tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_control_exports(peer TEXT NOT NULL,nonce TEXT NOT NULL,hash TEXT NOT NULL,size INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(peer,nonce));")?;
-            tx.execute("DELETE FROM stage_control_exports WHERE expires<?1",[now])?;let count:i64=tx.query_row("SELECT COUNT(*) FROM stage_control_exports",[],|r|r.get(0))?;if count>=128{return Err(StageError::Capacity("Control export budget reached"));}
+            tx.execute("DELETE FROM stage_control_exports WHERE expires<?1",[now])?;
             tx.execute("INSERT INTO stage_control_exports VALUES(?1,?2,?3,?4,?5)",params![peer_id.to_string(),export.to_string(),content.hash,content.size as i64,now+60000])?;Ok(())})
     }
     pub fn authorize_actor(&self, id: StageId, actor: &str, now: i64) -> Result<DeviceAuthority> {
