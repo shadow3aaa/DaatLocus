@@ -1,6 +1,6 @@
 [package]
 name = "daat-locus"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Infrastructure for a local actor-based agent system with Apps and a WebUI."
 license = "Apache-2.0"
