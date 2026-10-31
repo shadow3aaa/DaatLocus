@@ -1078,6 +1078,7 @@ impl Controller {
                     // finished this exact input. Acknowledge known immutable
                     // input above; never admit an unknown started execution.
                     if message.status != MessageStatus::Queued
+                        || message.input_batch.is_some()
                         || message.started_at_ms.is_some()
                         || message.finished_at_ms.is_some()
                         || message.cancel_requested
@@ -2461,160 +2462,167 @@ impl Controller {
     async fn repair_protocol(&self) -> Result<()> {
         let runtime = self.runtime()?;
         let system = &runtime.host.system;
-        let messages = system
-            .store()
-            .messages(shared::ACTOR_ID, None, 100)
-            .map_err(|_| StageError::Unavailable("Cannot read resumable inputs"))?;
-        for message in messages
-            .items
-            .into_iter()
-            .filter(|message| message.status == MessageStatus::Queued)
-        {
-            if let Some(answer) = shared_store::completed_answer(system.store(), &message.id)? {
-                system
-                    .store()
-                    .finish_message(&message.id, MessageStatus::Completed, Some(&answer), None)
-                    .map_err(|_| StageError::Unavailable("Cannot deliver committed answer"))?;
-                continue;
-            }
-            let mut recovered_images = Vec::new();
-            for call in shared_store::incomplete_calls(system.store(), &message.id)? {
-                if call.name == "actors__reply"
-                    && let Some(receipt) = system
-                        .store()
-                        .delivery_receipt(shared::ACTOR_ID, &message.id, &call.id)
-                        .map_err(|_| StageError::Unavailable("Cannot read delivery receipt"))?
-                {
-                    system.store().publish_delivery(&receipt.id).map_err(|_| {
-                        StageError::Unavailable("Cannot publish committed delivery")
-                    })?;
-                    let payload = serde_json::json!({"message_id":receipt.id,"finish_turn":call.arguments.get("finish_turn").and_then(serde_json::Value::as_bool).unwrap_or(false)});
+        let mut cursor = None;
+        loop {
+            let messages = system
+                .store()
+                .queued_messages(shared::ACTOR_ID, cursor, 100)
+                .map_err(|_| StageError::Unavailable("Cannot read resumable inputs"))?;
+            cursor = messages.next_cursor;
+            for message in messages
+                .items
+                .into_iter()
+                .filter(|message| message.status == MessageStatus::Queued)
+            {
+                if let Some(answer) = shared_store::completed_answer(system.store(), &message.id)? {
                     system
                         .store()
-                        .tool_finished(
-                            shared::ACTOR_ID,
-                            &message.id,
-                            &call,
-                            payload.clone(),
-                            &payload.to_string(),
-                            "Message delivered",
-                            None,
-                        )
-                        .map_err(|_| {
-                            StageError::Unavailable("Cannot recover delivery observation")
-                        })?;
+                        .finish_message(&message.id, MessageStatus::Completed, Some(&answer), None)
+                        .map_err(|_| StageError::Unavailable("Cannot deliver committed answer"))?;
                     continue;
                 }
-                let mut devices =
-                    super::ledger::StageLedger::attach(system.store(), runtime.host.local)
-                        .peers(chrono::Utc::now().timestamp_millis())?
-                        .into_iter()
-                        .map(|peer| peer.device.stage_id)
-                        .collect::<Vec<_>>();
-                devices.push(runtime.host.local);
-                let source = if call.name.starts_with("actors__")
-                    || call.name.starts_with("admin_actors__")
-                {
-                    call.arguments
-                        .get("stage_id")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value::<StageId>(value).ok())
-                        .filter(|id| devices.contains(id))
-                } else {
-                    devices.into_iter().find(|stage| {
-                        call.name
-                            .starts_with(&format!("d_{}_", &stage.0.simple().to_string()[..12]))
-                    })
-                };
-                if let Some(source) = source
-                    && let Ok(Response::ToolResult {
-                        result: Some(result),
-                        uncertain: false,
-                    }) = self
-                        .request(
-                            source,
-                            Request::ToolResult {
-                                message: message.id.clone(),
-                                call_id: call.id.clone(),
-                            },
-                        )
-                        .await
-                {
-                    let content = result
-                        .model_content
-                        .unwrap_or_else(|| result.payload.to_string());
-                    self.import_images(source, &result.model_images).await?;
-                    let actor = system.actor(shared::ACTOR_ID).map_err(|_| {
-                        StageError::Unavailable("Actor configuration is unavailable")
-                    })?;
-                    let config = system.config();
-                    let limit = config
-                        .models
-                        .get(actor.config.model.as_ref().unwrap_or(&config.main_model))
-                        .map_or(4096, |model| model.tool_output_max_tokens);
-                    let mut content = crate::resources::bound_output(
-                        system,
-                        shared::ACTOR_ID,
-                        &call.id,
-                        &content,
-                        limit,
-                        result.overflow_continuation,
-                    )?;
-                    if let Some(reference) = &result.permission_reference {
-                        reference.append_to(&mut content);
+                let mut recovered_images = Vec::new();
+                for call in shared_store::incomplete_calls(system.store(), &message.id)? {
+                    if call.name == "actors__reply"
+                        && let Some(receipt) = system
+                            .store()
+                            .delivery_receipt(shared::ACTOR_ID, &message.id, &call.id)
+                            .map_err(|_| StageError::Unavailable("Cannot read delivery receipt"))?
+                    {
+                        system.store().publish_delivery(&receipt.id).map_err(|_| {
+                            StageError::Unavailable("Cannot publish committed delivery")
+                        })?;
+                        let payload = serde_json::json!({"message_id":receipt.id,"finish_turn":call.arguments.get("finish_turn").and_then(serde_json::Value::as_bool).unwrap_or(false)});
+                        system
+                            .store()
+                            .tool_finished(
+                                shared::ACTOR_ID,
+                                &message.id,
+                                &call,
+                                payload.clone(),
+                                &payload.to_string(),
+                                "Message delivered",
+                                None,
+                            )
+                            .map_err(|_| {
+                                StageError::Unavailable("Cannot recover delivery observation")
+                            })?;
+                        continue;
                     }
-                    let images = crate::resources::capture_images(
-                        system,
-                        shared::ACTOR_ID,
-                        result.model_images,
-                    )?;
-                    system
-                        .store()
-                        .tool_finished(
+                    let mut devices =
+                        super::ledger::StageLedger::attach(system.store(), runtime.host.local)
+                            .peers(chrono::Utc::now().timestamp_millis())?
+                            .into_iter()
+                            .map(|peer| peer.device.stage_id)
+                            .collect::<Vec<_>>();
+                    devices.push(runtime.host.local);
+                    let source = if call.name.starts_with("actors__")
+                        || call.name.starts_with("admin_actors__")
+                    {
+                        call.arguments
+                            .get("stage_id")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<StageId>(value).ok())
+                            .filter(|id| devices.contains(id))
+                    } else {
+                        devices.into_iter().find(|stage| {
+                            call.name
+                                .starts_with(&format!("d_{}_", &stage.0.simple().to_string()[..12]))
+                        })
+                    };
+                    if let Some(source) = source
+                        && let Ok(Response::ToolResult {
+                            result: Some(result),
+                            uncertain: false,
+                        }) = self
+                            .request(
+                                source,
+                                Request::ToolResult {
+                                    message: message.id.clone(),
+                                    call_id: call.id.clone(),
+                                },
+                            )
+                            .await
+                    {
+                        let content = result
+                            .model_content
+                            .unwrap_or_else(|| result.payload.to_string());
+                        self.import_images(source, &result.model_images).await?;
+                        let actor = system.actor(shared::ACTOR_ID).map_err(|_| {
+                            StageError::Unavailable("Actor configuration is unavailable")
+                        })?;
+                        let config = system.config();
+                        let limit = config
+                            .models
+                            .get(actor.config.model.as_ref().unwrap_or(&config.main_model))
+                            .map_or(4096, |model| model.tool_output_max_tokens);
+                        let mut content = crate::resources::bound_output(
+                            system,
                             shared::ACTOR_ID,
-                            &message.id,
-                            &call,
-                            result.payload,
+                            &call.id,
                             &content,
-                            &result.summary,
-                            result.failure.as_deref(),
+                            limit,
+                            result.overflow_continuation,
+                        )?;
+                        if let Some(reference) = &result.permission_reference {
+                            reference.append_to(&mut content);
+                        }
+                        let images = crate::resources::capture_images(
+                            system,
+                            shared::ACTOR_ID,
+                            result.model_images,
+                        )?;
+                        system
+                            .store()
+                            .tool_finished(
+                                shared::ACTOR_ID,
+                                &message.id,
+                                &call,
+                                result.payload,
+                                &content,
+                                &result.summary,
+                                result.failure.as_deref(),
+                            )
+                            .map_err(|_| {
+                                StageError::Unavailable("Cannot preserve confirmed App result")
+                            })?;
+                        if !images.is_empty() {
+                            // Persist only portable references, after closing all call groups.
+                            recovered_images.extend(images);
+                        }
+                        continue;
+                    }
+                    let text = "Execution changed devices before this call was confirmed. Effects may have occurred. Inspect the original device's App state; never automatically repeat this call.";
+                    system
+                        .store()
+                        .tool_finished(
+                            shared::ACTOR_ID,
+                            &message.id,
+                            &call,
+                            serde_json::Value::Null,
+                            text,
+                            "结果待确认",
+                            Some(text),
                         )
                         .map_err(|_| {
-                            StageError::Unavailable("Cannot preserve confirmed App result")
+                            StageError::Unavailable("Cannot preserve interrupted tool protocol")
                         })?;
-                    if !images.is_empty() {
-                        // Persist only portable references, after closing all call groups.
-                        recovered_images.extend(images);
-                    }
-                    continue;
                 }
-                let text = "Execution changed devices before this call was confirmed. Effects may have occurred. Inspect the original device's App state; never automatically repeat this call.";
-                system
-                    .store()
-                    .tool_finished(
-                        shared::ACTOR_ID,
-                        &message.id,
-                        &call,
-                        serde_json::Value::Null,
-                        text,
-                        "结果待确认",
-                        Some(text),
-                    )
-                    .map_err(|_| {
-                        StageError::Unavailable("Cannot preserve interrupted tool protocol")
-                    })?;
+                if !recovered_images.is_empty() {
+                    let row = crate::model_protocol::AgentMessage::user_content(
+                        crate::model_protocol::AgentContent::multimodal(
+                            "Images returned by confirmed App calls",
+                            recovered_images,
+                        ),
+                    );
+                    system
+                        .store()
+                        .append_history(shared::ACTOR_ID, &message.id, &[row])
+                        .map_err(|_| StageError::Unavailable("Cannot preserve recovered images"))?;
+                }
             }
-            if !recovered_images.is_empty() {
-                let row = crate::model_protocol::AgentMessage::user_content(
-                    crate::model_protocol::AgentContent::multimodal(
-                        "Images returned by confirmed App calls",
-                        recovered_images,
-                    ),
-                );
-                system
-                    .store()
-                    .append_history(shared::ACTOR_ID, &message.id, &[row])
-                    .map_err(|_| StageError::Unavailable("Cannot preserve recovered images"))?;
+            if cursor.is_none() {
+                break;
             }
         }
         Ok(())
@@ -2802,6 +2810,64 @@ mod tests {
             .unwrap();
         core.epoch.store(1, Ordering::Release);
         core.recovered_epoch.store(1, Ordering::Release);
+    }
+
+    #[tokio::test]
+    async fn batch_final_answer_older_than_one_page_is_repaired_without_another_inference() {
+        let (_directory, runtime, core, context) = running_core().await;
+        let system = &runtime.host.system;
+        let first = &context.actor_call.as_ref().unwrap().message_id;
+        for index in 0..130 {
+            system
+                .send_user(
+                    shared::ACTOR_ID,
+                    format!("Queued input {index}"),
+                    vec![],
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(system.store().claim_input_batch(first).unwrap().len(), 131);
+        system
+            .store()
+            .append_history(
+                shared::ACTOR_ID,
+                first,
+                &[crate::model_protocol::AgentMessage::assistant(
+                    "Already generated one combined answer",
+                )],
+            )
+            .unwrap();
+        // The restored checkpoint has queued inputs and a confirmed final model
+        // boundary, with no inference provider available on the replacement.
+        system.store().stage_transaction(|tx| {
+            tx.execute("UPDATE messages SET status='\"queued\"',record=json_set(record,'$.status','queued') WHERE actor_id='core'", [])?;
+            Ok(())
+        }).unwrap();
+        core.repair_protocol().await.unwrap();
+        let mut cursor = None;
+        let mut count = 0;
+        let mut replies = Vec::new();
+        loop {
+            let page = system
+                .store()
+                .messages(shared::ACTOR_ID, cursor, 100)
+                .unwrap();
+            for message in page.items {
+                count += 1;
+                assert_eq!(message.status, MessageStatus::Completed);
+                if let Some(reply) = message.reply {
+                    replies.push(reply);
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(count, 131);
+        assert_eq!(replies, ["Already generated one combined answer"]);
+        system.shutdown().await;
     }
 
     #[tokio::test]

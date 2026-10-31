@@ -4,7 +4,7 @@ use crate::{
     app::AppToolExecutionContext,
     context_budget::{TokenEstimateBaseline, estimate_agent_turn_request_for_model},
     core::ModelProvider,
-    model_protocol::{AgentMessage, AgentToolSpec, AgentTurnRequest},
+    model_protocol::{AgentContent, AgentMessage, AgentToolSpec, AgentTurnRequest},
 };
 use miette::{Result, miette};
 
@@ -14,6 +14,7 @@ pub(super) struct ModelContext {
     pub tools: Vec<AgentToolSpec>,
     pub history: Vec<AgentMessage>,
     pub history_complete: bool,
+    pub active_input_ids: Vec<String>,
 }
 
 impl ModelContext {
@@ -31,6 +32,7 @@ impl ModelContext {
             tools,
             history: Vec::new(),
             history_complete: false,
+            active_input_ids: Vec::new(),
         })
     }
 
@@ -76,6 +78,15 @@ impl ModelContext {
         baseline: &TokenEstimateBaseline,
     ) -> Result<()> {
         let actor = &current.actor_id;
+        self.active_input_ids = system
+            .store()
+            .input_batch(&current.id)?
+            .into_iter()
+            .filter(|input| {
+                input.status == super::MessageStatus::Running && !input.cancel_requested
+            })
+            .map(|input| input.id)
+            .collect();
         let start = system.store().context_start(actor)?;
         let anchor = system.store().actor(actor)?.context.anchor;
         // An interrupted input may have lost its window to a nested reset.
@@ -96,6 +107,8 @@ impl ModelContext {
         }
         let mut after = start.saturating_sub(1);
         let mut history = Vec::new();
+        let mut batches = std::collections::HashMap::new();
+        let mut previous = None;
         self.history_complete = false;
         self.history = loop {
             let page = system.store().history_page(actor, after, None, 128)?;
@@ -103,7 +116,7 @@ impl ModelContext {
                 self.history_complete = true;
                 break balanced_history(history);
             }
-            for (seq, _, mut row) in page {
+            for (seq, input, mut row) in page {
                 after = seq;
                 if seq == start
                     && let Some(recovery) = &anchor
@@ -112,7 +125,14 @@ impl ModelContext {
                     // entire prefix even when no further reset has occurred.
                     row = recovery.recovery_message();
                 }
-                history.push(row);
+                let batch = batches.entry(input.clone()).or_insert_with(|| {
+                    system
+                        .store()
+                        .message(&input)
+                        .ok()
+                        .and_then(|input| input.input_batch)
+                });
+                push_batch_history(&mut history, &mut previous, batch.as_deref(), &input, row);
             }
             let balanced = balanced_history(history.clone());
             if !self.fits(provider, &balanced, baseline) {
@@ -177,8 +197,8 @@ impl ModelContext {
             let mut messages = vec![self.system.clone()];
             messages.extend(balanced_history(self.history[..count].to_vec()));
             messages.push(AgentMessage::user(format!(
-                "{}\nCurrent input ID: {}\nCurrent input excerpt: {}\nLoaded history suffix omitted: {}",
-                include_str!("../prompts/context_handoff.md"), input.id, excerpt, !self.history_complete || count < self.history.len()
+                "{}\nCurrent input ID: {}\nActive input IDs: {}\nCurrent input excerpt: {}\nLoaded history suffix omitted: {}",
+                include_str!("../prompts/context_handoff.md"), input.id, serde_json::json!(self.active_input_ids), excerpt, !self.history_complete || count < self.history.len()
             )));
             AgentTurnRequest {
                 messages,
@@ -218,6 +238,46 @@ impl ModelContext {
             }
         }
         Ok(build(low))
+    }
+}
+
+/// Merge model input only. Durable history and conversation bubbles retain each
+/// original message, including its images and source metadata.
+fn push_batch_history(
+    history: &mut Vec<AgentMessage>,
+    previous: &mut Option<(String, String)>,
+    batch: Option<&str>,
+    input: &str,
+    mut row: AgentMessage,
+) {
+    if batch.is_some()
+        && let AgentMessage::User { content } = &mut row
+    {
+        *content = content
+            .clone()
+            .with_text(format!("Input ID: {input}\n{}", content.as_text()));
+    }
+    if let (Some(batch), AgentMessage::User { content }) = (batch, &row) {
+        if previous
+            .as_ref()
+            .is_some_and(|(last_batch, last_input)| last_batch == batch && last_input != input)
+            && let Some(AgentMessage::User { content: last }) = history.last_mut()
+        {
+            let text = format!("{}\n\n---\n\n{}", last.as_text(), content.as_text());
+            let parts = last
+                .parts()
+                .iter()
+                .chain(content.parts())
+                .cloned()
+                .collect();
+            *last = AgentContent::multimodal(text, parts);
+        } else {
+            history.push(row);
+        }
+        *previous = Some((batch.into(), input.into()));
+    } else {
+        history.push(row);
+        *previous = None;
     }
 }
 

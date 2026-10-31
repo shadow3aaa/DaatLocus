@@ -119,7 +119,11 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
             installed_config = None;
             continue;
         }
-        let interrupted = interruption(&control, &message);
+        let active = system
+            .store()
+            .active_batch_input(&message.id)
+            .unwrap_or_else(|_| message.clone());
+        let interrupted = interruption(&control, &active);
         let (status, reply, error, rebuild) = match (interrupted, result) {
             (Some(status), _) => (
                 status,
@@ -158,7 +162,7 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
         {
             let _ = core.checkpoint().await;
         }
-        control.cancelled.lock().remove(&message.id);
+        clear_batch_cancellations(&system, &control, &message.id);
         if rebuild {
             shutdown_apps(&mut apps).await;
             installed_config = None;
@@ -188,12 +192,47 @@ fn interruption(control: &ActorControl, message: &MessageRecord) -> Option<Messa
     }
 }
 
+fn clear_batch_cancellations(system: &ActorSystem, control: &ActorControl, id: &str) {
+    if let Ok(inputs) = system.store().input_batch(id) {
+        let mut cancelled = control.cancelled.lock();
+        for input in inputs {
+            cancelled.remove(&input.id);
+        }
+    }
+}
+
+fn announce_input_batch(system: &ActorSystem, id: &str) -> Result<()> {
+    let inputs = system.store().input_batch(id)?;
+    let active = system.store().active_batch_input(id)?;
+    let facts = inputs
+        .iter()
+        .map(|input| {
+            json!({
+                "id": input.id, "source": input.source, "reply_to": input.reply_to,
+                "status": input.status, "cancel_requested": input.cancel_requested,
+            })
+        })
+        .collect::<Vec<_>>();
+    // Append boundaries instead of rewriting the system prompt or old history:
+    // resuming an input must preserve the provider's cacheable prefix.
+    system.store().append_history(
+        &active.actor_id,
+        &active.id,
+        &[AgentMessage::user(format!(
+            "Active input batch:\n{}",
+            json!(facts)
+        ))],
+    )
+}
+
 fn check_interruption(
     system: &ActorSystem,
     control: &ActorControl,
     message: &MessageRecord,
 ) -> Result<()> {
     if interruption(control, message).is_some()
+        || (message.input_batch.is_some()
+            && system.store().batch_cancellation_pending(&message.id)?)
         || message.actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted()
     {
         Err(miette!("Execution interrupted"))
@@ -361,6 +400,34 @@ async fn execute_message(
     control: &ActorControl,
     apps: &mut AppManager,
 ) -> Result<Option<String>> {
+    loop {
+        let result = execute_message_batch(system, actor, message, control, apps).await;
+        if result.is_err()
+            && !control.stop.load(Ordering::Acquire)
+            && system.store().batch_cancellation_pending(&message.id)?
+        {
+            system.store().settle_batch_cancellations(&message.id)?;
+            let active = system.store().active_batch_input(&message.id)?;
+            if active.status == MessageStatus::Running && !active.cancel_requested {
+                continue;
+            }
+        }
+        return result;
+    }
+}
+
+async fn execute_message_batch(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    message: &MessageRecord,
+    control: &ActorControl,
+    apps: &mut AppManager,
+) -> Result<Option<String>> {
+    let batch_id = message.id.clone();
+    let batch = system.store().claim_input_batch(&batch_id)?;
+    system.store().settle_batch_cancellations(&batch_id)?;
+    let active = system.store().active_batch_input(&batch_id)?;
+    let message = &active;
     check_interruption(system, control, message)?;
     let mut context = system.execution_context(actor, message)?;
     apps.set_vision_support(builtin_apps::vision_support(actor, &system.config())?);
@@ -368,14 +435,19 @@ async fn execute_message(
         refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
     let tools = apps.model_tool_specs_for_context(&context)?;
-    let resuming = system
-        .store()
-        .has_history_for_message(&actor.id, &message.id)?;
-    if !resuming {
-        let input = AgentMessage::user_content(system.message_content(actor, message, &context)?);
-        system
+    for input in &batch {
+        if !system
             .store()
-            .append_history(&actor.id, &message.id, &[input])?;
+            .has_history_for_message(&actor.id, &input.id)?
+        {
+            let row = AgentMessage::user_content(system.message_content(actor, input, &context)?);
+            system
+                .store()
+                .append_history(&actor.id, &input.id, &[row])?;
+        }
+    }
+    if batch.len() > 1 {
+        announce_input_batch(system, &batch_id)?;
     }
     let mut window = ModelContext::load(system, actor, &context, tools).await?;
     let mut model = InferenceModel::load(system, actor)?;
@@ -400,8 +472,16 @@ async fn execute_message(
     let mut overflow_recoveries = 0;
     let mut handoff_required = false;
     let mut empty_reasoning_responses = 0;
-    loop {
+    'execution: loop {
+        let cancelled = system.store().batch_cancellation_pending(&batch_id)?;
+        system.store().settle_batch_cancellations(&batch_id)?;
+        if cancelled {
+            announce_input_batch(system, &batch_id)?;
+        }
+        let active = system.store().active_batch_input(&batch_id)?;
+        let message = &active;
         check_interruption(system, control, message)?;
+        context = system.execution_context(actor, message)?;
         if actor.id != crate::stage::shared::ACTOR_ID
             && system.app_registry().take_refresh(&actor.id)
         {
@@ -540,7 +620,9 @@ async fn execute_message(
             }
             Err(error) => return Err(error),
         };
-        if system.store().has_queued_input(&actor.id)? {
+        if system.store().has_queued_input(&actor.id)?
+            || system.store().batch_cancellation_pending(&batch_id)?
+        {
             continue;
         }
         let response = response.protocol();
@@ -667,6 +749,11 @@ async fn execute_message(
                             detail,
                             &mut window.history,
                         )?;
+                    }
+                    if !control.stop.load(Ordering::Acquire)
+                        && system.store().batch_cancellation_pending(&batch_id)?
+                    {
+                        continue 'execution;
                     }
                     return Err(error);
                 }
@@ -912,7 +999,7 @@ async fn execute_call(
             tokio::select! {
                 result = &mut future => break Some(result),
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                    if interruption(control,message).is_some() || actor.id==crate::stage::shared::ACTOR_ID && !system.core_execution_permitted(){break None;}
+                    if check_interruption(system, control, message).is_err() { break None; }
                 }
             }
         }
@@ -1132,7 +1219,8 @@ async fn receive_incoming(
         if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
             return Err(miette!("Core worker no longer owns execution"));
         }
-        let (status, reply, error) = match (interruption(control, &input), result) {
+        let active = system.store().active_batch_input(&input.id)?;
+        let (status, reply, error) = match (interruption(control, &active), result) {
             (Some(status), _) => (
                 status,
                 None,
@@ -1159,7 +1247,7 @@ async fn receive_incoming(
         {
             system.wake(&reply.actor_id);
         }
-        control.cancelled.lock().remove(&input.id);
+        clear_batch_cancellations(system, control, &input.id);
         if status != MessageStatus::Completed {
             let replacements = if actor.id == crate::stage::shared::ACTOR_ID && !system.local_core()
             {
@@ -1183,6 +1271,7 @@ async fn receive_incoming(
     }
     if received {
         system.store().resume_input(&actor.id, &current.id)?;
+        announce_input_batch(system, &current.id)?;
     }
     Ok(received)
 }
@@ -1210,6 +1299,9 @@ async fn generate(
         ..AgentTurnRetryPolicy::default()
     };
     for attempt in 1..=policy.max_attempts {
+        if system.store().batch_cancellation_pending(&message.id)? {
+            return Ok(None);
+        }
         check_interruption(system, control, message)?;
         if system.store().has_queued_input(&actor.id)? {
             return Ok(None);
@@ -1277,6 +1369,7 @@ async fn generate(
                 },
                 _ = timer.tick() => {
                     pending.flush(system, actor, message, *generation)?;
+                    if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
                     check_interruption(system,control, message)?;
                     if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
@@ -1285,6 +1378,7 @@ async fn generate(
                     }
                 },
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
+                    if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
                     check_interruption(system,control, message)?;
                     if system.store().has_queued_input(&actor.id)? {
                         let usage = provider.token_usage_info();
@@ -1310,6 +1404,9 @@ async fn generate(
             delta.clone(),
             usage.model_context_window,
         )?;
+        if system.store().batch_cancellation_pending(&message.id)? {
+            return Ok(None);
+        }
         check_interruption(system, control, message)?;
         match result {
             Ok(response) => {
@@ -1347,7 +1444,8 @@ async fn generate(
                     tokio::select! {
                         () = &mut backoff => break,
                         () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                            check_interruption(system,control, message)?;
+                            if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
+                    check_interruption(system,control, message)?;
                             if system.store().has_queued_input(&actor.id)? { return Ok(None); }
                         },
                     }

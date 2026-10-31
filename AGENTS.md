@@ -201,6 +201,9 @@ Sandbox expansion uses the unified review/application path.
   effects; later messages may start new work. Ordinary request `cancel` affects
   only its exact input. Stop never grants cross-account or remote readonly authority.
   All messages, progress, results and runtime notices are durable immediate inputs.
+  Coalesce compatible queued inputs into one inference batch while preserving
+  their individual bubbles, provenance and cancellation. Keep distinct hard
+  authorities and reply targets in separate batches; emit one batch outcome.
   Use one Actors App message operation; do not expose queued versus steering modes.
   New input interrupts speculative inference or retry backoff and is received at the
   next settled tool-group boundary. Explicit applications awaiting automatic review

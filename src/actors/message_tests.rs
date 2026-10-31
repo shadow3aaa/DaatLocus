@@ -836,9 +836,7 @@ fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
                 name: "boundary__effect".into(),
                 arguments: json!({}),
             }]));
-            for _ in 0..INCOMING {
-                replies.push_back(MockReply::Answer("Incoming input processed"));
-            }
+            replies.push_back(MockReply::Answer("Incoming input batch processed"));
             replies.push_back(MockReply::Answer("Original input processed"));
         }
 
@@ -882,12 +880,16 @@ fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
             .unwrap()
             .unwrap();
         assert_eq!(reply.as_deref(), Some("Original input processed"));
+        let mut replies = Vec::new();
         for item in incoming {
-            assert_eq!(
-                wait_completed(&system, &item.id).await.reply.as_deref(),
-                Some("Incoming input processed")
-            );
+            let completed = wait_completed(&system, &item.id).await;
+            assert_eq!(completed.status, MessageStatus::Completed);
+            if let Some(reply) = completed.reply {
+                replies.push(reply);
+            }
         }
+        assert_eq!(replies, ["Incoming input batch processed"]);
+        assert_eq!(provider.requests.lock().len(), 3);
         assert_eq!(effects.load(Ordering::SeqCst), 1);
         system.shutdown().await;
     });

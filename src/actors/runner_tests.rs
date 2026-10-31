@@ -1,3 +1,5 @@
+#[path = "runner_batch_tests.rs"]
+mod input_batch_tests;
 #[path = "tool_definition_tests.rs"]
 mod tool_definition_tests;
 
@@ -760,13 +762,43 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
             let message = sent.unwrap();
             let completed = wait_completed(&system, &message.id).await;
             assert_eq!(completed.status, MessageStatus::Completed);
-            assert_eq!(completed.reply.as_deref(), Some("Done"));
+            assert!(
+                completed
+                    .reply
+                    .as_deref()
+                    .is_none_or(|reply| reply == "Done")
+            );
+            let history = system
+                .store()
+                .history_page("root", 0, Some(&message.id), 128)
+                .unwrap();
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|(_, _, row)| matches!(row, AgentMessage::User { content }
+                if content.as_text().ends_with(&message.content)))
+                    .count(),
+                1
+            );
         }
         wait_passivated(&system).await;
     }
-    // New arrivals may discard speculative responses. Only committed replies
-    // count as executions; retirement/wake races must not commit one twice.
-    assert!(provider.requests.lock().len() >= 24);
+    // Retirement/wake races must settle every bubble once and emit exactly one
+    // committed answer for each independently admitted batch.
+    let messages = system.store().messages("root", None, 100).unwrap().items;
+    assert_eq!(messages.len(), 24);
+    let batches: HashSet<_> = messages
+        .iter()
+        .map(|message| message.input_batch.as_deref().unwrap_or(&message.id))
+        .collect();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.reply.is_some())
+            .count(),
+        batches.len()
+    );
+    assert!(provider.requests.lock().len() >= batches.len());
     let history = system.store().history("root", 4096).unwrap();
     assert_eq!(
         history
@@ -775,7 +807,7 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
                 AgentMessage::Assistant {content, ..} if content == "Done"
             ))
             .count(),
-        24
+        batches.len()
     );
     system.shutdown().await;
 }
@@ -3178,6 +3210,7 @@ async fn remote_delegation_retains_readonly_authority() {
         reply_to: super::super::ReplyTarget::User,
         kind: super::super::MessageKind::Request,
         in_reply_to: None,
+        input_batch: None,
 
         remote_authority: None,
         content: "Delegate a read-only investigation".into(),
@@ -3875,6 +3908,7 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
                 reply_to: super::super::ReplyTarget::User,
                 kind: super::super::MessageKind::Request,
                 in_reply_to: None,
+                input_batch: None,
 
                 remote_authority: None,
                 content: content.into(),
@@ -3898,44 +3932,41 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
 
 #[tokio::test]
 async fn actor_receives_pending_inputs_before_completion_and_retains_context() {
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Answer("second answer"),
-        MockReply::Answer("first answer"),
-    ]));
+    let provider = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "combined answer",
+    )]));
     let (_directory, system) = runtime(provider.clone()).await;
+    system.suspend_execution().await.unwrap();
     let first = enqueue_root(&system, "first request");
     let second = enqueue_root(&system, "second request");
+    system.resume_execution().await.unwrap();
     assert_eq!(
         wait_completed(&system, &first.id).await.reply.as_deref(),
-        Some("first answer")
+        Some("combined answer")
     );
-    assert_eq!(
-        wait_completed(&system, &second.id).await.reply.as_deref(),
-        Some("second answer")
-    );
+    assert_eq!(wait_completed(&system, &second.id).await.reply, None);
     {
         let requests = provider.requests.lock();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[1].messages.iter().any(
-        |row| matches!(row, AgentMessage::Assistant { content, .. } if content == "second answer")
-    ));
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].messages.iter().any(|row| matches!(row, AgentMessage::User { content }
+            if content.as_text().contains("first request") && content.as_text().contains("second request"))));
     }
     let events = system.store().events(0, Some("root"), false, 100).unwrap();
-    for input in [&first, &second] {
-        let streamed: String = events
-            .iter()
-            .filter_map(|event| match &event.event {
-                ActorEvent::GenerationDelta {
-                    message_id,
-                    channel,
-                    text,
-                    ..
-                } if message_id == &input.id && channel == "assistant" => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(streamed, "small delta ".repeat(50));
-    }
+    let streamed: String = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            ActorEvent::GenerationDelta {
+                message_id,
+                channel,
+                text,
+                ..
+            } if message_id == &first.id && channel == "assistant" => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(streamed, "small delta ".repeat(50));
+    assert!(!events.iter().any(|event| matches!(&event.event,
+        ActorEvent::GenerationDelta { message_id, .. } if message_id == &second.id)));
     system.shutdown().await;
 }
 
@@ -4729,6 +4760,7 @@ fn protocol(calls: Vec<AgentToolCall>) -> AgentMessage {
 
 fn test_window(prompt: &str, history: &[AgentMessage], tools: &[AgentToolSpec]) -> ModelContext {
     ModelContext {
+        active_input_ids: Vec::new(),
         instruction_binding: (0, crate::stage::StageId::new()),
         system: AgentMessage::system(prompt),
         history: history.to_vec(),
@@ -6511,7 +6543,7 @@ async fn runner_prompt_keeps_identity_stable_across_request_authority() {
             1
         );
         assert!(prompt.contains("A final reply ends the current input"));
-        assert!(prompt.contains("unless Core has already delivered a reply for that input"));
+        assert!(prompt.contains("unless Core has already delivered a reply for that batch"));
         for removed in [
             "Remote read-only authority",
             "Use actors__yield",

@@ -53,6 +53,7 @@ async fn actors_with_different_workspaces_execute_files_against_the_same_device_
             reply_to: ReplyTarget::User,
             kind: MessageKind::Request,
             in_reply_to: None,
+            input_batch: None,
             remote_authority: None,
             content: "Read the shared device file".into(),
             attachments: vec![],

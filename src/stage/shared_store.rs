@@ -1198,6 +1198,7 @@ mod tests {
             reply_to: ReplyTarget::User,
             kind: MessageKind::Request,
             in_reply_to: None,
+            input_batch: None,
 
             remote_authority: None,
             content: "hello shared Actor".into(),
@@ -1222,6 +1223,61 @@ mod tests {
                 .store_source(ACTOR_ID, &bytes)
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn input_batches_survive_checkpoint_takeover_and_settle_once() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = store(a_dir.path());
+        let b = store(b_dir.path());
+        let leader = StageId::new();
+        let first = a.enqueue(input(), None).unwrap();
+        let second = a.enqueue(input(), None).unwrap();
+        a.claim_next(ACTOR_ID).unwrap().unwrap();
+        assert_eq!(a.claim_input_batch(&first.id).unwrap().len(), 2);
+        for message in [&first, &second] {
+            a.append_history(
+                ACTOR_ID,
+                &message.id,
+                &[crate::model_protocol::AgentMessage::user(&message.content)],
+            )
+            .unwrap();
+        }
+        let checkpoint = capture(&a, "account-a", leader, 1).unwrap().unwrap();
+        copy(&a, &b, &checkpoint);
+        prepare(&b, &checkpoint, "account-a").unwrap();
+        commit(&a, &checkpoint, leader).unwrap();
+        commit(&b, &checkpoint, StageId::new()).unwrap();
+        resume(&b).unwrap();
+        let restored = b.claim_next(ACTOR_ID).unwrap().unwrap();
+        assert_eq!(restored.id, first.id);
+        let batch = b.claim_input_batch(&restored.id).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(
+            batch
+                .iter()
+                .all(|input| input.status == MessageStatus::Running
+                    && input.input_batch.as_deref() == Some(first.id.as_str()))
+        );
+        b.finish_message(
+            &first.id,
+            MessageStatus::Completed,
+            Some("One combined outcome"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            b.message(&first.id).unwrap().reply.as_deref(),
+            Some("One combined outcome")
+        );
+        assert_eq!(
+            b.message(&second.id).unwrap().status,
+            MessageStatus::Completed
+        );
+        assert!(b.message(&second.id).unwrap().reply.is_none());
+        assert!(b.claim_next(ACTOR_ID).unwrap().is_none());
+        assert_eq!(b.messages(ACTOR_ID, None, 100).unwrap().items.len(), 2);
     }
 
     #[test]

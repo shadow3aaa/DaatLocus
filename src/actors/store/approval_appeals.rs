@@ -96,6 +96,7 @@ impl ActorStore {
                     reply_to: ReplyTarget::User,
                     kind: MessageKind::Request,
                     in_reply_to: None,
+                    input_batch: None,
 
                     remote_authority: None,
                     content,
@@ -206,7 +207,7 @@ impl ActorStore {
             insert_message(&tx, MessageRecord {
                 seq:0, id:notification_id.clone(), actor_id:original.actor_id.clone(),
                 source:MessageSource::Actor{actor_id:core.into()}, reply_to:original.reply_to.clone(),
-                kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()),
+                kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()), input_batch: None,
                 remote_authority:None,
                 content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,
                     "decision":decision, "reason":reason,

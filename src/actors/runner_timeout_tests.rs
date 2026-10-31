@@ -38,6 +38,7 @@ async fn stop_and_exact_input_cancel_interrupt_unbounded_app_preparation() {
             reply_to: super::super::ReplyTarget::User,
             kind: super::super::MessageKind::Request,
             in_reply_to: None,
+            input_batch: None,
             remote_authority: None,
             content: "Wait for the server".into(),
             attachments: vec![],

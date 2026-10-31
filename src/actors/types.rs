@@ -261,6 +261,9 @@ pub struct MessageRecord {
     pub reply_to: ReplyTarget,
     pub kind: MessageKind,
     pub in_reply_to: Option<String>,
+    /// Inputs handled by one inference retain their own records and provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_batch: Option<String>,
     /// Immutable authority at delegation time; stored privately, never accepted
     /// from clients or repeated in conversation responses.
     #[serde(default, skip_serializing)]

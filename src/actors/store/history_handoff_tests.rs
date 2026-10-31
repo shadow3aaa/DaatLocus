@@ -54,6 +54,7 @@ fn input(
         reply_to: ReplyTarget::User,
         kind,
         in_reply_to: parent.map(str::to_owned),
+        input_batch: None,
 
         remote_authority: None,
         content: content.into(),

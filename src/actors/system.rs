@@ -1555,6 +1555,7 @@ impl ActorSystem {
             reply_to,
             kind: MessageKind::Request,
             in_reply_to: None,
+            input_batch: None,
 
             remote_authority: None,
             content,
