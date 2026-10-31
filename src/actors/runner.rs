@@ -654,12 +654,17 @@ async fn execute_message(
                         .cloned()
                         .collect();
                     for skipped in pending {
+                        let detail = if skipped.id == call.id {
+                            "Execution or result retention was interrupted; effects may have occurred. Inspect the original result or App state before deciding whether to retry."
+                        } else {
+                            "Call was not executed because this request ended before the call could start"
+                        };
                         record_tool_error(
                             system,
                             actor,
                             message,
                             &skipped,
-                            "Call was not executed because this request ended before the call could start",
+                            detail,
                             &mut window.history,
                         )?;
                     }

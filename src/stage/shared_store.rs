@@ -459,6 +459,12 @@ pub(crate) fn apply(
             if resource.id != change.key {
                 return Err(StageError::Forbidden("Resource identifier mismatch"));
             }
+            // The descriptor remains a historical fact after its temporary
+            // bytes expire. Replaying a checkpoint must not restore those bytes
+            // or prevent unrelated conversation state from synchronizing.
+            if resource.ensure_available().is_err() {
+                return Ok(change.key.clone());
+            }
             let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM stage_resources WHERE actor='core' AND id=?1 AND record=?2)",params![resource.id,encode(&resource)?],|r|r.get(0))?;
             if !ready {
                 return Err(StageError::Unavailable(

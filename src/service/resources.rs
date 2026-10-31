@@ -108,6 +108,7 @@ pub(super) async fn upload(
         return Err(error);
     }
     if let Err(error) = state.system.store().register_resource(StoredResource {
+        expires_at_ms: None,
         id,
         actor_id: actor.to_owned(),
         path: path.clone(),
@@ -165,8 +166,12 @@ async fn serve_file(
     actor: String,
     resource: StoredResource,
 ) -> ApiResult<Response> {
-    let base = std::fs::canonicalize(state.system.actor_data_dir(&actor))
-        .map_err(|_| ApiError::not_found())?;
+    let base = std::fs::canonicalize(crate::resources::storage_root(
+        &state.system,
+        &actor,
+        resource.expires_at_ms,
+    ))
+    .map_err(|_| ApiError::not_found())?;
     let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
     policy.filesystem.full_disk_read = false;
     policy.filesystem.readable_roots = vec![base.clone()];

@@ -239,3 +239,42 @@ async fn historical_tool_queries_return_small_refs_then_scoped_details() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn temporary_tool_outputs_use_the_same_authenticated_resource_endpoint() {
+    let f = Fixture::new().await;
+    let original = "temporary tool output\n".repeat(1000);
+    let bounded = daat_locus::resources::bound_output(
+        &f.system,
+        "core",
+        "temporary-http",
+        &original,
+        256,
+        None,
+    )
+    .unwrap();
+    let resource = daat_locus::resources::export_all(&f.system, "core")
+        .unwrap()
+        .into_iter()
+        .find(|resource| resource.expires_at_ms.is_some())
+        .unwrap();
+    let uri = resource.uri("core");
+    assert!(bounded.contains(&uri));
+    assert_eq!(
+        f.client
+            .get(format!("{}{}", f.url, uri))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = f.owner(reqwest::Method::GET, &uri).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), original);
+    let mut stored = f.system.store().resource("core", &resource.id).unwrap();
+    stored.expires_at_ms = Some(chrono::Utc::now().timestamp_millis() - 1);
+    f.system.store().register_resource(stored).unwrap();
+    let response = f.owner(reqwest::Method::GET, &uri).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

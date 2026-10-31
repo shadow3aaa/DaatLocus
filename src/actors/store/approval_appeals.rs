@@ -15,14 +15,6 @@ fn approval_tx(tx: &Transaction<'_>, id: &str) -> Result<ApprovalRecord> {
     )
 }
 
-fn admission(tx: &Transaction<'_>, actor: &str) -> Result<()> {
-    let pending: i64 = sql(tx.query_row("SELECT count(*) FROM messages WHERE actor_id=?1 AND status IN ('\"queued\"','\"running\"')", [actor], |row| row.get(0)))?;
-    if pending >= 256 {
-        return Err(ActorError::Unavailable("Actor mailbox is full".into()).into());
-    }
-    Ok(())
-}
-
 impl ActorStore {
     pub(crate) fn appeal_approval(
         &self,
@@ -75,7 +67,6 @@ impl ActorStore {
                 return Ok(approval);
             }
             let core = crate::stage::shared::ACTOR_ID;
-            admission(&tx, core)?;
             let message_id = Uuid::new_v4().to_string();
             let content = serde_json::json!({
                 "type":"approval_appeal", "approval_id":id, "stage_id":stage,
@@ -207,7 +198,6 @@ impl ActorStore {
                     ActorError::Conflict("Appeal authority is no longer valid".into()).into(),
                 );
             }
-            admission(&tx, &original.actor_id)?;
             if decision == ApprovalDecision::Approved {
                 crate::sandbox::scopes::remember(&tx, &approval.scopes)?;
             }

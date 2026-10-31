@@ -16,8 +16,6 @@ const INSTANCE_PREFIX: &str = "instance-";
 const LEASE: &str = ".lease";
 const LIFECYCLE: &str = ".lifecycle.lock";
 const MARKER: &[u8] = b"DaatLocus runtime temporary resources v1\n";
-const MAX_CLEANUP_ENTRIES: usize = 16_384;
-const MAX_CLEANUP_DEPTH: usize = 64;
 
 /// One runtime instance, not a daemon or a process-wide resource registry.
 /// Keep this value alive until every consumer has stopped using its resources.
@@ -293,72 +291,85 @@ fn sweep(root: &GuardedDirectory) {
     }
 }
 
-/// Preflight the whole owned tree before mutation. Keep every directory pinned,
-/// and refuse links, special files, cross-device trees and excessive depth/size.
-struct Cleanup {
-    directory: GuardedDirectory,
+/// Preflight the whole owned tree before mutation. Pin directories and reject
+/// links, special files and filesystem crossings, without depth/count quotas.
+struct CleanupNode {
+    directory: Option<GuardedDirectory>,
     files: Vec<OsString>,
-    children: Vec<(OsString, Cleanup)>,
+    parent: Option<(usize, OsString)>,
+}
+struct Cleanup {
+    nodes: Vec<CleanupNode>,
 }
 impl Cleanup {
-    fn prepare(
-        directory: GuardedDirectory,
-        keep_lease: bool,
-        depth: usize,
-        remaining: &mut usize,
-    ) -> io::Result<Self> {
-        if depth > MAX_CLEANUP_DEPTH {
-            return Err(io::Error::other(
-                "temporary tree is too deep to clean safely",
-            ));
-        }
-        let mut files = Vec::new();
-        let mut children = Vec::new();
-        for name in directory.names()? {
-            if keep_lease && name == OsStr::new(LEASE) {
-                continue;
-            }
-            *remaining = remaining
-                .checked_sub(1)
-                .ok_or_else(|| io::Error::other("temporary tree has too many entries"))?;
-            match directory.child(&name, false) {
-                Ok(child) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if directory.handle().metadata()?.dev() != child.handle().metadata()?.dev()
+    fn prepare(directory: GuardedDirectory, keep_lease: bool) -> io::Result<Self> {
+        let mut nodes = vec![CleanupNode {
+            directory: Some(directory),
+            files: vec![],
+            parent: None,
+        }];
+        let mut index = 0;
+        while index < nodes.len() {
+            let directory = nodes[index].directory.as_ref().expect("pinned directory");
+            let mut children = vec![];
+            let mut files = vec![];
+            for name in directory.names()? {
+                if index == 0 && keep_lease && name == OsStr::new(LEASE) {
+                    continue;
+                }
+                match directory.child(&name, false) {
+                    Ok(child) => {
+                        #[cfg(unix)]
                         {
-                            return Err(io::Error::other("temporary tree crosses a filesystem"));
+                            use std::os::unix::fs::MetadataExt;
+                            if directory.handle().metadata()?.dev()
+                                != child.handle().metadata()?.dev()
+                            {
+                                return Err(io::Error::other(
+                                    "temporary tree crosses a filesystem",
+                                ));
+                            }
                         }
+                        children.push(CleanupNode {
+                            directory: Some(child),
+                            files: vec![],
+                            parent: Some((index, name)),
+                        });
                     }
-                    children.push((name, Self::prepare(child, false, depth + 1, remaining)?));
-                }
-                Err(_) => {
-                    // A crash after atomic hardlink publication can leave both
-                    // names. Unlink them without opening or changing the file.
-                    if !directory.is_regular_file(&name)? {
-                        return Err(io::Error::other("temporary tree contains an unknown entry"));
+                    Err(_) => {
+                        if !directory.is_regular_file(&name)? {
+                            return Err(io::Error::other(
+                                "temporary tree contains an unknown entry",
+                            ));
+                        }
+                        files.push(name);
                     }
-                    files.push(name);
                 }
             }
+            nodes[index].files = files;
+            nodes.extend(children);
+            index += 1;
         }
-        Ok(Self {
-            directory,
-            files,
-            children,
-        })
+        Ok(Self { nodes })
     }
-
-    fn clear(self) -> io::Result<GuardedDirectory> {
-        for (name, child) in self.children {
-            drop(child.clear()?);
-            self.directory.remove_empty_child(&name)?;
+    fn clear(mut self) -> io::Result<GuardedDirectory> {
+        while let Some(mut node) = self.nodes.pop() {
+            let directory = node.directory.take().expect("pinned directory");
+            for name in node.files {
+                directory.remove(&name)?;
+            }
+            if let Some((parent, name)) = node.parent {
+                drop(directory);
+                self.nodes[parent]
+                    .directory
+                    .as_ref()
+                    .expect("pinned parent")
+                    .remove_empty_child(&name)?;
+            } else {
+                return Ok(directory);
+            }
         }
-        for name in self.files {
-            self.directory.remove(&name)?;
-        }
-        Ok(self.directory)
+        Err(io::Error::other("temporary tree root is missing"))
     }
 }
 
@@ -368,8 +379,7 @@ fn remove_instance(
     directory: GuardedDirectory,
     lease: File,
 ) -> io::Result<()> {
-    let mut remaining = MAX_CLEANUP_ENTRIES;
-    let directory = Cleanup::prepare(directory, true, 0, &mut remaining)?.clear()?;
+    let directory = Cleanup::prepare(directory, true)?.clear()?;
     // On Windows the lease and directory handles intentionally deny deletion.
     // The lifecycle lock excludes a second sweeper across this close/unlink gap.
     drop(lease);
@@ -396,6 +406,22 @@ mod tests {
         drop(temporary.instance.take());
         drop(temporary);
         path
+    }
+
+    #[test]
+    fn cleanup_handles_owned_trees_beyond_the_former_depth_limit() {
+        let (_profile, root) = profile();
+        let temporary = RuntimeTemp::create(&root).unwrap();
+        let mut nested = PathBuf::from("resources");
+        for _ in 0..70 {
+            nested.push("d");
+        }
+        nested.push("end.txt");
+        let file = temporary.publish(&nested, b"owned deep file").unwrap();
+        let instance = temporary.path().to_path_buf();
+        assert!(file.exists());
+        drop(temporary);
+        assert!(!instance.exists());
     }
 
     #[test]

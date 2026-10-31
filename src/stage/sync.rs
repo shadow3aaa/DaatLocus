@@ -550,13 +550,7 @@ impl Subscriptions {
         level: SubscriptionLevel,
     ) -> Result<bool> {
         actor.validate()?;
-        if !self.views.contains_key(&actor) && self.views.len() >= 8 {
-            return Err(StageError::Capacity("Upstream subscription limit reached"));
-        }
         let views = self.views.entry(actor).or_default();
-        if !views.contains_key(&view) && views.len() >= 32 {
-            return Err(StageError::Capacity("Actor consumer limit reached"));
-        }
         let before = views.is_empty();
         views.insert(view, level);
         Ok(before)
@@ -585,5 +579,35 @@ impl Subscriptions {
     }
     pub fn actors(&self) -> BTreeSet<&ActorAddress> {
         self.views.keys().collect()
+    }
+}
+
+#[cfg(test)]
+mod subscription_growth_tests {
+    use super::*;
+    #[test]
+    fn authenticated_actor_observers_are_not_rejected_by_view_count_quotas() {
+        let mut views = Subscriptions::default();
+        let stage = super::super::StageId(uuid::Uuid::new_v4());
+        let mut observed = vec![];
+        for actor in 0..12 {
+            let address = ActorAddress {
+                stage_id: stage,
+                actor_id: format!("actor-{actor}"),
+            };
+            for _ in 0..40 {
+                let view = Uuid::new_v4();
+                views
+                    .attach(address.clone(), view, SubscriptionLevel::Detail)
+                    .unwrap();
+                observed.push((address.clone(), view));
+            }
+            assert_eq!(views.level(&address), Some(SubscriptionLevel::Detail));
+        }
+        assert_eq!(views.actors().len(), 12);
+        for (address, view) in observed {
+            views.detach(&address, view);
+        }
+        assert!(views.actors().is_empty());
     }
 }

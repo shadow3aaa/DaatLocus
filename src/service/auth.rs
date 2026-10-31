@@ -704,13 +704,7 @@ async fn login_finish(
             cookie(&headers, &cookie_name(&state)).map(|previous| digest(&previous)),
             now(),
         )
-        .map_err(|error| {
-            if error.downcast_ref::<sessions::SessionLimit>().is_some() {
-                login_error(LoginError::Busy)
-            } else {
-                ApiError::from_report(error)
-            }
-        })?;
+        .map_err(ApiError::from_report)?;
     cookie_response(&state, &headers, &secret, SESSION_SECONDS)
 }
 async fn login_cancel(
