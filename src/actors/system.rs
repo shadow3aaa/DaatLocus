@@ -81,6 +81,8 @@ struct Inner {
     account_gated: AtomicBool,
     stopping: AtomicBool,
     idle_timeout: std::time::Duration,
+    #[cfg(test)]
+    idle_timeout_override: Mutex<Option<std::time::Duration>>,
     core: RwLock<Option<std::sync::Weak<crate::stage::shared_runtime::Controller>>>,
     local_core: AtomicBool,
 }
@@ -429,6 +431,8 @@ impl ActorSystem {
                 account_gated: AtomicBool::new(false),
                 stopping: AtomicBool::new(false),
                 idle_timeout: std::time::Duration::from_secs(60),
+                #[cfg(test)]
+                idle_timeout_override: Mutex::new(None),
                 core: RwLock::new(None),
                 local_core: AtomicBool::new(false),
             }),
@@ -694,13 +698,17 @@ impl ActorSystem {
         Ok(())
     }
     pub(crate) fn idle_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(timeout) = *self.inner.idle_timeout_override.lock() {
+            return timeout;
+        }
         self.inner.idle_timeout
     }
     #[cfg(test)]
-    pub(crate) fn set_idle_timeout(&mut self, timeout: std::time::Duration) {
-        Arc::get_mut(&mut self.inner)
-            .expect("No workers or other owners yet")
-            .idle_timeout = timeout;
+    pub(crate) fn set_idle_timeout(&self, timeout: std::time::Duration) {
+        // Background maintenance holds Weak references even before Actor workers
+        // start, so fixture configuration cannot require Arc exclusivity.
+        *self.inner.idle_timeout_override.lock() = Some(timeout);
     }
     #[cfg(test)]
     pub(crate) fn resident_workers(&self) -> usize {

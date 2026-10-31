@@ -693,7 +693,7 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
         MockReply::Answer("First"),
         MockReply::Answer("Second"),
     ]));
-    let (_dir, mut system) = runtime(provider.clone()).await;
+    let (_dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
     let root = system.actor("root").unwrap();
     for index in 0..64 {
@@ -744,7 +744,7 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::AnswerOnEveryRequest(
         "Done",
     )]));
-    let (_dir, mut system) = runtime(provider.clone()).await;
+    let (_dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(1));
     for round in 0..6 {
         let mut sends = tokio::task::JoinSet::new();
@@ -786,7 +786,7 @@ async fn reopening_starts_only_queued_actors_and_never_replays_completed_input()
         MockReply::Answer("Done"),
         MockReply::Answer("After restart"),
     ]));
-    let (dir, mut system) = runtime(provider.clone()).await;
+    let (dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
     let root = system.actor("root").unwrap();
     let mut config = root.config.clone();
