@@ -128,7 +128,10 @@ pub struct ModelConfig {
     pub temperature: f64,
     pub thinking_budget: Option<ThinkingBudget>,
     pub rpm: Option<u32>,
-    pub request_timeout_secs: u64,
+    /// Maximum wait for response headers; zero disables this deadline.
+    #[serde(alias = "request_timeout_secs")]
+    pub response_header_timeout_secs: u64,
+    /// Maximum gap between response body chunks; zero permits silent waiting.
     pub stream_idle_timeout_secs: u64,
     pub context_window_tokens: usize,
     #[serde(default)]
@@ -161,7 +164,7 @@ impl Default for ModelConfig {
             temperature: 1.0,
             thinking_budget: None,
             rpm: None,
-            request_timeout_secs: 300,
+            response_header_timeout_secs: 300,
             stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: None,
@@ -185,12 +188,14 @@ impl ModelConfig {
             .filter(|r| *r > 0)
     }
 
-    pub fn request_timeout_secs(&self) -> u64 {
-        self.request_timeout_secs.max(1)
+    pub fn response_header_timeout(&self) -> Option<std::time::Duration> {
+        (self.response_header_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.response_header_timeout_secs))
     }
 
-    pub fn stream_idle_timeout_secs(&self) -> u64 {
-        self.stream_idle_timeout_secs.max(1)
+    pub fn stream_idle_timeout(&self) -> Option<std::time::Duration> {
+        (self.stream_idle_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.stream_idle_timeout_secs))
     }
 
     pub fn context_window_tokens(&self) -> usize {
@@ -476,8 +481,8 @@ async fn write_config_backup(config_path: &Path) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, ModelConfig, ProviderConfig, ThinkingBudget,
-        normalize_provider_base_url, resolve_env_reference,
+        Config, ModelConfig, ProviderConfig, ThinkingBudget, normalize_provider_base_url,
+        resolve_env_reference,
     };
 
     struct EnvOverride {
@@ -666,25 +671,19 @@ thinking_budget = "xhigh"
     }
 
     #[test]
-    fn stream_idle_timeout_honors_configuration_with_a_positive_minimum() {
-        let model = ModelConfig {
-            stream_idle_timeout_secs: 45,
-            ..Default::default()
-        };
-
-        assert_eq!(model.stream_idle_timeout_secs(), 45);
+    fn legacy_model_timeout_migrates_to_headers_and_zero_disables_wait_limits() {
+        let model: ModelConfig =
+            toml::from_str("request_timeout_secs = 7200\nstream_idle_timeout_secs = 0").unwrap();
         assert_eq!(
-            ModelConfig::default().stream_idle_timeout_secs(),
-            DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+            model.response_header_timeout(),
+            Some(std::time::Duration::from_secs(7200))
         );
-        assert_eq!(
-            ModelConfig {
-                stream_idle_timeout_secs: 0,
-                ..Default::default()
-            }
-            .stream_idle_timeout_secs(),
-            1
-        );
+        assert_eq!(model.stream_idle_timeout(), None);
+        let saved = toml::to_string(&model).unwrap();
+        assert!(saved.contains("response_header_timeout_secs = 7200"));
+        assert!(!saved.contains("request_timeout_secs"));
+        let unlimited: ModelConfig = toml::from_str("response_header_timeout_secs = 0").unwrap();
+        assert_eq!(unlimited.response_header_timeout(), None);
     }
 
     #[cfg(unix)]

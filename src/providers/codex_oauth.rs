@@ -34,7 +34,7 @@ use crate::{
 
 use super::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, read_response_text_with_timeout, send_request_for_streaming_response,
+    non_empty_string, read_response_text_with_idle_timeout, send_request_for_streaming_response,
     shared_request_rate_limiter, summarize_agent_turn_request, summarize_prompt_request,
     truncate_for_error, truncate_for_json_error,
 };
@@ -77,8 +77,8 @@ struct CodexResponsesClient {
     max_output_tokens: Option<usize>,
     thinking_budget: Option<String>,
     rpm: Option<usize>,
-    request_timeout: Duration,
-    stream_idle_timeout: Duration,
+    header_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
@@ -181,8 +181,8 @@ struct CodexCliAuthTokens {
 impl CodexResponsesClient {
     fn new(base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = crate::config::normalize_provider_base_url(base_url);
-        let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
-        let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
+        let header_timeout = model_config.response_header_timeout();
+        let stream_idle_timeout = model_config.stream_idle_timeout();
         let client = codex_responses_http_client_builder()
             .build()
             .expect("failed to build Codex Responses http client");
@@ -208,7 +208,7 @@ impl CodexResponsesClient {
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
             rpm: model_config.rpm(),
-            request_timeout,
+            header_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -326,7 +326,7 @@ impl CodexResponsesClient {
             }
             let response = send_request_for_streaming_response(
                 request.json(payload),
-                self.request_timeout,
+                self.header_timeout,
                 "Codex Responses request failed",
                 &url,
                 request_context,
@@ -339,9 +339,9 @@ impl CodexResponsesClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(super::parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    self.request_timeout,
+                    self.stream_idle_timeout,
                     "Codex Responses 429 body read failed",
                     &url,
                     request_context,
@@ -374,9 +374,9 @@ impl CodexResponsesClient {
 
             if response.status().is_server_error() {
                 let status = response.status();
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    self.request_timeout,
+                    self.stream_idle_timeout,
                     "Codex Responses 5xx body read failed",
                     &url,
                     request_context,
@@ -431,9 +431,9 @@ impl CodexResponsesClient {
         let status = response.status();
         if !status.is_success() {
             let url = self.url();
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "Codex Responses body read failed",
                 &url,
                 &request_context,
@@ -507,9 +507,9 @@ impl CodexResponsesClient {
                     .await;
             }
             let url = self.url();
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "Codex Responses body read failed",
                 &url,
                 &request_context,
@@ -608,12 +608,12 @@ impl CodexResponsesClient {
         ];
 
         while !completed {
-            let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+            let next_chunk = super::io::wait_with_timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
                     miette!(
                         "Codex Responses stream stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
+                        self.stream_idle_timeout.unwrap_or_default().as_secs(),
                         self.model,
                         url
                     )
@@ -2093,6 +2093,33 @@ mod tests {
                 ..ModelConfig::default()
             },
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_heartbeats_and_slow_thinking_survive_long_inference_and_disabled_idle_limits() {
+        for idle in [Some(Duration::from_secs(900)), None] {
+            let mut client = test_client();
+            client.stream_idle_timeout = idle;
+            let events = vec![
+                b": keepalive\n\n".to_vec(),
+                b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Thinking\"}\n\n".to_vec(),
+                b": keepalive\n\n".to_vec(),
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n\n".to_vec(),
+                b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n".to_vec(),
+            ];
+            let gap = if idle.is_some() {
+                Duration::from_secs(600)
+            } else {
+                Duration::from_secs(3600)
+            };
+            let response = super::super::timeout_tests::slow_response(events, gap);
+            let result = client
+                .parse_responses_stream(None, response, false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.last_assistant_message.as_deref(), Some("Done"));
+            assert_eq!(result.last_reasoning_content.as_deref(), Some("Thinking"));
+        }
     }
 
     fn test_identity() -> CodexRequestIdentity {

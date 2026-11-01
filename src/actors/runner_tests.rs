@@ -1,5 +1,7 @@
 #[path = "runner_batch_tests.rs"]
 mod input_batch_tests;
+#[path = "runner_model_wait_tests.rs"]
+mod model_wait_tests;
 #[path = "tool_definition_tests.rs"]
 mod tool_definition_tests;
 

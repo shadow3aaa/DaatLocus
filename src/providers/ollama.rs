@@ -27,7 +27,7 @@ use crate::{
     providers::io::{
         default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
         looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
-        read_response_text_with_timeout, send_request_for_streaming_response,
+        read_response_text_with_idle_timeout, send_request_for_streaming_response,
         should_retry_request_without_thinking_budget, summarize_agent_turn_request,
         summarize_prompt_request, truncate_for_error,
     },
@@ -104,8 +104,8 @@ pub struct OllamaClient {
     request_rate_limiter:
         Option<std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<Instant>>>>,
     keep_alive: Option<String>,
-    request_timeout: Duration,
-    stream_idle_timeout: Duration,
+    header_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
     reserved_output_tokens: usize,
@@ -121,8 +121,8 @@ impl OllamaClient {
         keep_alive: Option<&str>,
     ) -> Self {
         let host = parse_host(host);
-        let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
-        let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
+        let header_timeout = model_config.response_header_timeout();
+        let stream_idle_timeout = model_config.stream_idle_timeout();
         let client = crate::http_client::builder()
             .connect_timeout(Duration::from_secs(15))
             .build()
@@ -170,7 +170,7 @@ impl OllamaClient {
             keep_alive: keep_alive
                 .map(std::string::ToString::to_string)
                 .filter(|s| !s.is_empty()),
-            request_timeout,
+            header_timeout,
             stream_idle_timeout,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
@@ -301,7 +301,7 @@ impl OllamaClient {
             }
             let response = send_request_for_streaming_response(
                 req,
-                self.stream_idle_timeout,
+                self.header_timeout,
                 "ollama chat request failed",
                 &url,
                 request_context,
@@ -316,7 +316,7 @@ impl OllamaClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
                     self.stream_idle_timeout,
                     "ollama 429 response body read failed",
@@ -347,7 +347,7 @@ impl OllamaClient {
             }
 
             if status.is_server_error() {
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
                     self.stream_idle_timeout,
                     "ollama 5xx response body read failed",
@@ -374,7 +374,7 @@ impl OllamaClient {
                 continue;
             }
 
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
                 self.stream_idle_timeout,
                 "ollama response body read failed",
@@ -494,7 +494,7 @@ impl OllamaClient {
         }
         send_request_for_streaming_response(
             req,
-            self.request_timeout,
+            self.header_timeout,
             "ollama chat stream request failed",
             &url,
             request_context,
@@ -534,9 +534,9 @@ impl OllamaClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    self.request_timeout,
+                    self.stream_idle_timeout,
                     "ollama stream 429 response body read failed",
                     &url,
                     &request_context,
@@ -565,9 +565,9 @@ impl OllamaClient {
             }
 
             if status.is_server_error() {
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    self.request_timeout,
+                    self.stream_idle_timeout,
                     "ollama stream 5xx response body read failed",
                     &url,
                     &request_context,
@@ -593,9 +593,9 @@ impl OllamaClient {
             }
 
             if !status.is_success() {
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    self.request_timeout,
+                    self.stream_idle_timeout,
                     "ollama stream error response body read failed",
                     &url,
                     &request_context,
@@ -695,16 +695,17 @@ impl OllamaClient {
         futures_util::pin_mut!(bytes_stream);
 
         loop {
-            let next_chunk = tokio::time::timeout(self.stream_idle_timeout, bytes_stream.next())
-                .await
-                .map_err(|_| {
-                    miette!(
-                        "ollama streaming response stalled for over {}s (model={}, url={})",
-                        self.stream_idle_timeout.as_secs(),
-                        self.model,
-                        url
-                    )
-                })?;
+            let next_chunk =
+                super::io::wait_with_timeout(self.stream_idle_timeout, bytes_stream.next())
+                    .await
+                    .map_err(|_| {
+                        miette!(
+                            "ollama streaming response stalled for over {}s (model={}, url={})",
+                            self.stream_idle_timeout.unwrap_or_default().as_secs(),
+                            self.model,
+                            url
+                        )
+                    })?;
             let Some(chunk) = next_chunk else {
                 break;
             };

@@ -244,7 +244,7 @@ export type ModelConfig = {
   thinking_budget?: string | null;
   temperature?: number | null;
   rpm?: number | null;
-  request_timeout_secs?: number | null;
+  response_header_timeout_secs?: number | null;
   stream_idle_timeout_secs?: number | null;
   auto_compact_token_limit?: number | null;
   effective_context_window_percent?: number | null;

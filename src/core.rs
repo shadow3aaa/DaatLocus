@@ -365,8 +365,6 @@ pub trait ModelProvider: Send + Sync {
 #[derive(Clone, Copy, Debug)]
 pub struct AgentTurnRetryPolicy {
     pub max_attempts: usize,
-    pub base_request_timeout: Duration,
-    pub max_request_timeout: Duration,
     pub base_backoff: Duration,
     pub max_backoff: Duration,
 }
@@ -375,8 +373,6 @@ impl Default for AgentTurnRetryPolicy {
     fn default() -> Self {
         Self {
             max_attempts: 6,
-            base_request_timeout: Duration::from_mins(5),
-            max_request_timeout: Duration::from_mins(20),
             base_backoff: Duration::from_millis(300),
             max_backoff: Duration::from_secs(30),
         }
@@ -384,10 +380,6 @@ impl Default for AgentTurnRetryPolicy {
 }
 
 impl AgentTurnRetryPolicy {
-    pub fn request_timeout_for_attempt(self, attempt: usize) -> Duration {
-        exponential_retry_duration(self.base_request_timeout, self.max_request_timeout, attempt)
-    }
-
     pub fn backoff_for_attempt(self, attempt: usize) -> Duration {
         exponential_retry_duration(self.base_backoff, self.max_backoff, attempt)
     }
@@ -459,7 +451,6 @@ where
             });
         }
 
-        let request_timeout = policy.request_timeout_for_attempt(attempt);
         if let Some(on_attempt_started) = observer.on_attempt_started {
             on_attempt_started(attempt);
         }
@@ -467,7 +458,6 @@ where
             provider,
             request.clone(),
             options.clone(),
-            request_timeout,
             &is_cancelled,
         )
         .await
@@ -520,7 +510,6 @@ async fn complete_agent_turn_attempt_cancellable<F>(
     provider: &(dyn ModelProvider + Send + Sync),
     request: AgentTurnRequest,
     options: ModelRequestOptions,
-    request_timeout: Duration,
     is_cancelled: &F,
 ) -> Option<Result<AgentTurnStreamResult>>
 where
@@ -532,21 +521,12 @@ where
     if let Some(progress) = options.progress.as_ref() {
         progress.emit_draft_reset();
     }
-    let request = tokio::time::timeout(
-        request_timeout,
-        provider.complete_agent_turn(request, options),
-    );
+    let request = provider.complete_agent_turn(request, options);
     tokio::pin!(request);
     loop {
         tokio::select! {
             result = &mut request => {
-                return Some(match result {
-                    Ok(result) => result,
-                    Err(_elapsed) => Err(miette!(
-                        "model request timed out after {}s",
-                        request_timeout.as_secs()
-                    )),
-                });
+                return Some(result);
             }
             () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
                 if is_cancelled() {
@@ -637,6 +617,8 @@ mod tests {
     struct RetryTestProvider {
         outcomes: std::sync::Mutex<Vec<Result<AgentTurnStreamResult>>>,
         calls: AtomicUsize,
+        gate: Option<Arc<tokio::sync::Notify>>,
+        started: tokio::sync::Notify,
     }
 
     impl RetryTestProvider {
@@ -644,6 +626,8 @@ mod tests {
             Self {
                 outcomes: std::sync::Mutex::new(outcomes),
                 calls: AtomicUsize::new(0),
+                gate: None,
+                started: tokio::sync::Notify::new(),
             }
         }
     }
@@ -664,6 +648,10 @@ mod tests {
             _options: ModelRequestOptions,
         ) -> Result<AgentTurnStreamResult> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            if let Some(gate) = &self.gate {
+                gate.notified().await;
+            }
             self.outcomes
                 .lock()
                 .expect("retry test outcomes lock")
@@ -708,8 +696,6 @@ mod tests {
     fn retry_test_policy() -> AgentTurnRetryPolicy {
         AgentTurnRetryPolicy {
             max_attempts: 3,
-            base_request_timeout: Duration::from_secs(1),
-            max_request_timeout: Duration::from_secs(1),
             base_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
         }
@@ -744,6 +730,56 @@ mod tests {
 
             assert_eq!(result.attempts, 2);
             assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_helper_waits_without_total_deadline_and_cancels_in_flight() {
+        for cancel in [false, true] {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let mut provider = RetryTestProvider::new(vec![Ok(retry_test_response())]);
+            provider.gate = Some(gate.clone());
+            let provider = Arc::new(provider);
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let active = provider.clone();
+            let cancellation = cancelled.clone();
+            let task = tokio::spawn(async move {
+                let request = retry_test_request();
+                let options =
+                    ModelRequestOptions::for_agent_turn(active.as_ref(), &request, None).unwrap();
+                complete_agent_turn_with_retry_using_policy_cancellable_with_observer(
+                    active.as_ref(),
+                    request,
+                    options,
+                    retry_test_policy(),
+                    || cancellation.load(Ordering::SeqCst),
+                    AgentTurnRetryObserver::default(),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), provider.started.notified())
+                .await
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::task::yield_now().await;
+            assert!(!task.is_finished());
+            if cancel {
+                cancelled.store(true, Ordering::SeqCst);
+            } else {
+                gate.notify_one();
+            }
+            tokio::time::resume();
+            let result = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            if cancel {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.ok().unwrap().attempts, 1);
+            }
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
     }
     #[tokio::test]

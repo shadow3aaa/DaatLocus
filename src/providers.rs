@@ -58,13 +58,15 @@ mod stream_diagnostics;
 mod transport;
 use transport::{Authentication, BackendHttp};
 mod failure;
+#[cfg(test)]
+mod timeout_tests;
 pub(crate) use failure::{ModelFailureKind, ModelRequestFailure};
 mod io;
 use io::{
     StreamingToolCallBuilder, default_rate_limit_backoff, format_request_error,
     looks_like_context_window_error, looks_like_vision_unsupported_error, non_empty_string,
     normalize_sse_buffer, parse_agent_turn_stream_result_from_json, parse_retry_after_seconds,
-    parse_usage_from_response_json, read_response_text_with_timeout,
+    parse_usage_from_response_json, read_response_text_with_idle_timeout,
     send_request_for_streaming_response, should_retry_prompt_request_with_nested_thinking_budget,
     should_retry_request_without_reasoning_content, should_retry_request_without_thinking_budget,
     summarize_agent_turn_request, summarize_prompt_request, take_next_sse_event,
@@ -92,8 +94,8 @@ pub struct OpenAIClient {
     model: String,
     temperature: f64,
     thinking_budget: Option<String>,
-    request_timeout: Duration,
-    stream_idle_timeout: Duration,
+    header_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
@@ -212,8 +214,8 @@ impl OpenAIClient {
     /// Build from standalone credentials and `ModelConfig`.
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = normalize_provider_base_url(base_url);
-        let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
-        let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
+        let header_timeout = model_config.response_header_timeout();
+        let stream_idle_timeout = model_config.stream_idle_timeout();
         let transport = BackendHttp::new(&base_url, model_config);
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
@@ -238,7 +240,7 @@ impl OpenAIClient {
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
-            request_timeout,
+            header_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -376,12 +378,17 @@ impl OpenAIClient {
                 output_schema.clone(),
             );
             let response = backend_request
-                .post(&payload, &request_context, self.request_timeout)
+                .post(
+                    &payload,
+                    &request_context,
+                    self.header_timeout,
+                    self.stream_idle_timeout,
+                )
                 .await?;
             let status = response.status();
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "llm response body read failed",
                 &url,
                 &request_context,
@@ -532,7 +539,12 @@ impl OpenAIClient {
                 .adapter_for_state(adapter_state)
                 .build_agent_turn_payload(self, request.clone(), true);
             let response = backend_request
-                .post(&payload, &request_context, self.request_timeout)
+                .post(
+                    &payload,
+                    &request_context,
+                    self.header_timeout,
+                    self.stream_idle_timeout,
+                )
                 .await?;
             let status = response.status();
             let content_type = response
@@ -548,9 +560,9 @@ impl OpenAIClient {
                 break (response, content_type);
             }
 
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "llm response body read failed",
                 &url,
                 &request_context,
@@ -662,9 +674,9 @@ impl OpenAIClient {
         };
 
         if !content_type_is_event_stream(&content_type) {
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "llm response body read failed",
                 &url,
                 &request_context,
@@ -714,21 +726,23 @@ impl OpenAIClient {
             // A finish_reason ends the generation even if a gateway keeps its SSE
             // connection alive. Briefly drain the optional trailing usage frame.
             let timeout = finished_at.map_or(self.stream_idle_timeout, |finished| {
-                Duration::from_secs(1)
-                    .saturating_sub(finished.elapsed())
-                    .min(self.stream_idle_timeout)
+                let remaining = Duration::from_secs(1).saturating_sub(finished.elapsed());
+                Some(
+                    self.stream_idle_timeout
+                        .map_or(remaining, |idle| remaining.min(idle)),
+                )
             });
-            if timeout.is_zero() {
+            if timeout.is_some_and(|timeout| timeout.is_zero()) {
                 break;
             }
-            let next_chunk = match tokio::time::timeout(timeout, stream.next()).await {
+            let next_chunk = match io::wait_with_timeout(timeout, stream.next()).await {
                 Err(_) if finished_at.is_some() => break,
                 value => value.map_err(|_| {
                     ModelRequestFailure::report(
                         ModelFailureKind::Timeout,
                         format!(
                             "llm streaming response stalled for over {}s (model={}, url={})",
-                            self.stream_idle_timeout.as_secs(),
+                            self.stream_idle_timeout.unwrap_or_default().as_secs(),
                             self.model,
                             url
                         ),

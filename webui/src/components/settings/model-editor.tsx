@@ -36,7 +36,7 @@ export function ModelEditor({model, metadata, onChange, disabled, onChoose}: {
   function edit(change: Partial<ModelConfig>) { onChange({...model, ...change}); }
   const numbers = [
     ["temperature", t("model_editor.temperature")], ["rpm", t("model_editor.requests_per_minute")],
-    ["request_timeout_secs", t("model_editor.request_timeout_seconds")],
+    ["response_header_timeout_secs", t("model_editor.response_header_timeout_seconds")],
     ["stream_idle_timeout_secs", t("model_editor.stream_idle_timeout_seconds")],
     ["auto_compact_token_limit", t("model_editor.context_reset_threshold")],
     ["effective_context_window_percent", t("model_editor.usable_context")],

@@ -345,7 +345,6 @@ struct InferenceModel {
     vision: bool,
     provider: Arc<dyn ModelProvider>,
     usage: super::ModelUsage,
-    timeout: Duration,
     binding: String,
 }
 impl InferenceModel {
@@ -359,13 +358,6 @@ impl InferenceModel {
                 .models
                 .get(model_name)
                 .ok_or_else(|| miette!("Actor model is unavailable"))?,
-        );
-        let request_timeout = Duration::from_secs(
-            config
-                .models
-                .get(model_name)
-                .map_or(300, |model| model.request_timeout_secs)
-                .clamp(1, 1_200),
         );
         let binding = {
             let model = config
@@ -387,7 +379,6 @@ impl InferenceModel {
             vision: builtin_apps::vision_support(actor, &config)?,
             provider,
             usage: model_usage,
-            timeout: request_timeout,
             binding,
         })
     }
@@ -548,7 +539,6 @@ async fn execute_message_batch(
                 control,
                 model.provider.as_ref(),
                 request,
-                model.timeout,
                 &mut generation,
                 &model.binding,
                 &model.usage,
@@ -595,7 +585,6 @@ async fn execute_message_batch(
             control,
             model.provider.as_ref(),
             request,
-            model.timeout,
             &mut generation,
             &model.binding,
             &model.usage,
@@ -1285,7 +1274,6 @@ async fn generate(
     control: &ActorControl,
     provider: &dyn ModelProvider,
     request: AgentTurnRequest,
-    timeout: Duration,
     generation: &mut u32,
     binding: &str,
     model_usage: &super::ModelUsage,
@@ -1293,11 +1281,7 @@ async fn generate(
     vision: bool,
     publish_progress: bool,
 ) -> Result<Option<AgentTurnStreamResult>> {
-    let policy = AgentTurnRetryPolicy {
-        base_request_timeout: timeout,
-        max_request_timeout: timeout.max(Duration::from_secs(1200)),
-        ..AgentTurnRetryPolicy::default()
-    };
+    let policy = AgentTurnRetryPolicy::default();
     for attempt in 1..=policy.max_attempts {
         if system.store().batch_cancellation_pending(&message.id)? {
             return Ok(None);
@@ -1348,10 +1332,7 @@ async fn generate(
         .await?;
         check_interruption(system, control, message)?;
         let usage_before = provider.token_usage_info().total_token_usage;
-        let future = tokio::time::timeout(
-            policy.request_timeout_for_attempt(attempt),
-            provider.complete_agent_turn(materialized, options),
-        );
+        let future = provider.complete_agent_turn(materialized, options);
         tokio::pin!(future);
         let mut pending = ProgressBuffer::default();
         let mut progress_open = true;
@@ -1359,10 +1340,7 @@ async fn generate(
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result = loop {
             tokio::select! {
-                response = &mut future => break match response {
-                    Ok(response) => response,
-                    Err(_) => Err(miette!("Model request timed out")),
-                },
+                response = &mut future => break response,
                 progress = rx.recv(), if progress_open => match progress {
                     Some(progress) => handle_progress(system, actor, message, generation, &mut pending, progress)?,
                     None => progress_open = false,

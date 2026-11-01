@@ -2,7 +2,7 @@
 //! context; authentication, gateway identity and retry bookkeeping live here.
 use super::{
     default_rate_limit_backoff, opencode_gateway_headers, parse_retry_after_seconds,
-    read_response_text_with_timeout, send_request_for_streaming_response,
+    read_response_text_with_idle_timeout, send_request_for_streaming_response,
     shared_request_rate_limiter, truncate_for_error,
 };
 use crate::{config::ModelConfig, core::ModelRequestOptions};
@@ -119,7 +119,8 @@ impl BackendRequest<'_> {
         &self,
         payload: &serde_json::Value,
         diagnostics: &[String],
-        header_timeout: Duration,
+        header_timeout: Option<Duration>,
+        body_idle_timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
         crate::image_input::validate_payload(payload)?;
         let (mut rate_retries, mut server_retries) = (0usize, 0usize);
@@ -142,9 +143,9 @@ impl BackendRequest<'_> {
                 status,
                 reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
             ) {
-                let body = read_response_text_with_timeout(
+                let body = read_response_text_with_idle_timeout(
                     response,
-                    header_timeout,
+                    body_idle_timeout,
                     "Model error response read failed",
                     &self.url,
                     diagnostics,
@@ -184,9 +185,9 @@ impl BackendRequest<'_> {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_retry_after_seconds);
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                header_timeout,
+                body_idle_timeout,
                 "Model error response read failed",
                 &self.url,
                 diagnostics,
@@ -512,7 +513,7 @@ mod tests {
         });
         let base = format!("http://{address}/v1");
         let model = ModelConfig {
-            request_timeout_secs: 1,
+            response_header_timeout_secs: 1,
             stream_idle_timeout_secs: 1,
             ..Default::default()
         };

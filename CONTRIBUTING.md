@@ -43,6 +43,8 @@ The build normally downloads the models.dev catalog. For an offline build, set `
 
 Codex credential imports follow the selected source file read-only, including token rotations for the same account. Keep Codex signed in so it can renew that login. For a login managed and refreshed by Daat Locus, use browser or device login instead. Imports made before source tracking was added need to be imported again once; their original source cannot be inferred safely.
 
+Model inference has no total time limit. `response_header_timeout_secs` limits waiting for response headers; `stream_idle_timeout_secs` limits gaps between response body chunks, including non-streaming responses. Zero disables either limit. The former `request_timeout_secs` field is accepted as a response-header timeout when loading existing configuration. Cancellation and incoming-message interruption remain available while waiting.
+
 ## Frontend development
 
 The mock preview runs without a service, account or WASM build:

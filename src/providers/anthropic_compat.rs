@@ -25,7 +25,7 @@ use tracing::warn;
 use super::extract_json_value_from_content;
 use super::io::{
     format_request_error, looks_like_context_window_error, looks_like_vision_unsupported_error,
-    non_empty_string, read_response_text_with_timeout, summarize_agent_turn_request,
+    non_empty_string, read_response_text_with_idle_timeout, summarize_agent_turn_request,
     summarize_prompt_request, truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
@@ -66,8 +66,8 @@ pub struct AnthropicCompatibleClient {
     model: String,
     temperature: f64,
     thinking_budget: Option<String>,
-    request_timeout: Duration,
-    stream_idle_timeout: Duration,
+    header_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
@@ -89,8 +89,8 @@ impl AnthropicCompatibleClient {
         model_config: &crate::config::ModelConfig,
     ) -> Self {
         let base_url = crate::config::normalize_provider_base_url(base_url);
-        let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
-        let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
+        let header_timeout = model_config.response_header_timeout();
+        let stream_idle_timeout = model_config.stream_idle_timeout();
         let transport = BackendHttp::new(&base_url, model_config);
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
@@ -109,7 +109,7 @@ impl AnthropicCompatibleClient {
             thinking_budget: model_config
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
-            request_timeout,
+            header_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -254,14 +254,14 @@ impl AnthropicCompatibleClient {
         ];
 
         'receive: while !state.completed {
-            let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+            let next_chunk = super::io::wait_with_timeout(self.stream_idle_timeout, stream.next())
                 .await
                 .map_err(|_| {
                     super::ModelRequestFailure::report(
                         super::ModelFailureKind::Timeout,
                         format!(
                             "anthropic-compatible stream stalled for over {}s (model={}, url={})",
-                            self.stream_idle_timeout.as_secs(),
+                            self.stream_idle_timeout.unwrap_or_default().as_secs(),
                             self.model,
                             url
                         ),
@@ -348,7 +348,12 @@ impl ModelProvider for AnthropicCompatibleClient {
         let response = loop {
             let payload = build_prompt_payload(self, &request, negotiation.state);
             let response = backend_request
-                .post(&payload, &request_context, self.request_timeout)
+                .post(
+                    &payload,
+                    &request_context,
+                    self.header_timeout,
+                    self.stream_idle_timeout,
+                )
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -356,9 +361,9 @@ impl ModelProvider for AnthropicCompatibleClient {
                 break response;
             }
             let url = self.url();
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "anthropic-compatible body read failed",
                 &url,
                 &request_context,
@@ -444,7 +449,12 @@ impl ModelProvider for AnthropicCompatibleClient {
         loop {
             let payload = build_agent_payload(self, &request, negotiation.state);
             let response = backend_request
-                .post(&payload, &request_context, self.request_timeout)
+                .post(
+                    &payload,
+                    &request_context,
+                    self.header_timeout,
+                    self.stream_idle_timeout,
+                )
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -452,9 +462,9 @@ impl ModelProvider for AnthropicCompatibleClient {
                 return self.parse_messages_stream(&options, response, true).await;
             }
             let url = self.url();
-            let body = read_response_text_with_timeout(
+            let body = read_response_text_with_idle_timeout(
                 response,
-                self.request_timeout,
+                self.stream_idle_timeout,
                 "anthropic-compatible body read failed",
                 &url,
                 &request_context,

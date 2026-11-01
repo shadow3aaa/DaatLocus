@@ -167,7 +167,8 @@ pub struct SetupModelRequest {
     #[serde(default)]
     pub rpm: Option<u32>,
     #[serde(default)]
-    pub request_timeout_secs: Option<u64>,
+    #[serde(alias = "request_timeout_secs")]
+    pub response_header_timeout_secs: Option<u64>,
     #[serde(default)]
     pub stream_idle_timeout_secs: Option<u64>,
     #[serde(default)]
@@ -807,7 +808,7 @@ fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest
             .map(|budget| budget.as_str().to_string()),
         temperature: Some(model.temperature),
         rpm: model.rpm,
-        request_timeout_secs: Some(model.request_timeout_secs),
+        response_header_timeout_secs: Some(model.response_header_timeout_secs),
         stream_idle_timeout_secs: Some(model.stream_idle_timeout_secs),
         auto_compact_token_limit: model.auto_compact_token_limit,
         effective_context_window_percent: Some(model.effective_context_window_percent),
@@ -1564,9 +1565,9 @@ fn model_from_setup_model(
             .into(),
         temperature: model.temperature.unwrap_or(default.temperature),
         rpm: model.rpm,
-        request_timeout_secs: model
-            .request_timeout_secs
-            .unwrap_or(default.request_timeout_secs),
+        response_header_timeout_secs: model
+            .response_header_timeout_secs
+            .unwrap_or(default.response_header_timeout_secs),
         stream_idle_timeout_secs: model
             .stream_idle_timeout_secs
             .unwrap_or(default.stream_idle_timeout_secs),

@@ -588,19 +588,19 @@ fn request_error_headline(prefix: &str, kind: &str, source: &str) -> String {
 
 pub async fn send_request_for_streaming_response(
     request: reqwest::RequestBuilder,
-    timeout: Duration,
+    timeout: Option<Duration>,
     prefix: &str,
     url: &str,
     request_context: &[String],
 ) -> miette::Result<reqwest::Response> {
-    match tokio::time::timeout(timeout, request.send()).await {
+    match wait_with_timeout(timeout, request.send()).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(err)) => Err(format_request_error(prefix, url, request_context, &err)),
         Err(_) => {
             let mut lines = vec![
                 format!(
                     "{prefix}: response headers timed out after {}s",
-                    timeout.as_secs()
+                    timeout.unwrap_or_default().as_secs()
                 ),
                 format!("url={url}"),
             ];
@@ -614,31 +614,54 @@ pub async fn send_request_for_streaming_response(
     }
 }
 
-pub async fn read_response_text_with_timeout(
-    response: reqwest::Response,
-    timeout: Duration,
+pub async fn read_response_text_with_idle_timeout(
+    mut response: reqwest::Response,
+    timeout: Option<Duration>,
     prefix: &str,
     url: &str,
     request_context: &[String],
 ) -> miette::Result<String> {
-    match tokio::time::timeout(timeout, response.text()).await {
-        Ok(Ok(body)) => Ok(body),
-        Ok(Err(err)) => Err(format_request_error(prefix, url, request_context, &err)),
-        Err(_) => {
-            let mut lines = vec![
-                format!(
-                    "{prefix}: response body timed out after {}s",
-                    timeout.as_secs()
-                ),
-                format!("url={url}"),
-            ];
-            lines.extend(request_context.iter().cloned());
-            lines.push("kind=response_body_timeout".to_string());
-            Err(ModelRequestFailure::report(
-                ModelFailureKind::Timeout,
-                lines.join("\n"),
-            ))
+    let headers = response.headers().clone();
+    let mut body = Vec::new();
+    loop {
+        match wait_with_timeout(timeout, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => return Err(format_request_error(prefix, url, request_context, &err)),
+            Err(_) => {
+                let mut lines = vec![
+                    format!(
+                        "{prefix}: response body idle for {}s",
+                        timeout.unwrap_or_default().as_secs()
+                    ),
+                    format!("url={url}"),
+                ];
+                lines.extend(request_context.iter().cloned());
+                lines.push("kind=response_body_idle_timeout".to_string());
+                return Err(ModelRequestFailure::report(
+                    ModelFailureKind::Timeout,
+                    lines.join("\n"),
+                ));
+            }
         }
+    }
+    // Retain reqwest's charset and BOM decoding after collecting the body with
+    // an inactivity deadline rather than an absolute download deadline.
+    let mut buffered = axum::http::Response::new(body);
+    *buffered.headers_mut() = headers;
+    reqwest::Response::from(buffered)
+        .text()
+        .await
+        .map_err(|err| format_request_error(prefix, url, request_context, &err))
+}
+
+pub(super) async fn wait_with_timeout<T>(
+    timeout: Option<Duration>,
+    future: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, tokio::time::error::Elapsed> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future).await,
+        None => Ok(future.await),
     }
 }
 

@@ -43,6 +43,8 @@ export DAAT_LOCUS_BUILD_WEBUI=0
 
 导入 Codex 凭据会只读跟随所选源文件，包括同一账号的令牌轮换；请保持 Codex 登录，让它续期。若希望由 Daat Locus 管理登录和续期，使用浏览器或设备登录。加入来源记录之前导入的旧副本需要重新导入一次，程序无法安全推断其原始来源。
 
+模型推理没有总时限。`response_header_timeout_secs` 限制等待响应头的时间，`stream_idle_timeout_secs` 限制响应体数据块之间的空闲时间，也适用于非流式响应。两者设为零均表示不限时。加载旧配置时，`request_timeout_secs` 按响应头等待超时读取。等待期间仍支持取消和新消息中断。
+
 ## 前端开发
 
 mock 预览不需要服务、账号或 WASM 构建：
