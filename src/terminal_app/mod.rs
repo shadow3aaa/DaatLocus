@@ -634,6 +634,54 @@ mod tests {
     fn echo_command(text: &str) -> String {
         format!("printf '%s\\n' '{text}'")
     }
+
+    #[tokio::test]
+    async fn tool_calls_create_and_poll_sessions_without_null_placeholders() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = AppToolExecutionContext {
+            restart_native: false,
+            access_broker: None,
+            execution_cwd: directory.path().into(),
+            sandbox_policy: test_sandbox_policy(),
+            tool_output_max_tokens: 1000,
+            turn_epoch: 1,
+            actor_call: None,
+        };
+        let mut manager = crate::app::AppManager::new(vec![Box::new(TerminalApp::new())]).unwrap();
+        let call = AgentToolCall {
+            id: "minimal-exec".into(),
+            name: "terminal__terminal_exec".into(),
+            arguments: json!({"command":echo_command("NO_NULL_PLACEHOLDERS")}),
+        };
+        manager.validate_tool_call(&call, &context).unwrap();
+        let mut result = manager.execute_tool(&call, &context).await.unwrap();
+        let mut output = result.payload["output"].as_str().unwrap().to_string();
+        let session = result.payload["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Exercise write_stdin even when the initial command already completed.
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let poll = AgentToolCall {
+                    id: "minimal-poll".into(),
+                    name: "terminal__terminal_write_stdin".into(),
+                    arguments: json!({"session_id":session,"text":""}),
+                };
+                manager.validate_tool_call(&poll, &context).unwrap();
+                result = manager.execute_tool(&poll, &context).await.unwrap();
+                output.push_str(result.payload["output"].as_str().unwrap());
+                if result.payload["running"].as_bool() != Some(true) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        manager.shutdown().await.unwrap();
+        assert!(output.contains("NO_NULL_PLACEHOLDERS"), "{output}");
+        assert_eq!(result.payload["session"]["exit_code"], 0);
+    }
     fn long_running_command() -> String {
         "sleep 30".into()
     }

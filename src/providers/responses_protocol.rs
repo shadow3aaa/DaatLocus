@@ -110,7 +110,7 @@ pub(super) fn tool_to_responses_tool(tool: AgentToolSpec) -> Value {
     match tool.input_spec {
         AgentToolInputSpec::JsonSchema { schema } => json!({
             "type": "function", "name": tool.name, "description": tool.description,
-            "strict": true, "parameters": schema,
+            "strict": crate::schema_utils::supports_strict_schema(&schema), "parameters": schema,
         }),
         AgentToolInputSpec::FreeformGrammar {
             syntax,
@@ -126,7 +126,7 @@ pub(super) fn tool_to_responses_tool(tool: AgentToolSpec) -> Value {
                 json!({
                     "type": "function", "name": tool.name,
                     "description": format!("{}\n\nPut the complete freeform tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}", tool.description),
-                    "strict": true, "parameters": fallback_schema,
+                    "strict": crate::schema_utils::supports_strict_schema(&fallback_schema), "parameters": fallback_schema,
                 })
             }
         }

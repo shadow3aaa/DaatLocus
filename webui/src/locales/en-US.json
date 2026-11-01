@@ -177,7 +177,6 @@
     "delivered_time": "Delivered {{time}}"
   },
   "file_change": {
-    "file_updated_no_text_diff_is_available": "File updated. No text diff is available.",
     "copy_changes": "Copy changes",
     "changes_to_value0": "Changes to {{value0}}",
     "no_text_changes": "No text changes.",
@@ -553,8 +552,6 @@
     "content": "Content",
     "before": "Before",
     "after": "After",
-    "expected_file_version": "Expected file version",
-    "file_version": "File version",
     "start_line": "Start line",
     "end_line": "End line",
     "lines_to_read": "Lines to read",

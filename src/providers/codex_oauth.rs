@@ -1005,7 +1005,7 @@ fn build_prompt_responses_payload(
         "format": {
             "type": "json_schema",
             "name": sanitize_text_format_name(&request.tool_name),
-            "strict": true,
+            "strict": crate::schema_utils::supports_strict_schema(output_schema),
             "schema": output_schema,
         }
     });

@@ -186,16 +186,33 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn artifact_schema_is_portable_and_all_fields_required() {
+    fn artifact_sources_are_optional_fields_but_exactly_one_is_needed() {
         let schema = model_schema_for::<PresentArgs>();
         crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-        assert_eq!(schema["additionalProperties"], false);
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("resource"))
-        );
+        for arguments in [
+            json!({"url":"https://example.com"}),
+            json!({"resource":"owned-resource"}),
+        ] {
+            crate::schema_utils::validate_value_against_schema(&arguments, &schema, "artifacts")
+                .unwrap();
+            let call = AgentToolCall {
+                id: "source".into(),
+                name: "present".into(),
+                arguments,
+            };
+            assert!(PresentArgs::parse(&call).is_ok());
+        }
+        for arguments in [
+            json!({}),
+            json!({"url":"https://example.com","resource":"owned-resource"}),
+        ] {
+            let call = AgentToolCall {
+                id: "invalid-sources".into(),
+                name: "present".into(),
+                arguments,
+            };
+            assert!(PresentArgs::parse(&call).is_err());
+        }
     }
 
     #[tokio::test]

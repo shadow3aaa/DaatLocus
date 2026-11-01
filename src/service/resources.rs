@@ -93,7 +93,7 @@ pub(super) async fn upload(
         read_only_subpaths: vec![],
     }];
     policy.filesystem.bound_roots = vec![base.clone()];
-    crate::file_io::write_bytes(&base, &policy, &path.to_string_lossy(), &bytes, None)
+    crate::file_io::create_file_bytes(&base, &policy, &path.to_string_lossy(), &bytes)
         .map_err(|_| ApiError::internal())?;
     let uri = format!("/v1/actors/{actor}/resources/{id}");
     let attachment = Attachment {

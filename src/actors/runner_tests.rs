@@ -34,7 +34,7 @@ async fn model_preferences_switch_at_the_next_inference_without_restarting_work_
         AgentToolCall {
             id: "one-write".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"ONE_EFFECT","expected_sha256":null}),
+            arguments: json!({"path":"once.txt","content":"ONE_EFFECT"}),
         },
     ])]));
     let next = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
@@ -216,7 +216,7 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
         MockReply::Calls(vec![AgentToolCall {
             id: "rejected-write".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"must not be written","expected_sha256":null}),
+            arguments: json!({"path":target,"content":"must not be written"}),
         }]),
         MockReply::Answer("I will use an authorized alternative."),
     ]));
@@ -296,7 +296,7 @@ async fn filesystem_boundary_approval_resumes_original_call_without_a_model_retr
         MockReply::Calls(vec![AgentToolCall {
             id: "original-write".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"original call output","expected_sha256":null}),
+            arguments: json!({"path":target,"content":"original call output"}),
         }]),
         MockReply::Answer("Output created"),
     ]));
@@ -533,7 +533,7 @@ async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
             AgentToolCall {
                 id: "independent-file".into(),
                 name: "files__write_file".into(),
-                arguments: json!({"path":"continued.txt","content":"continued after invalid input","expected_sha256":null}),
+                arguments: json!({"path":"continued.txt","content":"continued after invalid input"}),
             },
         ]),
         MockReply::Answer("The invalid browser input was rejected; I can correct it."),
@@ -893,7 +893,7 @@ async fn empty_model_responses_retry_inference_without_replaying_completed_tool_
         MockReply::Calls(vec![AgentToolCall {
             id: "one-effect".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"ONE_EFFECT","expected_sha256":null}),
+            arguments: json!({"path":"once.txt","content":"ONE_EFFECT"}),
         }]),
         MockReply::Answer(""),
         MockReply::Answer("Completed after retry"),
@@ -2092,7 +2092,7 @@ async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_shar
         MockReply::Calls(vec![AgentToolCall {
             id: "write-on-device-b".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"device B output","expected_sha256":null}),
+            arguments: json!({"path":target,"content":"device B output"}),
         }]),
         MockReply::Answer("Output created"),
     ]);
@@ -3432,7 +3432,7 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-write-once".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"one.txt","content":"one effect","expected_sha256":null}),
+            arguments: json!({"path":"one.txt","content":"one effect"}),
         }]),
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-progress".into(),
@@ -3700,7 +3700,7 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-write".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"forbidden.txt","content":"must not be written","expected_sha256":null}),
+            arguments: json!({"path":"forbidden.txt","content":"must not be written"}),
         }]),
         MockReply::Answer("The write was denied."),
     ]));
@@ -3729,7 +3729,11 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
             name: "files__read_file".into(),
             arguments: json!({"path":approved_file,"start_line":null,"line_count":null}),
         });
-        calls.push(AgentToolCall { id:"remote-write-memory".into(), name:"files__write_file".into(), arguments:json!({"path":approved.join("forbidden.txt"),"content":"denied","expected_sha256":null}) });
+        calls.push(AgentToolCall {
+            id: "remote-write-memory".into(),
+            name: "files__write_file".into(),
+            arguments: json!({"path":approved.join("forbidden.txt"),"content":"denied"}),
+        });
         calls.push(AgentToolCall { id:"remote-delegation".into(), name:"actors__message".into(), arguments:json!({"reply_to":null,"actor_id":child.id,"stage_id":null,"content":"Attempt delegated work"}) });
     }
     let mut host =
@@ -6984,7 +6988,7 @@ fn sudo_write_call(id: &str, path: &std::path::Path, approval: Option<&str>) -> 
         id: id.into(),
         name: "sudo__execute".into(),
         arguments: json!({
-            "tool":"files__write_file", "arguments_json":json!({"path":path,"content":"reviewed host effect","expected_sha256":null}).to_string(),
+            "tool":"files__write_file", "arguments_json":json!({"path":path,"content":"reviewed host effect"}).to_string(),
             "reason":"Write the report requested by the Owner", "restart_native":false, "approval_id":approval,
         }),
     }

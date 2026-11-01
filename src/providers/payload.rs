@@ -25,11 +25,10 @@ pub(super) fn build_agent_turn_payload_common(
         .into_iter()
         .map(|tool| {
             let (description, parameters, strict) = match tool.input_spec {
-                AgentToolInputSpec::JsonSchema { schema } => (
-                    tool.description,
-                    schema,
-                    true,
-                ),
+                AgentToolInputSpec::JsonSchema { schema } => {
+                    let strict = crate::schema_utils::supports_strict_schema(&schema);
+                    (tool.description, schema, strict)
+                },
                 AgentToolInputSpec::FreeformGrammar {
                     syntax,
                     definition,

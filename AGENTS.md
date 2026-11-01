@@ -57,8 +57,8 @@ client are connected.
   architecture through aliases, adapters, compatibility bridges, or renamed
   Apps. Git history preserves the former implementation.
 - SCOPE/LSP and Coding wrappers are removed. Files/Skills are ordinary scoped App
-  operations, including SHA256 freshness checks. Do not restore the engine or
-  retain its build, hooks, dependency or documentation requirements.
+  operations without file-version hash arguments or observations. Do not restore
+  the engine or retain its build, hooks, dependency or documentation requirements.
 - Preserve independently useful code; remove interfaces, state, dependencies,
   tests, and documentation that exist only to support the deleted system.
 
@@ -415,11 +415,22 @@ schemas; do not silently repair them through provider-specific normalization.
   model-facing types. Use a narrow schema-only mirror when necessary, rather
   than handwritten provider JSON.
 - Root schemas are objects. Every object has `properties`, `required`, and
-  `additionalProperties: false`; every property is required.
-- Represent optional model-visible values as required nullable fields. Missing
-  field tolerance in local deserialization does not change this contract.
-- Do not emit JSON Schema `default`; serde defaults and `skip_serializing_if`
-  must not define model-visible optionality.
+  `additionalProperties: false`. `required` lists only mandatory properties and
+  is a duplicate-free subset of `properties`.
+- Field presence and nullability are independent. `T` is required and non-null;
+  `Nullable<T>` is required and nullable; `Presence<T>` is optional and preserves
+  omission; `Presence<Nullable<T>>` preserves missing, explicit null and value.
+  Ordinary `Option<T>` is optional and nullable, merging missing and null as None.
+  Preserve these semantics recursively through model schemas and deserialization.
+- Explicit field-level serde defaults make omission optional without permitting
+  null for a non-null type. Apply defaults in business code/deserialization, never
+  infer empty values, zero or false from a scalar type. Do not emit JSON Schema
+  `default`; serialization omission alone does not define input optionality.
+- Keep one canonical schema and validate calls against it. Enable upstream strict
+  decoding only when every nested object already has all its properties required.
+  Otherwise explicitly use non-strict calls; never turn omission into null or
+  rewrite required sets for a provider. Unsupported upstream contracts fail
+  explicitly rather than discarding presence information.
 - Use scalars, homogeneous arrays, objects, nullable unions, and string enums.
   Avoid dynamic keys/maps, tuple arrays, payload-carrying enums, `prefixItems`,
   and schema-valued `additionalProperties`.

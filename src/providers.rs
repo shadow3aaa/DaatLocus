@@ -979,7 +979,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
                 {
                     "type": "function",
                     "function": {
-                        "strict": true,
+                        "strict": crate::schema_utils::supports_strict_schema(&output_schema),
                         "name": request.tool_name,
                         "description": request.tool_description,
                         "parameters": output_schema
@@ -1027,7 +1027,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
                 {
                     "type": "function",
                     "function": {
-                        "strict": true,
+                        "strict": crate::schema_utils::supports_strict_schema(&output_schema),
                         "name": request.tool_name,
                         "description": request.tool_description,
                         "parameters": output_schema
@@ -2316,6 +2316,37 @@ mod tests {
 
         assert_eq!(enabled["tools"][0]["function"]["strict"], true);
         assert!(omitted["tools"][0]["function"].get("strict").is_none());
+    }
+
+    #[test]
+    fn optional_tool_fields_disable_strict_without_rewriting_the_schema() {
+        let client = OpenAIClient::from_parts(
+            "test-key",
+            "https://compatible.example/v1",
+            &ModelConfig::default(),
+        );
+        let schema = crate::schema_utils::model_schema_for::<crate::core::TerminalExecArgs>();
+        let tool = AgentToolSpec {
+            name: "terminal__terminal_exec".into(),
+            description: "Run a command".into(),
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: schema.clone(),
+            },
+        };
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user("run")],
+            tools: vec![tool.clone()],
+        };
+        let chat = CompatibleChatCompletionsAdapter {
+            state: ChatCompletionsAdapterState::default(),
+        }
+        .build_agent_turn_payload(&client, request, true);
+        let responses = responses_protocol::tool_to_responses_tool(tool);
+        assert_eq!(chat["tools"][0]["function"]["strict"], false);
+        assert_eq!(responses["strict"], false);
+        assert_eq!(chat["tools"][0]["function"]["parameters"], schema);
+        assert_eq!(responses["parameters"], schema);
+        assert_eq!(schema["required"], json!(["command"]));
     }
 
     #[test]

@@ -177,7 +177,6 @@
     "delivered_time": "已送达 {{time}}"
   },
   "file_change": {
-    "file_updated_no_text_diff_is_available": "文件已更新，未记录可视化文本差异。",
     "copy_changes": "复制变更",
     "changes_to_value0": "{{value0}} 的实际变更",
     "no_text_changes": "没有文本行差异。",
@@ -553,8 +552,6 @@
     "content": "内容",
     "before": "修改前",
     "after": "修改后",
-    "expected_file_version": "预期文件版本",
-    "file_version": "文件版本",
     "start_line": "起始行",
     "end_line": "结束行",
     "lines_to_read": "读取行数",

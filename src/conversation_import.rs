@@ -200,7 +200,7 @@ pub(crate) fn prepare_evidence(
     }];
     policy.filesystem.bound_roots = vec![base.clone()];
     let path = dir.join(&resource.id);
-    crate::file_io::write_bytes(&base, &policy, &path.to_string_lossy(), &bytes, None)?;
+    crate::file_io::create_file_bytes(&base, &policy, &path.to_string_lossy(), &bytes)?;
     Ok(crate::actors::StoredResource {
         expires_at_ms: None,
         id: resource.id.clone(),

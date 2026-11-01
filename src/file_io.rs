@@ -1,4 +1,4 @@
-//! Plain file operations with execution-time scope checks and whole-file freshness.
+//! Plain file operations with execution-time scope checks.
 pub(crate) mod guarded_directory;
 use std::{
     borrow::Cow,
@@ -43,8 +43,6 @@ pub struct ReadFileArgs {
 pub struct WriteFileArgs {
     pub path: String,
     pub content: String,
-    /// The hash returned by read_file; null is allowed only when creating a file.
-    pub expected_sha256: Option<String>,
 }
 
 #[model_schema]
@@ -69,7 +67,6 @@ pub struct EditFileArgs {
     /// `new_text`): each entry must match uniquely in the progressively
     /// updated text; a failing entry aborts the whole batch before any write.
     pub edits: Option<Vec<EditFileEntry>>,
-    pub expected_sha256: String,
 }
 
 impl EditFileArgs {
@@ -105,7 +102,6 @@ impl EditFileArgs {
 pub struct CopyFileArgs {
     pub source: String,
     pub destination: String,
-    pub expected_sha256: Option<String>,
 }
 
 #[model_schema]
@@ -181,7 +177,6 @@ pub struct ReadFileResult {
     pub line_count: usize,
     pub total_lines: usize,
     pub reached_eof: bool,
-    pub sha256: String,
     pub content: String,
 }
 
@@ -189,7 +184,6 @@ pub struct ReadFileResult {
 #[schemars(extend("x-dl-content" = "file-change"))]
 pub struct FileWriteResult {
     pub path: String,
-    pub sha256: String,
     pub byte_count: usize,
     pub created: bool,
     pub change: Option<FileChange>,
@@ -197,8 +191,6 @@ pub struct FileWriteResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FileChange {
-    pub before_sha256: Option<String>,
-    pub after_sha256: String,
     pub added_lines: usize,
     pub removed_lines: usize,
     pub lines: Vec<DiffLine>,
@@ -213,7 +205,7 @@ pub struct DiffLine {
     pub text: String,
 }
 
-fn file_change(before: &[u8], after: &[u8], created: bool) -> Option<FileChange> {
+fn file_change(before: &[u8], after: &[u8]) -> Option<FileChange> {
     if before.len() + after.len() > 2 * 1024 * 1024 {
         return None;
     }
@@ -229,8 +221,6 @@ fn file_change(before: &[u8], after: &[u8], created: bool) -> Option<FileChange>
     }
     let patch = diffy::create_patch(old, new);
     let mut change = FileChange {
-        before_sha256: (!created).then(|| sha256(before)),
-        after_sha256: sha256(after),
         added_lines: 0,
         removed_lines: 0,
         lines: vec![],
@@ -926,7 +916,6 @@ pub fn read_file(
 ) -> Result<ReadFileResult> {
     let path = authorized_path(cwd, policy, &args.path, false)?;
     let bytes = read_bytes(&path, u64::MAX, policy)?;
-    let digest = sha256(&bytes);
     let text = String::from_utf8(bytes).map_err(|_| miette!("file is not UTF-8 text"))?;
     let start_line = args.start_line.unwrap_or(1);
     let count = args.line_count.unwrap_or(80).clamp(1, 2000);
@@ -955,16 +944,8 @@ pub fn read_file(
         line_count,
         total_lines,
         reached_eof: end_line >= total_lines,
-        sha256: digest,
         content,
     })
-}
-
-fn check_hash(bytes: &[u8], expected: &str) -> Result<()> {
-    if sha256(bytes) != expected {
-        return Err(miette!("file changed; read it again before writing"));
-    }
-    Ok(())
 }
 
 fn atomic_write(
@@ -1045,21 +1026,25 @@ pub fn write_file(
     policy: &RuntimeSandboxPolicy,
     args: &WriteFileArgs,
 ) -> Result<FileWriteResult> {
-    write_bytes(
-        cwd,
-        policy,
-        &args.path,
-        args.content.as_bytes(),
-        args.expected_sha256.as_deref(),
-    )
+    write_bytes(cwd, policy, &args.path, args.content.as_bytes(), true)
 }
 
-pub(crate) fn write_bytes(
+/// Store a new infrastructure resource without replacing existing bytes.
+pub(crate) fn create_file_bytes(
     cwd: &Path,
     policy: &RuntimeSandboxPolicy,
     value: &str,
     bytes: &[u8],
-    expected_sha256: Option<&str>,
+) -> Result<FileWriteResult> {
+    write_bytes(cwd, policy, value, bytes, false)
+}
+
+fn write_bytes(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    value: &str,
+    bytes: &[u8],
+    overwrite: bool,
 ) -> Result<FileWriteResult> {
     let _guard = FILE_WRITES
         .lock()
@@ -1067,21 +1052,14 @@ pub(crate) fn write_bytes(
     let path = authorized_path(cwd, policy, value, true)?;
     let (created, permissions, before) = match fs::symlink_metadata(&path) {
         Ok(metadata) => {
+            if !overwrite {
+                return Err(miette!("file already exists"));
+            }
             policy.ensure_path_readable(&path, "existing file")?;
-            let expected = expected_sha256
-                .ok_or_else(|| miette!("expected_sha256 is required for existing files"))?;
             let before = read_bytes(&path, 20 * 1024 * 1024, policy)?;
-            check_hash(&before, expected)?;
             (false, Some(metadata.permissions()), before)
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if expected_sha256.is_some() {
-                return Err(miette!(
-                    "file no longer exists; null expected_sha256 is required for a new file"
-                ));
-            }
-            (true, None, Vec::new())
-        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (true, None, Vec::new()),
         Err(_) => return Err(miette!("unable to inspect file")),
     };
     // Revalidate resolved parents immediately before filesystem mutation.
@@ -1089,11 +1067,10 @@ pub(crate) fn write_bytes(
     if path != current {
         return Err(miette!("file path changed; retry after reading it again"));
     }
-    let change = file_change(&before, bytes, created);
+    let change = file_change(&before, bytes);
     atomic_write(&path, bytes, created, permissions, policy)?;
     Ok(FileWriteResult {
         path: value.into(),
-        sha256: sha256(bytes),
         byte_count: bytes.len(),
         created,
         change,
@@ -1107,13 +1084,7 @@ pub fn copy_file(
 ) -> Result<FileWriteResult> {
     let source = authorized_path(cwd, policy, &args.source, false)?;
     let bytes = read_authorized_bytes(&source, 20 * 1024 * 1024, policy)?;
-    write_bytes(
-        cwd,
-        policy,
-        &args.destination,
-        &bytes,
-        args.expected_sha256.as_deref(),
-    )
+    write_bytes(cwd, policy, &args.destination, &bytes, true)
 }
 
 /// The line ending a matched region of text actually uses.
@@ -1278,7 +1249,6 @@ pub fn edit_file(
     let path = authorized_path(cwd, policy, &args.path, true)?;
     policy.ensure_path_readable(&path, "existing file")?;
     let bytes = read_bytes(&path, u64::MAX, policy)?;
-    check_hash(&bytes, &args.expected_sha256)?;
     let content =
         String::from_utf8(bytes.clone()).map_err(|_| miette!("file is not UTF-8 text"))?;
     let content = apply_edit_batch(&content, &edits)?;
@@ -1288,11 +1258,10 @@ pub fn edit_file(
     if path != authorized_path(cwd, policy, &args.path, true)? {
         return Err(miette!("file path changed; retry after reading it again"));
     }
-    let change = file_change(&bytes, content.as_bytes(), false);
+    let change = file_change(&bytes, content.as_bytes());
     atomic_write(&path, content.as_bytes(), false, Some(permissions), policy)?;
     Ok(FileWriteResult {
         path: args.path.clone(),
-        sha256: sha256(content.as_bytes()),
         byte_count: content.len(),
         created: false,
         change,
@@ -1356,6 +1325,7 @@ pub(crate) fn view_image_bytes(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     const BUILTIN_BYTES: &[u8] = b"trusted built-in instructions\n";
 
     /// Fixtures that exercise missing-scope, built-in-exemption and
@@ -1406,7 +1376,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.content.as_bytes(), BUILTIN_BYTES);
-        assert_eq!(result.sha256, sha256(BUILTIN_BYTES));
         assert!(read_authorized_bytes(&path, BUILTIN_BYTES.len() as u64 - 1, &policy).is_err());
 
         let extra = path.with_file_name("extra.md");
@@ -1536,7 +1505,6 @@ mod tests {
             &CopyFileArgs {
                 source: path.display().to_string(),
                 destination: copied.display().to_string(),
-                expected_sha256: None,
             },
         )
         .unwrap();
@@ -1549,7 +1517,6 @@ mod tests {
                 &WriteFileArgs {
                     path: path.display().to_string(),
                     content: "replacement".into(),
-                    expected_sha256: Some(sha256(BUILTIN_BYTES)),
                 },
             )
             .is_err()
@@ -1563,7 +1530,6 @@ mod tests {
                     old_text: Some("trusted".into()),
                     new_text: Some("modified".into()),
                     edits: None,
-                    expected_sha256: sha256(BUILTIN_BYTES),
                 },
             )
             .is_err()
@@ -1575,7 +1541,6 @@ mod tests {
                 &CopyFileArgs {
                     source: copied.display().to_string(),
                     destination: path.display().to_string(),
-                    expected_sha256: Some(sha256(BUILTIN_BYTES)),
                 },
             )
             .is_err()
@@ -1599,7 +1564,6 @@ mod tests {
             &WriteFileArgs {
                 path: path.display().to_string(),
                 content: "replacement".into(),
-                expected_sha256: Some(sha256(BUILTIN_BYTES)),
             },
         )
         .unwrap();
@@ -1611,7 +1575,6 @@ mod tests {
                 old_text: Some("replacement".into()),
                 new_text: Some("modified".into()),
                 edits: None,
-                expected_sha256: sha256(b"replacement"),
             },
         )
         .unwrap();
@@ -1626,7 +1589,6 @@ mod tests {
             &CopyFileArgs {
                 source: copied.display().to_string(),
                 destination: path.display().to_string(),
-                expected_sha256: Some(sha256(b"modified")),
             },
         )
         .unwrap();
@@ -1702,16 +1664,11 @@ mod tests {
     }
 
     #[test]
-    fn actual_text_changes_preserve_line_numbers_hashes_and_bounds() {
+    fn actual_text_changes_preserve_line_numbers_and_bounds() {
         let before = b"first\nold\nlast\n";
         let after = b"first\nnew\nextra\nlast\n";
-        let change = super::file_change(before, after, false).unwrap();
+        let change = super::file_change(before, after).unwrap();
         assert_eq!((change.added_lines, change.removed_lines), (2, 1));
-        assert_eq!(
-            change.before_sha256.as_deref(),
-            Some(super::sha256(before).as_str())
-        );
-        assert_eq!(change.after_sha256, super::sha256(after));
         let removed = change
             .lines
             .iter()
@@ -1726,12 +1683,11 @@ mod tests {
             (added.old_line, added.new_line, added.text.as_str()),
             (None, Some(2), "new")
         );
-        let created = super::file_change(b"", b"new\n", true).unwrap();
-        assert!(created.before_sha256.is_none());
+        let created = super::file_change(b"", b"new\n").unwrap();
         assert_eq!(created.lines[0].new_line, Some(1));
-        assert!(super::file_change(b"binary\0", b"changed", false).is_none());
-        assert!(super::file_change(b"", &vec![b'x'; 2 * 1024 * 1024 + 1], true).is_none());
-        let same = super::file_change(before, before, false).unwrap();
+        assert!(super::file_change(b"binary\0", b"changed").is_none());
+        assert!(super::file_change(b"", &vec![b'x'; 2 * 1024 * 1024 + 1]).is_none());
+        let same = super::file_change(before, before).unwrap();
         assert_eq!((same.added_lines, same.removed_lines), (0, 0));
         assert!(same.lines.is_empty());
     }
@@ -1913,7 +1869,6 @@ mod tests {
             old_text: old_text.map(str::to_owned),
             new_text: new_text.map(str::to_owned),
             edits,
-            expected_sha256: String::new(),
         }
     }
 
@@ -2020,7 +1975,6 @@ mod tests {
                     edit_entry("alpha\nbeta", "one\ntwo"),
                     edit_entry("missing", "x"),
                 ]),
-                expected_sha256: sha256(b"alpha\r\nbeta\r\ngamma\r\n"),
             },
         )
         .unwrap_err();
@@ -2041,7 +1995,6 @@ mod tests {
                 old_text: Some("missing".into()),
                 new_text: Some("x".into()),
                 edits: None,
-                expected_sha256: sha256(b"alpha\n"),
             },
         )
         .unwrap_err();
@@ -2065,13 +2018,11 @@ mod tests {
                     edit_entry("alpha\nbeta", "one\ntwo"),
                     edit_entry("gamma", "gamma\nend"),
                 ]),
-                expected_sha256: sha256(b"alpha\r\nbeta\r\ngamma\r\n"),
             },
         )
         .unwrap();
         assert!(!result.created);
         assert_eq!(result.byte_count, "one\r\ntwo\r\ngamma\r\nend\r\n".len());
-        assert_eq!(result.sha256, sha256(b"one\r\ntwo\r\ngamma\r\nend\r\n"));
         assert_eq!(fs::read(&file).unwrap(), b"one\r\ntwo\r\ngamma\r\nend\r\n");
     }
 
@@ -2084,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn pages_preserve_plaintext_and_hash_whole_file() {
+    fn pages_preserve_plaintext_and_pagination() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "one\r\ntwo\nthree").unwrap();
         let page = read_file(
@@ -2100,27 +2051,25 @@ mod tests {
         assert_eq!(page.content, "two\n");
         assert_eq!(page.total_lines, 3);
         assert!(!page.reached_eof);
-        assert_eq!(page.sha256, sha256(b"one\r\ntwo\nthree"));
     }
 
     #[test]
-    fn creation_overwrite_and_edits_require_fresh_hashes() {
+    fn creation_overwrite_and_edits_use_current_contents() {
         let dir = tempfile::tempdir().unwrap();
         let policy = RuntimeSandboxPolicy::disabled();
         let mut args = WriteFileArgs {
             path: "a.txt".into(),
             content: "aaa".into(),
-            expected_sha256: None,
         };
         let created = write_file(dir.path(), &policy, &args).unwrap();
         assert!(created.created);
-        assert!(write_file(dir.path(), &policy, &args).is_err());
+        let overwritten = write_file(dir.path(), &policy, &args).unwrap();
+        assert!(!overwritten.created);
         let mut edit = EditFileArgs {
             path: "a.txt".into(),
             old_text: Some("aa".into()),
             new_text: Some("b".into()),
             edits: None,
-            expected_sha256: created.sha256.clone(),
         };
         assert!(
             edit_file(dir.path(), &policy, &edit)
@@ -2131,15 +2080,46 @@ mod tests {
         edit.old_text = Some("aaa".into());
         edit_file(dir.path(), &policy, &edit).unwrap();
         assert!(edit_file(dir.path(), &policy, &edit).is_err());
-        args.expected_sha256 = Some(created.sha256);
-        assert!(write_file(dir.path(), &policy, &args).is_err());
-        args.expected_sha256 = Some(sha256(b"b"));
         args.content = "done".into();
         write_file(dir.path(), &policy, &args).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "done"
         );
+        let copied = copy_file(
+            dir.path(),
+            &policy,
+            &CopyFileArgs {
+                source: "a.txt".into(),
+                destination: "copy.txt".into(),
+            },
+        )
+        .unwrap();
+        assert!(copied.created);
+        fs::write(dir.path().join("a.txt"), "updated source").unwrap();
+        let copied = copy_file(
+            dir.path(),
+            &policy,
+            &CopyFileArgs {
+                source: "a.txt".into(),
+                destination: "copy.txt".into(),
+            },
+        )
+        .unwrap();
+        assert!(!copied.created);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("copy.txt")).unwrap(),
+            "updated source"
+        );
+    }
+
+    #[test]
+    fn resource_creation_does_not_overwrite_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = RuntimeSandboxPolicy::disabled();
+        create_file_bytes(dir.path(), &policy, "resource", b"original").unwrap();
+        assert!(create_file_bytes(dir.path(), &policy, "resource", b"replacement").is_err());
+        assert_eq!(fs::read(dir.path().join("resource")).unwrap(), b"original");
     }
 
     #[test]
@@ -2184,7 +2164,6 @@ mod tests {
         let args = WriteFileArgs {
             path: "new.txt".into(),
             content: "no".into(),
-            expected_sha256: None,
         };
         assert!(write_file(dir.path(), &policy, &args).is_err());
         policy.filesystem.deny_read_paths.push(private);
@@ -2230,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn input_schemas_are_closed_and_nullable_values_are_required() {
+    fn input_schemas_accept_omitted_options_and_reject_missing_targets() {
         for schema in [
             crate::schema_utils::model_schema_for::<ReadFileArgs>(),
             crate::schema_utils::model_schema_for::<WriteFileArgs>(),
@@ -2239,11 +2218,18 @@ mod tests {
             crate::schema_utils::model_schema_for::<SearchTextArgs>(),
         ] {
             crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-            assert_eq!(
-                schema["properties"].as_object().unwrap().len(),
-                schema["required"].as_array().unwrap().len()
+            assert!(
+                crate::schema_utils::validate_value_against_schema(&json!({}), &schema, "files")
+                    .is_err()
             );
         }
+        let schema = crate::schema_utils::model_schema_for::<ReadFileArgs>();
+        crate::schema_utils::validate_value_against_schema(
+            &json!({"path":"notes.txt"}),
+            &schema,
+            "files",
+        )
+        .unwrap();
     }
 
     #[test]

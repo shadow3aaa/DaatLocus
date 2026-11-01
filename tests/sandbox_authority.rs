@@ -91,10 +91,14 @@ async fn actors_with_different_workspaces_execute_files_against_the_same_device_
             "readable without a workspace grant\n"
         );
         let error = files
-            .execute_tool(&AgentToolCall {
-                id: "ungranted-write".into(), name: "write_file".into(),
-                arguments: json!({"path":ungranted.join("new.txt"),"content":"forbidden","expected_sha256":null}),
-            }, context)
+            .execute_tool(
+                &AgentToolCall {
+                    id: "ungranted-write".into(),
+                    name: "write_file".into(),
+                    arguments: json!({"path":ungranted.join("new.txt"),"content":"forbidden"}),
+                },
+                context,
+            )
             .await
             .unwrap_err();
         let denial = error
@@ -327,9 +331,6 @@ async fn suspended_filesystem_write_has_no_effect_until_review_and_does_not_repl
             policy: granted,
             approve,
         });
-        // File freshness forces the successful operation to use the original
-        // bytes, and would reject replay after the first successful write.
-        let expected = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"original"));
         let context = AppToolExecutionContext {
             execution_cwd: root.path().to_owned(),
             sandbox_policy: policy,
@@ -341,8 +342,9 @@ async fn suspended_filesystem_write_has_no_effect_until_review_and_does_not_repl
         };
         let call = AgentToolCall {
             id: "one-write".into(),
-            name: "write_file".into(),
-            arguments: json!({"path":file,"content":"approved once","expected_sha256":expected}),
+            // Replaying this exact edit would fail after the first replacement.
+            name: "edit_file".into(),
+            arguments: json!({"path":file,"old_text":"original","new_text":"approved once","edits":null}),
         };
         let mut files = FilesApp::new(root.path().join("images"), false);
         let mut operation = Box::pin(files.execute_tool(&call, &context));

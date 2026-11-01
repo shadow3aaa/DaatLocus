@@ -85,21 +85,20 @@ async fn runtime_shared_invoke_records_native_result_without_replaying_the_effec
         panic!("permission control must expose a portable schema")
     };
     crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
-    for name in [
-        "approval_id",
-        "tool_result_id",
-        "readable_roots",
-        "writable_roots",
-        "explanation",
-    ] {
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|value| value == name)
-        );
-    }
+    crate::schema_utils::validate_value_against_schema(
+        &json!({"approval_id":"immutable-approval","explanation":"Owner requested this scope"}),
+        &schema,
+        "appeal",
+    )
+    .unwrap();
+    assert!(
+        crate::schema_utils::validate_value_against_schema(
+            &json!({"approval_id":"immutable-approval"}),
+            &schema,
+            "appeal",
+        )
+        .is_err()
+    );
     let revision = super::super::digest(
         &serde_json::to_vec(&json!({"actor":actor.config,"configuration":system.config()}))
             .unwrap(),

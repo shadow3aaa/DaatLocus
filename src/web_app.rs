@@ -62,7 +62,8 @@ struct Open {
     source: Option<Source>,
     /// Null reads text; source reads the original captured source.
     view: Option<View>,
-    /// Reacquire a document rather than reading its immutable snapshot.
+    /// Reacquire a document rather than reading its immutable snapshot. Omission uses false.
+    #[serde(default)]
     refresh: bool,
 }
 #[model_schema]
@@ -423,7 +424,20 @@ mod tests {
         for tool in app.tool_specs() {
             crate::schema_utils::validate_model_facing_schema(&tool.input_schema).unwrap();
         }
-        let result=app.execute_tool(&call(json!([{"ref_id":"https://example.com/original","offset":null,"source":"rendered","view":null,"refresh":false}]),Value::Null,Value::Null),&context).await.unwrap();
+        let sparse = AgentToolCall {
+            id: "sparse-open".into(),
+            name: "run".into(),
+            arguments: json!({"open":[{"ref_id":"https://example.com/original"}]}),
+        };
+        let schema = model_schema_for::<Run>();
+        crate::schema_utils::validate_value_against_schema(&sparse.arguments, &schema, "web__run")
+            .unwrap();
+        let empty = AgentToolCall {
+            arguments: json!({}),
+            ..sparse.clone()
+        };
+        assert!(app.execute_tool(&empty, &context).await.is_err());
+        let result = app.execute_tool(&sparse, &context).await.unwrap();
         let document = &result.payload["results"][0]["result"];
         let reference = document["ref_id"].as_str().unwrap().to_owned();
         assert!(document["next_offset"].is_number());

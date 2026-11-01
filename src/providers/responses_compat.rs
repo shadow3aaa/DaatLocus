@@ -435,7 +435,7 @@ impl ModelProvider for ResponsesCompatibleClient {
             "format": {
                 "type": "json_schema",
                 "name": sanitize_text_format_name(&request.tool_name),
-                "strict": true,
+                "strict": crate::schema_utils::supports_strict_schema(&request.output_schema),
                 "schema": request.output_schema.clone(),
             }
         });

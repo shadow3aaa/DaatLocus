@@ -63,7 +63,7 @@ async fn core_stop_cancels_all_suspended_inputs_and_preserves_identity_history_a
         MockReply::Calls(vec![AgentToolCall {
             id: "completed-once".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"one effect","expected_sha256":null}),
+            arguments: json!({"path":"once.txt","content":"one effect"}),
         }]),
         MockReply::PendingOnEveryRequest,
     ]));
@@ -473,7 +473,7 @@ async fn messages_interrupt_inference_and_resume_the_original_without_replaying_
             MockReply::Calls(vec![AgentToolCall {
                 id: "write-once".into(),
                 name: "files__write_file".into(),
-                arguments: json!({"path":"once.txt","content":"one effect","expected_sha256":null}),
+                arguments: json!({"path":"once.txt","content":"one effect"}),
             }]),
             MockReply::Pending,
             MockReply::Answer("Incoming message handled"),
@@ -570,7 +570,7 @@ async fn messages_are_retained_during_automatic_review_and_received_at_the_settl
         MockReply::Calls(vec![AgentToolCall {
             id: "waiting-write".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"approved original effect","expected_sha256":null}),
+            arguments: json!({"path":target,"content":"approved original effect"}),
         }]),
         MockReply::Answer("Incoming message received"),
         MockReply::Answer("Original write finished"),
@@ -1088,7 +1088,7 @@ async fn shutdown_preserves_both_suspended_inputs_and_does_not_replay_their_effe
         MockReply::Calls(vec![AgentToolCall {
             id: "before-shutdown".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"retained.txt","content":"retained once","expected_sha256":null}),
+            arguments: json!({"path":"retained.txt","content":"retained once"}),
         }]),
         MockReply::Pending,
         MockReply::Pending,

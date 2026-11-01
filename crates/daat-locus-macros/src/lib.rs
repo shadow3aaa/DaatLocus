@@ -49,7 +49,7 @@ fn parse_transparent_args(args: TokenStream) -> syn::Result<bool> {
 }
 
 fn expand_model_schema(
-    input: DeriveInput,
+    mut input: DeriveInput,
     transparent: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let ident = input.ident.clone();
@@ -64,6 +64,21 @@ fn expand_model_schema(
             ));
         }
     };
+
+    // A missing field is handled by the enclosing object, while an explicitly
+    // supplied value (including null) goes through Presence's deserializer.
+    if let Data::Struct(data) = &mut input.data {
+        for field in &mut data.fields {
+            if outer_type_name(&field.ty).as_deref() == Some("Presence") {
+                if !has_serde_default(&field.attrs)? {
+                    field.attrs.push(syn::parse_quote!(#[serde(default)]));
+                }
+                field.attrs.push(syn::parse_quote!(
+                    #[serde(skip_serializing_if = "crate::schema_utils::Presence::is_missing")]
+                ));
+            }
+        }
+    }
 
     Ok(quote! {
         #input
@@ -132,9 +147,15 @@ fn object_struct_schema(
                 property_map.insert(#property_name.to_string(), #schema);
             });
         }
-        required.push(quote! {
-            required.push(::serde_json::Value::String(#property_name.to_string()));
-        });
+        if !matches!(
+            outer_type_name(&field.ty).as_deref(),
+            Some("Option" | "Presence")
+        ) && !has_serde_default(&field.attrs)?
+        {
+            required.push(quote! {
+                required.push(::serde_json::Value::String(#property_name.to_string()));
+            });
+        }
     }
 
     Ok(quote! {{
@@ -277,6 +298,29 @@ fn is_supported_rename_all(value: &str) -> bool {
     )
 }
 
+fn outer_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Reference(reference) => outer_type_name(&reference.elem),
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn has_serde_default(attrs: &[Attribute]) -> syn::Result<bool> {
+    let mut found = false;
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+        attr.parse_nested_meta(|meta| {
+            found |= meta.path.is_ident("default");
+            consume_nested_meta_value(&meta)
+        })?;
+    }
+    Ok(found)
+}
+
 fn schema_expr_for_type(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
         Type::Reference(reference) => schema_expr_for_type(&reference.elem),
@@ -292,11 +336,21 @@ fn schema_expr_for_type(ty: &Type) -> proc_macro2::TokenStream {
                     quote! { crate::schema_utils::integer_schema() }
                 }
                 "f32" | "f64" => quote! { crate::schema_utils::number_schema() },
-                "Option" => match first_generic_type(&segment.arguments) {
+                "Option" | "Nullable" => match first_generic_type(&segment.arguments) {
                     Ok(inner) => {
+                        if ident == "Option" && outer_type_name(inner).as_deref() == Some("Option")
+                        {
+                            return compile_error(
+                                "nested Option loses missing/null distinctions; use Presence<Nullable<T>>",
+                            );
+                        }
                         let inner_schema = schema_expr_for_type(inner);
                         quote! { crate::schema_utils::nullable_schema(#inner_schema) }
                     }
+                    Err(err) => err.to_compile_error(),
+                },
+                "Presence" => match first_generic_type(&segment.arguments) {
+                    Ok(inner) => schema_expr_for_type(inner),
                     Err(err) => err.to_compile_error(),
                 },
                 "Vec" => match first_generic_type(&segment.arguments) {

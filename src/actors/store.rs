@@ -187,7 +187,7 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
             "cancelled_count",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
-            &["path", "created", "byte_count", "sha256"]
+            &["path", "created", "byte_count"]
         }
         _ => return None,
     };
@@ -236,12 +236,7 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
         }
     }
     if let Some(change) = payload.get("change").and_then(Value::as_object) {
-        for key in [
-            "added_lines",
-            "removed_lines",
-            "before_sha256",
-            "after_sha256",
-        ] {
+        for key in ["added_lines", "removed_lines"] {
             if let Some(value) = change.get(key) {
                 output.insert(key.into(), value.clone());
             }

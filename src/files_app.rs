@@ -44,12 +44,12 @@ impl App for FilesApp {
 
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         let mut specs = vec![
-            AppToolSpec { name: "copy_file".into(), description: "Copy authorized file bytes to a writable workspace. Use this to bring an Actor attachment into the workspace before native commands. Existing destinations require expected_sha256.".into(), input_schema: model_schema_for::<CopyFileArgs>() },
+            AppToolSpec { name: "copy_file".into(), description: "Copy authorized file bytes to a writable workspace. Use this to bring an Actor attachment into the workspace before native commands.".into(), input_schema: model_schema_for::<CopyFileArgs>() },
             AppToolSpec { name: "list_directory".into(), description: "List an authorized directory page, ordered by name. Continue using next_cursor.".into(), input_schema: model_schema_for::<ListDirectoryArgs>() },
             AppToolSpec { name: "search_text".into(), description: "Find literal text in authorized files beneath a path. Requires an explicit depth (1-32). Respects repository and global Git ignore rules and skips .git metadata unless include_ignored is true. Explicit search roots remain searchable. Returns original matching lines with file paths and line numbers.".into(), input_schema: model_schema_for::<SearchTextArgs>() },
-            AppToolSpec { name: "read_file".into(), description: "Read plaintext lines and the whole-file sha256. Relative paths use the Actor workspace. Expand skill root aliases to their listed absolute paths before calling; start_line is 1-based or null, never 0.".into(), input_schema: model_schema_for::<ReadFileArgs>() },
-            AppToolSpec { name: "write_file".into(), description: "Create a file or overwrite it using its current expected_sha256.".into(), input_schema: model_schema_for::<WriteFileArgs>() },
-            AppToolSpec { name: "edit_file".into(), description: "Replace text using the current file expected_sha256: either one exact unique old_text/new_text pair or an ordered edits array applied sequentially on the updated text. Every edit must match uniquely (LF/CRLF equivalent) with new_text written in the matched region's line endings; any failure aborts the entire batch before a single write.".into(), input_schema: model_schema_for::<EditFileArgs>() },
+            AppToolSpec { name: "read_file".into(), description: "Read plaintext lines. Relative paths use the Actor workspace. Expand skill root aliases to their listed absolute paths before calling; start_line is 1-based or null, never 0.".into(), input_schema: model_schema_for::<ReadFileArgs>() },
+            AppToolSpec { name: "write_file".into(), description: "Create a file or overwrite its contents.".into(), input_schema: model_schema_for::<WriteFileArgs>() },
+            AppToolSpec { name: "edit_file".into(), description: "Replace text: either one exact unique old_text/new_text pair or an ordered edits array applied sequentially on the updated text. Every edit must match uniquely (LF/CRLF equivalent) with new_text written in the matched region's line endings; any failure aborts the entire batch before a single write.".into(), input_schema: model_schema_for::<EditFileArgs>() },
             AppToolSpec { name: "list_skills".into(), description: "List authorized skill metadata and source paths. Read selected SKILL.md files with read_file.".into(), input_schema: model_schema_for::<EmptyAppArgs>() },
         ];
         if self.supports_vision {
@@ -103,7 +103,7 @@ impl App for FilesApp {
                     .map_err(|_| miette!("invalid read_file arguments"))?;
                 args.line_count = Some(args.line_count.unwrap_or(80).clamp(1, 2000));
                 let result = context.files().read_file(&args).await?;
-                // Struct serialization keeps the freshness and pagination metadata
+                // Struct serialization keeps the pagination metadata
                 // before the plaintext when the execution loop bounds model output.
                 let content = serde_json::to_string(&result)
                     .map_err(|err| miette!("file result serialization failed: {err}"))?;
@@ -178,6 +178,64 @@ mod tests {
     use crate::sandbox::RuntimeSandboxPolicy;
 
     const BUILTIN_SKILL: &[u8] = b"---\nname: builtin-fixture\ndescription: Trusted test skill.\n---\nUse this built-in instruction.\n";
+
+    #[tokio::test]
+    async fn file_calls_accept_content_without_version_metadata() {
+        let (_workspace, _resources, context, _) = builtin_context();
+        let mut manager = crate::app::AppManager::new(vec![Box::new(FilesApp::new(
+            context.execution_cwd.join("images"),
+            false,
+        ))])
+        .unwrap();
+        for (index, (name, arguments)) in [
+            ("write_file", json!({"path":"note.txt","content":"first"})),
+            ("write_file", json!({"path":"note.txt","content":"second"})),
+            (
+                "read_file",
+                json!({"path":"note.txt","start_line":null,"line_count":null}),
+            ),
+            (
+                "edit_file",
+                json!({"path":"note.txt","old_text":"second","new_text":"third","edits":null}),
+            ),
+            (
+                "copy_file",
+                json!({"source":"note.txt","destination":"copy.txt"}),
+            ),
+            (
+                "copy_file",
+                json!({"source":"note.txt","destination":"copy.txt"}),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = AgentToolCall {
+                id: index.to_string(),
+                name: format!("files__{name}"),
+                arguments,
+            };
+            manager.validate_tool_call(&call, &context).unwrap();
+            let output = manager.execute_tool(&call, &context).await.unwrap();
+            assert!(
+                !serde_json::to_string(&output.payload)
+                    .unwrap()
+                    .contains("sha256")
+            );
+            assert!(
+                !serde_json::to_string(&output.output_schema)
+                    .unwrap()
+                    .contains("sha256")
+            );
+            if name == "read_file" {
+                assert_eq!(output.payload["content"], "second");
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(context.execution_cwd.join("copy.txt")).unwrap(),
+            "third"
+        );
+    }
 
     /// Fixtures that exercise missing-scope, built-in-exemption and
     /// search boundaries must stay outside the system temporary
@@ -291,24 +349,21 @@ mod tests {
         let copy = AgentToolCall {
             id: "copy-builtin".into(),
             name: "copy_file".into(),
-            arguments: json!({"source": skill, "destination": destination, "expected_sha256": null}),
+            arguments: json!({"source": skill, "destination": destination}),
         };
         app.execute_tool(&copy, &context).await.unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), BUILTIN_SKILL);
         assert!(!context.sandbox_policy.is_path_writable(&skill));
 
         for (name, arguments) in [
-            (
-                "write_file",
-                json!({"path": skill, "content": "changed", "expected_sha256": "unused"}),
-            ),
+            ("write_file", json!({"path": skill, "content": "changed"})),
             (
                 "edit_file",
-                json!({"path": skill, "old_text": "built-in", "new_text": "changed", "expected_sha256": "unused"}),
+                json!({"path": skill, "old_text": "built-in", "new_text": "changed"}),
             ),
             (
                 "copy_file",
-                json!({"source": destination, "destination": skill, "expected_sha256": "unused"}),
+                json!({"source": destination, "destination": skill}),
             ),
         ] {
             let call = AgentToolCall {
@@ -395,7 +450,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path": target, "content":"approved", "expected_sha256":null}),
+            arguments: json!({"path": target, "content":"approved"}),
         };
         manager.validate_tool_call(&call, &base).unwrap();
         assert!(manager.execute_tool(&call, &base).await.is_err());
@@ -422,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn denied_write_does_not_change_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = non_temporary_scratch();
         std::fs::write(dir.path().join("source.txt"), "alpha\n").unwrap();
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_write = false;
@@ -440,9 +495,13 @@ mod tests {
         let call = AgentToolCall {
             id: "call".into(),
             name: "edit_file".into(),
-            arguments: json!({"path":"source.txt", "old_text":"alpha", "new_text":"changed", "expected_sha256": "unused"}),
+            arguments: json!({"path":"source.txt", "old_text":"alpha", "new_text":"changed"}),
         };
-        assert!(app.execute_tool(&call, &context).await.is_err());
+        let error = app.execute_tool(&call, &context).await.unwrap_err();
+        let denial = error
+            .downcast_ref::<crate::sandbox::AccessDenied>()
+            .unwrap();
+        assert_eq!(denial.record.access, crate::sandbox::Access::Write);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
             "alpha\n"

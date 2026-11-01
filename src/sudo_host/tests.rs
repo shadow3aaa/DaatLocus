@@ -32,7 +32,7 @@ fn context(root: &Path, client: Arc<Client>) -> AppToolExecutionContext {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn broker_filesystem_preserves_hash_freshness_and_hard_readonly_authority() {
+async fn broker_filesystem_overwrites_and_preserves_hard_readonly_authority() {
     let root = tempfile::tempdir().unwrap();
     let client = local_client();
     let mut context = context(root.path(), client);
@@ -40,17 +40,17 @@ async fn broker_filesystem_preserves_hash_freshness_and_hard_readonly_authority(
     let write = crate::file_io::WriteFileArgs {
         path: path.to_string_lossy().into(),
         content: "original".into(),
-        expected_sha256: None,
     };
     let result = context.files().write_file(&write).await.unwrap();
+    assert!(result.created);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
-    let stale = crate::file_io::WriteFileArgs {
+    let replacement = crate::file_io::WriteFileArgs {
         content: "replacement".into(),
-        expected_sha256: Some("0".repeat(64)),
         ..write.clone()
     };
-    assert!(context.files().write_file(&stale).await.is_err());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    let result = context.files().write_file(&replacement).await.unwrap();
+    assert!(!result.created);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
     let read = context
         .files()
         .read_file(&crate::file_io::ReadFileArgs {
@@ -60,11 +60,10 @@ async fn broker_filesystem_preserves_hash_freshness_and_hard_readonly_authority(
         })
         .await
         .unwrap();
-    assert_eq!(read.sha256, result.sha256);
-    assert_eq!(read.content, "original");
+    assert_eq!(read.content, "replacement");
     context.sandbox_policy.filesystem.deny_all_writes = true;
     assert!(context.files().write_file(&write).await.is_err());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

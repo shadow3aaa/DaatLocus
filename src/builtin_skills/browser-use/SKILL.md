@@ -74,10 +74,8 @@ modifier (`control` on Windows/Android, `meta` on macOS), then type the new valu
 Use the new returned state at each step and check the field before submission.
 
 `press_key` accepts Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right,
-Home, End, PageUp/Down, Space, F3, F5, +, - and = or one ASCII letter/digit. `modifiers` is null or an
-array of `control`, `alt`, `shift`, `meta`; use `type_text` for ordinary prose.
-Include nullable fields required by the actual tool schema rather than omitting
-them.
+Home, End, PageUp/Down, Space, F3, F5, +, - and = or one ASCII letter/digit.
+Use `type_text` for ordinary prose.
 
 Use `navigate` for an intended HTTP(S) destination and `back`/`forward` for page
 history. These return a new observation without consuming older references. Reload only

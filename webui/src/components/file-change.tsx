@@ -36,7 +36,7 @@ export function FileChangeView({ path, value }: { path: string; value: JsonValue
   const [copyFailed, setCopyFailed] = useState(false);
   useEffect(() => { setLimit(60); setCopied(false); setCopyFailed(false); if (scrollRoot.current) { scrollRoot.current.scrollTop = 0; scrollRoot.current.scrollLeft = 0; } }, [path, value]);
   useEffect(() => { if (!copied) return; const timer = setTimeout(() => setCopied(false), 1600); return () => clearTimeout(timer); }, [copied]);
-  if (!value) return <div className="dl-file-details"><code>{path}</code><p className="dl-tool-note">{t("file_change.file_updated_no_text_diff_is_available")}</p></div>;
+  if (!value) return <div className="dl-file-details"><code>{path}</code></div>;
   const filename = path.replace(/\\/g,"/").split("/").at(-1) || path;
   const patch = asText(change.patch) || lines.map(line => `${line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "}${asText(line.text)}`).join("\n");
   return <><header className="dl-diff-heading"><span title={path}>{filename}</span><small><span className="dl-added-count">+{Number(change.added_lines || 0)}</span> <span className="dl-removed-count">−{Number(change.removed_lines || 0)}</span></small><Button variant="ghost" size="icon-xs" aria-label={t("file_change.copy_changes")} onClick={() => { setCopyFailed(false); void navigator.clipboard.writeText(patch).then(() => setCopied(true)).catch(() => setCopyFailed(true)); }}>{copied ? <CheckIcon /> : <CopyIcon />}</Button></header>

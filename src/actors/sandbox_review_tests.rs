@@ -287,7 +287,6 @@ async fn core_creation_initial_authorization_is_shared_persistent_and_never_revi
             &crate::file_io::WriteFileArgs {
                 path: "shared.txt".into(),
                 content: "visible to existing actors".into(),
-                expected_sha256: None,
             },
         )
         .unwrap();
@@ -720,7 +719,6 @@ async fn atomic_write_reviews_the_first_missing_directory_before_creating_its_hi
     let args = crate::file_io::WriteFileArgs {
         path: file.to_string_lossy().into_owned(),
         content: "report output".into(),
-        expected_sha256: None,
     };
     let operation = filesystem.write_file(&args);
     tokio::pin!(operation);
@@ -766,7 +764,6 @@ async fn suspended_write_refusal_stays_local_until_explicit_application_and_is_r
             .to_string_lossy()
             .into_owned(),
         content: "forbidden".into(),
-        expected_sha256: None,
     };
     let first = filesystem.write_file(&args).await.unwrap_err();
     let refusal = rejection(&first).expect("sandbox review must return an immutable refusal");

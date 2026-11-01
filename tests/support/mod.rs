@@ -324,14 +324,33 @@ impl Fixture {
             .send_user(actor, "permission test".into(), vec![], None)
             .unwrap();
         let message = self.system.store().claim_next(actor).unwrap().unwrap();
-        self.system.store().create_approval(ApprovalRecord {
-            sudo: None,
-            execution_claim: None,
-            seq: 0, id: uuid::Uuid::new_v4().to_string(), message_id: message.id,
-            call: daat_locus::model_protocol::AgentToolCall { id: uuid::Uuid::new_v4().to_string(), name: "files__write_file".into(), arguments: json!({"path": "proposal.txt", "content": "fixture-secret-key", "expected_sha256": null}) },
-            requested: SandboxScopeRequest { readable_roots: vec![config.workspace.clone()], writable_roots: vec![config.workspace.join("extra")] },
-            scopes:vec![], previous_denials:vec![], decision: ApprovalDecision::Pending, reason: "Sandbox scope review pending".into(), created_at_ms: chrono::Utc::now().timestamp_millis(), resolved_at_ms: None, appeal: None, application: None,
-        }).unwrap()
+        self.system
+            .store()
+            .create_approval(ApprovalRecord {
+                sudo: None,
+                execution_claim: None,
+                seq: 0,
+                id: uuid::Uuid::new_v4().to_string(),
+                message_id: message.id,
+                call: daat_locus::model_protocol::AgentToolCall {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "files__write_file".into(),
+                    arguments: json!({"path": "proposal.txt", "content": "fixture-secret-key"}),
+                },
+                requested: SandboxScopeRequest {
+                    readable_roots: vec![config.workspace.clone()],
+                    writable_roots: vec![config.workspace.join("extra")],
+                },
+                scopes: vec![],
+                previous_denials: vec![],
+                decision: ApprovalDecision::Pending,
+                reason: "Sandbox scope review pending".into(),
+                created_at_ms: chrono::Utc::now().timestamp_millis(),
+                resolved_at_ms: None,
+                appeal: None,
+                application: None,
+            })
+            .unwrap()
     }
 }
 pub fn fixture_enrollment(

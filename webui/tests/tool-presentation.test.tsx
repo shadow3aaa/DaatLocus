@@ -19,6 +19,12 @@ const webSchema:JsonValue={properties:{results:{items:{properties:{operation:{},
 const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
+  test("file results without a diff never claim that a file was updated", () => {
+    for (const error of [null, "WRITE_FAILED"]) {
+      const html = renderToStaticMarkup(<ToolDetail result={result({name:"files__write_file",output_schema:changeSchema,payload:{path:"notes.md",change:null},error})}/>);
+      expect(html.replace(/<[^>]*>/g, "")).toBe(error ? `${error}notes.md` : "");
+    }
+  });
   test("Rust output descriptors drive identical content across arbitrary tool names",()=>{
     const payload={path:"example.ts",content:"const answer = 42;",start_line:1,end_line:1,total_lines:1};
     const render=(name:string)=>renderToStaticMarkup(<ToolDetail result={result({name,payload,output_schema:sourceSchema})}/>);
@@ -268,13 +274,13 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
   test("structured scalar facts preserve exact values and absence without serialization", () => {
-    const args = Object.freeze({ command: "echo <danger>", max_chars: 0, refresh: false, expected_sha256: null });
+    const args = Object.freeze({ command: "echo <danger>", max_chars: 0, refresh: false, cursor: null });
     const html = renderToStaticMarkup(<ToolParameters value={args} />);
     for (const value of ["echo &lt;danger&gt;"]) expect(html).toContain(value);
     expect(html).toContain(i18n.t("tool_parameters.not_specified"));
     expect(html).toContain(i18n.t("tool_parameters.no"));
     expect(html).toContain("<span>0</span>");
-    expect(html).not.toContain("expected_sha256");
+    expect(html).not.toContain("cursor");
     expect(html).not.toContain("<danger>");
   });
   test("nested structured data has a disclosure rather than an encoded object", () => {

@@ -321,7 +321,7 @@ async fn cancelling_one_batched_input_preserves_other_inputs_and_completed_effec
         MockReply::Calls(vec![AgentToolCall {
             id: "write-once".into(),
             name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"ONE EFFECT","expected_sha256":null}),
+            arguments: json!({"path":"once.txt","content":"ONE EFFECT"}),
         }]),
         MockReply::Pending,
         MockReply::Answer("The remaining input is complete."),

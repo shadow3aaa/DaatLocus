@@ -536,7 +536,7 @@ pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result
             return Err(StageError::Conflict("Resource bytes changed"));
         }
     } else {
-        crate::file_io::write_bytes(&base, &policy, &path.to_string_lossy(), &bytes, None)
+        crate::file_io::create_file_bytes(&base, &policy, &path.to_string_lossy(), &bytes)
             .map_err(|_| StageError::Unavailable("Cannot persist received resource"))?;
     }
     if system

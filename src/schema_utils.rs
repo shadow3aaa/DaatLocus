@@ -3,6 +3,9 @@ use std::collections::BTreeSet;
 use miette::{Result, miette};
 use serde_json::{Map, Value, json};
 
+mod field;
+pub use field::{Nullable, Presence};
+
 const ALLOWED_SCHEMA_KEYS: &[&str] = &[
     "type",
     "description",
@@ -69,6 +72,29 @@ pub fn validate_model_facing_schema(schema: &Value) -> Result<()> {
             errors.join("\n")
         ))
     }
+}
+
+/// Strict upstream decoding requires every object property to be required.
+/// Never rewrite optional members into nullable members: that loses presence.
+pub fn supports_strict_schema(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        let Some(required) = object.get("required").and_then(Value::as_array) else {
+            return false;
+        };
+        if object.get("additionalProperties") != Some(&Value::Bool(false))
+            || required.len() != properties.len()
+            || !properties
+                .keys()
+                .all(|key| required.iter().any(|name| name.as_str() == Some(key)))
+            || !properties.values().all(supports_strict_schema)
+        {
+            return false;
+        }
+    }
+    object.get("items").is_none_or(supports_strict_schema)
 }
 
 pub fn validate_value_against_schema(value: &Value, schema: &Value, label: &str) -> Result<()> {
@@ -405,19 +431,19 @@ fn validate_object_schema(object: &Map<String, Value>, path: &str, errors: &mut 
     let mut required_names = BTreeSet::new();
     for (index, item) in required.iter().enumerate() {
         if let Some(name) = item.as_str() {
-            required_names.insert(name);
+            if !required_names.insert(name) {
+                errors.push(format!(
+                    "{path}.required[{index}]: duplicate property `{name}`"
+                ));
+            }
+            if !properties.contains_key(name) {
+                errors.push(format!(
+                    "{path}.required[{index}]: unknown property `{name}`"
+                ));
+            }
         } else {
             errors.push(format!("{path}.required[{index}]: must be a string"));
         }
-    }
-    let property_names = properties
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if required_names != property_names {
-        errors.push(format!(
-            "{path}.required: must exactly match properties; required={required_names:?} properties={property_names:?}"
-        ));
     }
 
     for (name, property_schema) in properties {
@@ -473,22 +499,131 @@ mod tests {
     }
 
     #[test]
-    fn validator_rejects_optional_properties_by_omission() {
+    fn optional_presence_and_nullability_are_validated_independently() {
         let schema = json!({
             "type": "object",
             "properties": {
                 "required_text": { "type": "string" },
-                "optional_text": { "type": ["string", "null"] }
+                "optional_text": { "type": ["string", "null"] },
+                "optional_non_null": { "type": "string" }
             },
             "required": ["required_text"],
             "additionalProperties": false
         });
 
-        let err = validate_model_facing_schema(&schema)
-            .unwrap_err()
-            .to_string();
+        validate_model_facing_schema(&schema).unwrap();
+        for input in [
+            json!({"required_text":"yes"}),
+            json!({"required_text":"yes","optional_text":null}),
+            json!({"required_text":"yes","optional_non_null":"value"}),
+        ] {
+            super::validate_value_against_schema(&input, &schema, "args").unwrap();
+        }
+        for input in [
+            json!({}),
+            json!({"required_text":null}),
+            json!({"required_text":"yes","optional_non_null":null}),
+            json!({"required_text":"yes","extra":false}),
+        ] {
+            assert!(super::validate_value_against_schema(&input, &schema, "args").is_err());
+        }
+        for required in [
+            json!(["required_text", "unknown"]),
+            json!(["required_text", "required_text"]),
+        ] {
+            let mut invalid = schema.clone();
+            invalid["required"] = required;
+            assert!(validate_model_facing_schema(&invalid).is_err());
+        }
+    }
 
-        assert!(err.contains("must exactly match properties"), "{err}");
+    #[daat_locus_macros::model_schema]
+    #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    struct Child {
+        text: String,
+        note: Option<String>,
+    }
+
+    #[daat_locus_macros::model_schema]
+    #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    struct FieldContract {
+        text: String,
+        maybe: Option<String>,
+        clear: super::Nullable<String>,
+        non_null: super::Presence<String>,
+        update: super::Presence<super::Nullable<String>>,
+        #[serde(default)]
+        refresh: bool,
+        nested: Option<Vec<Child>>,
+    }
+
+    #[test]
+    fn model_fields_preserve_omission_explicit_null_and_values() {
+        use super::{Nullable, Presence, model_schema_for, validate_value_against_schema};
+        let schema = model_schema_for::<FieldContract>();
+        let base = json!({"text":"request","clear":null});
+        validate_value_against_schema(&base, &schema, "args").unwrap();
+        let parsed: FieldContract = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(parsed.maybe, None);
+        assert_eq!(parsed.clear, Nullable::Null);
+        assert_eq!(parsed.non_null, Presence::Missing);
+        assert_eq!(parsed.update, Presence::Missing);
+        assert!(!parsed.refresh);
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert!(encoded.get("update").is_none());
+        assert!(encoded.get("non_null").is_none());
+        let descriptor = schemars::schema_for!(FieldContract).to_value();
+        let required = descriptor["required"].as_array().unwrap();
+        assert!(required.iter().any(|field| field == "clear"));
+        assert!(!required.iter().any(|field| field == "update"));
+
+        for (update, expected) in [
+            (json!(null), Presence::Present(Nullable::Null)),
+            (
+                json!("replacement"),
+                Presence::Present(Nullable::Value("replacement".to_string())),
+            ),
+        ] {
+            let mut input = base.clone();
+            input["update"] = update.clone();
+            input["non_null"] = json!("supplied");
+            input["nested"] = json!([{"text":"child"}]);
+            validate_value_against_schema(&input, &schema, "args").unwrap();
+            let parsed: FieldContract = serde_json::from_value(input).unwrap();
+            assert_eq!(parsed.update, expected);
+            assert_eq!(parsed.non_null, Presence::Present("supplied".to_string()));
+            assert_eq!(parsed.nested.as_ref().unwrap()[0].note, None);
+            assert_eq!(serde_json::to_value(parsed).unwrap()["update"], update);
+        }
+        for input in [
+            json!({"text":"request"}),
+            json!({"text":"request","clear":null,"non_null":null}),
+            json!({"text":"request","clear":null,"refresh":null}),
+            json!({"text":"request","clear":null,"nested":[{}]}),
+            json!({"text":"request","clear":12}),
+        ] {
+            assert!(
+                validate_value_against_schema(&input, &schema, "args").is_err(),
+                "{input}"
+            );
+            assert!(
+                serde_json::from_value::<FieldContract>(input.clone()).is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_decoding_requires_nested_array_members_to_be_required() {
+        use super::supports_strict_schema;
+        let child = json!({"type":"object","properties":{"optional":{"type":"string"}},"required":[],"additionalProperties":false});
+        let nested = json!({"type":"object","properties":{"rows":{"type":"array","items":child}},"required":["rows"],"additionalProperties":false});
+        assert!(!supports_strict_schema(&nested));
+        let mut required = nested.clone();
+        required["properties"]["rows"]["items"]["required"] = json!(["optional"]);
+        assert!(supports_strict_schema(&required));
     }
 
     #[test]
