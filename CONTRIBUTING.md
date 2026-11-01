@@ -41,6 +41,8 @@ export DAAT_LOCUS_BUILD_WEBUI=0
 
 The build normally downloads the models.dev catalog. For an offline build, set `DAAT_LOCUS_MODEL_CATALOG_PATH` to an existing models.dev JSON snapshot. Cargo's `--offline` flag alone does not stop build-script HTTP requests. `DAAT_LOCUS_WEBUI_DIST` selects a different prebuilt UI directory.
 
+Codex credential imports follow the selected source file read-only, including token rotations for the same account. Keep Codex signed in so it can renew that login. For a login managed and refreshed by Daat Locus, use browser or device login instead. Imports made before source tracking was added need to be imported again once; their original source cannot be inferred safely.
+
 ## Frontend development
 
 The mock preview runs without a service, account or WASM build:

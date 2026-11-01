@@ -113,6 +113,14 @@ pub struct CodexOAuthTokens {
     pub last_refresh_at_ms: i64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct StoredCodexAuth {
+    #[serde(flatten)]
+    tokens: CodexOAuthTokens,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_from: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexOAuthAccess {
     pub access_token: String,
@@ -123,6 +131,8 @@ pub struct CodexOAuthAccess {
 
 #[derive(Debug, Deserialize)]
 struct JwtPayload {
+    #[serde(default)]
+    sub: Option<String>,
     #[serde(default)]
     exp: Option<i64>,
     #[serde(rename = "https://api.openai.com/auth", default)]
@@ -887,24 +897,14 @@ impl CodexClient {
         let Some(auth_file) = self.auth_file.as_deref() else {
             return Ok(());
         };
-        {
-            let cached = self.cached.lock().await;
-            if let Some(access) = cached.as_ref()
-                && access.expires_at_ms.is_none_or(|expires_at_ms| {
-                    now_ms().saturating_add(ACCESS_TOKEN_REFRESH_SKEW_MS) < expires_at_ms
-                })
-            {
-                return Ok(());
-            }
-        }
-
         let access = codex_oauth_access_from_file_with_client(auth_file, &self.auth_client)
             .await
             .map_err(|err| {
-                miette!(
-                    "OpenAI Codex auth at {} is unavailable: {err}",
+                let context = format!(
+                    "OpenAI Codex auth at {} is unavailable",
                     auth_file.display()
-                )
+                );
+                err.wrap_err(context)
             })?;
 
         let unchanged = {
@@ -1452,10 +1452,13 @@ pub async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<CodexOAuth
     codex_oauth_access_from_file_with_client(auth_file, &client).await
 }
 
-/// Import an external Codex CLI `auth.json` into a Daat-owned, normalized
-/// token file. The CLI-specific nested `tokens` format is accepted only here.
+/// Retain a private snapshot and a read-only source binding. Imported refresh
+/// tokens belong to the source client; consuming them here would fork its session.
 pub async fn import_codex_cli_oauth_file(auth_file: &Path) -> Result<PathBuf> {
-    let bytes = tokio::fs::read(auth_file)
+    let auth_file = tokio::fs::canonicalize(auth_file)
+        .await
+        .map_err(|err| miette!("read Codex auth file {} failed: {err}", auth_file.display()))?;
+    let bytes = tokio::fs::read(&auth_file)
         .await
         .map_err(|err| miette!("read Codex auth file {} failed: {err}", auth_file.display()))?;
     let tokens = parse_codex_cli_oauth_tokens(&bytes).map_err(|err| {
@@ -1465,7 +1468,15 @@ pub async fn import_codex_cli_oauth_file(auth_file: &Path) -> Result<PathBuf> {
         )
     })?;
     let destination = imported_codex_oauth_auth_file(&bytes);
-    write_codex_oauth_tokens(&destination, &tokens).await?;
+    let stored = StoredCodexAuth {
+        tokens,
+        imported_from: Some(auth_file),
+    };
+    let bytes = serde_json::to_vec_pretty(&stored)
+        .map_err(|err| miette!("serialize imported Codex auth failed: {err}"))?;
+    write_bytes_atomic(destination.clone(), bytes, PersistenceFileMode::Private)
+        .await
+        .map_err(|err| miette!("write imported Codex auth failed: {err}"))?;
     Ok(destination)
 }
 
@@ -1503,15 +1514,33 @@ async fn codex_oauth_access_from_file_with_client(
     auth_file: &Path,
     client: &reqwest::Client,
 ) -> Result<CodexOAuthAccess> {
-    let mut tokens = read_codex_oauth_tokens(auth_file).await?;
+    let endpoint = std::env::var(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV)
+        .unwrap_or_else(|_| CODEX_OAUTH_REFRESH_URL.to_string());
+    codex_oauth_access_with_refresh_endpoint(auth_file, client, &endpoint).await
+}
+
+async fn codex_oauth_access_with_refresh_endpoint(
+    auth_file: &Path,
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<CodexOAuthAccess> {
+    let stored = read_codex_auth(auth_file).await?;
+    if let Some(source) = stored.imported_from.as_deref() {
+        return imported_codex_access(&stored.tokens, source).await;
+    }
+    let mut tokens = stored.tokens;
     if codex_oauth_tokens_need_refresh(&tokens) {
         let refresh_lock = refresh_lock_for_auth_file(auth_file);
         let _guard = refresh_lock.lock().await;
-        tokens = read_codex_oauth_tokens(auth_file).await?;
+        let stored = read_codex_auth(auth_file).await?;
+        if let Some(source) = stored.imported_from.as_deref() {
+            return imported_codex_access(&stored.tokens, source).await;
+        }
+        tokens = stored.tokens;
         if !codex_oauth_tokens_need_refresh(&tokens) {
             return Ok(codex_oauth_access_from_tokens(&tokens));
         }
-        tokens = refresh_codex_oauth_tokens(client, &tokens).await?;
+        tokens = refresh_codex_oauth_tokens(client, &tokens, endpoint).await?;
         write_codex_oauth_tokens(auth_file, &tokens).await?;
     }
     Ok(codex_oauth_access_from_tokens(&tokens))
@@ -1525,12 +1554,65 @@ fn refresh_lock_for_auth_file(auth_file: &Path) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-async fn read_codex_oauth_tokens(auth_file: &Path) -> Result<CodexOAuthTokens> {
+async fn read_codex_auth(auth_file: &Path) -> Result<StoredCodexAuth> {
     let bytes = tokio::fs::read(auth_file)
         .await
         .map_err(|err| miette!("read {} failed: {err}", auth_file.display()))?;
     serde_json::from_slice(&bytes)
         .map_err(|err| miette!("parse {} failed: {err}", auth_file.display()))
+}
+
+fn codex_authentication_error(detail: String) -> miette::Report {
+    super::ModelRequestFailure::report(super::ModelFailureKind::Authentication, detail)
+}
+
+async fn imported_codex_access(
+    snapshot: &CodexOAuthTokens,
+    source: &Path,
+) -> Result<CodexOAuthAccess> {
+    let tokens = match tokio::fs::read(source).await {
+        Ok(bytes) => {
+            let current = parse_codex_cli_oauth_tokens(&bytes).map_err(|_| {
+                codex_authentication_error(
+                    "Imported Codex source no longer contains a usable login; sign in with Codex or log in separately in Daat Locus".into(),
+                )
+            })?;
+            if !same_codex_identity(snapshot, &current) {
+                return Err(codex_authentication_error(
+                    "Imported Codex source changed account; explicitly import it again or log in separately in Daat Locus".into(),
+                ));
+            }
+            current
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => snapshot.clone(),
+        Err(_) => {
+            return Err(codex_authentication_error(
+                "Imported Codex source cannot be read; restore access or log in separately in Daat Locus".into(),
+            ));
+        }
+    };
+    if codex_oauth_tokens_need_refresh(&tokens) {
+        return Err(codex_authentication_error(
+            "Imported Codex access token expired; let Codex renew its login, import a current auth file, or log in separately in Daat Locus. Imported refresh tokens are never consumed by Daat Locus".into(),
+        ));
+    }
+    Ok(codex_oauth_access_from_tokens(&tokens))
+}
+
+fn same_codex_identity(left: &CodexOAuthTokens, right: &CodexOAuthTokens) -> bool {
+    let subject = |tokens: &CodexOAuthTokens| {
+        decode_jwt_payload::<JwtPayload>(&tokens.id_token)
+            .ok()
+            .and_then(|claims| claims.sub)
+            .filter(|sub| !sub.is_empty())
+    };
+    let same_subject = match (subject(left), subject(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.id_token == right.id_token,
+    };
+    same_subject
+        && codex_oauth_access_from_tokens(left).account_id
+            == codex_oauth_access_from_tokens(right).account_id
 }
 
 fn codex_oauth_tokens_need_refresh(tokens: &CodexOAuthTokens) -> bool {
@@ -1543,11 +1625,10 @@ fn codex_oauth_tokens_need_refresh(tokens: &CodexOAuthTokens) -> bool {
 async fn refresh_codex_oauth_tokens(
     client: &reqwest::Client,
     tokens: &CodexOAuthTokens,
+    endpoint: &str,
 ) -> Result<CodexOAuthTokens> {
-    let endpoint = std::env::var(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV)
-        .unwrap_or_else(|_| CODEX_OAUTH_REFRESH_URL.to_string());
     let response = client
-        .post(&endpoint)
+        .post(endpoint)
         .header("Content-Type", "application/json")
         .json(&RefreshRequest {
             client_id: CODEX_OAUTH_CLIENT_ID,
@@ -1565,6 +1646,12 @@ async fn refresh_codex_oauth_tokens(
         .map_err(|err| miette!("OpenAI Codex token refresh body read failed: {err}"))?;
     if !status.is_success() {
         let body = redact_secret_text(&body, &tokens.refresh_token);
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::BAD_REQUEST
+        {
+            return Err(codex_authentication_error(format!(
+                "OpenAI Codex token refresh returned HTTP {status}: {body}. Sign in again in Daat Locus; for an old imported snapshot, import the current source again"
+            )));
+        }
         return Err(miette!(
             "OpenAI Codex token refresh returned HTTP {status}: {body}"
         ));
@@ -1657,6 +1744,10 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
+#[path = "codex_oauth/auth_tests.rs"]
+mod auth_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model_protocol::AgentToolInputSpec;
@@ -1679,35 +1770,7 @@ mod tests {
     }
     use crate::config::{ModelConfig, ThinkingBudget};
 
-    struct EnvOverride {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvOverride {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvOverride {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(previous) => unsafe {
-                    std::env::set_var(self.key, previous);
-                },
-                None => unsafe {
-                    std::env::remove_var(self.key);
-                },
-            }
-        }
-    }
-
-    fn jwt(payload: &serde_json::Value) -> String {
+    pub(super) fn jwt(payload: &serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
@@ -1899,27 +1962,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_of_imported_provider_auth_does_not_modify_external_source() {
+    async fn independently_owned_auth_refreshes_and_persists_rotated_tokens() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home_override =
             crate::daat_locus_paths::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
-        let source = temp.path().join("external").join("auth.json");
-        tokio::fs::create_dir_all(source.parent().expect("source parent"))
-            .await
-            .expect("create source parent");
-        let source_contents = br#"{
-            "tokens": {
-                "id_token": "external-id-token",
-                "access_token": "external-access-token",
-                "refresh_token": "external-refresh-token"
-            }
-        }"#;
-        tokio::fs::write(&source, source_contents)
-            .await
-            .expect("write external Codex auth");
-        let destination = import_codex_cli_oauth_file(&source)
-            .await
-            .expect("import external Codex auth");
+        let destination = temp.path().join("owned.json");
 
         let expired_access_token = jwt(&serde_json::json!({"exp": 1}));
         write_codex_oauth_tokens(
@@ -1961,20 +2008,20 @@ mod tests {
                 .await
                 .expect("write refresh response");
         });
-        let _refresh_endpoint = EnvOverride::set(CODEX_OAUTH_REFRESH_URL_OVERRIDE_ENV, &endpoint);
         // The disposable loopback server must never inherit a machine proxy.
         let client = crate::http_client::builder().no_proxy().build().unwrap();
-        let access = codex_oauth_access_from_file_with_client(&destination, &client)
+        let accesses =
+            futures_util::future::try_join_all((0..8).map(|_| {
+                codex_oauth_access_with_refresh_endpoint(&destination, &client, &endpoint)
+            }))
             .await
-            .expect("refresh imported provider auth");
+            .expect("concurrent clients must share one persisted token rotation");
         server_task.await.expect("refresh server task");
 
-        assert_eq!(access.access_token, "refreshed-access-token");
-        assert_eq!(
-            tokio::fs::read(&source)
-                .await
-                .expect("read external source"),
-            source_contents
+        assert!(
+            accesses
+                .iter()
+                .all(|access| access.access_token == "refreshed-access-token")
         );
         let refreshed: CodexOAuthTokens = serde_json::from_slice(
             &tokio::fs::read(&destination)
@@ -1983,6 +2030,11 @@ mod tests {
         )
         .expect("parse refreshed Daat auth");
         assert_eq!(refreshed.access_token, "refreshed-access-token");
+        assert_eq!(refreshed.refresh_token, "refreshed-refresh-token");
+        let access = codex_oauth_access_with_refresh_endpoint(&destination, &client, &endpoint)
+            .await
+            .expect("persisted token must not refresh again against the stopped server");
+        assert_eq!(access.access_token, "refreshed-access-token");
     }
 
     #[tokio::test]

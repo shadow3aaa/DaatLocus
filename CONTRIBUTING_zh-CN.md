@@ -41,6 +41,8 @@ export DAAT_LOCUS_BUILD_WEBUI=0
 
 构建默认下载 models.dev 目录。离线时，把 `DAAT_LOCUS_MODEL_CATALOG_PATH` 设为已有 models.dev JSON 快照的路径；Cargo 的 `--offline` 不会阻止构建脚本发出 HTTP 请求。`DAAT_LOCUS_WEBUI_DIST` 可以指定另一个已构建的 UI 目录。
 
+导入 Codex 凭据会只读跟随所选源文件，包括同一账号的令牌轮换；请保持 Codex 登录，让它续期。若希望由 Daat Locus 管理登录和续期，使用浏览器或设备登录。加入来源记录之前导入的旧副本需要重新导入一次，程序无法安全推断其原始来源。
+
 ## 前端开发
 
 mock 预览不需要服务、账号或 WASM 构建：
