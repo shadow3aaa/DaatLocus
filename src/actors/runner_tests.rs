@@ -4,6 +4,8 @@ mod input_batch_tests;
 mod model_wait_tests;
 #[path = "tool_definition_tests.rs"]
 mod tool_definition_tests;
+#[path = "runner_workspace_tests.rs"]
+mod workspace_tests;
 
 use super::super::{
     MessageKind, MessageSource, ModelFactory, model_context::balanced_history, prompt::SystemPrompt,

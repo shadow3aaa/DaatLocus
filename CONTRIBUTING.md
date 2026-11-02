@@ -13,6 +13,16 @@ Use a separate profile and temporary workspace for development. Tests must not u
 
 Native client and Android requirements are in [the client guide](clients/app/README.md).
 
+## Workspace filesystem
+
+The optional Workspace App is installed for non-Core Actors when the service's native mount probe succeeds. `default` uses the original directory. Named branches share immutable content in the device profile and remain isolated until an explicit merge. Selecting the same original directory and branch name shares a workspace across Actors. Pass the returned execution directory as the workspace when creating another Actor. Workspace selection does not grant filesystem access.
+
+- Windows requires an upstream release of Dokan 2 (2.0.6 or newer within version 2), matching the service architecture. Install its signed driver with administrator authorization. The service performs its mount probe as the ordinary OS user; a failed probe omits the App. Daat Locus neither imports a filesystem-driver certificate nor enables test signing. Reparse points and symlinks inside a Windows branch are currently unsupported.
+- Linux requires an accessible `/dev/fuse`, a working `fusermount3` or `fusermount` helper, and fusectl mounted at `/sys/fs/fuse/connections` with owner access to the connection's abort control. Install the distribution's FUSE package through its normal administrator workflow. Workspace mounts do not request `allow_other`.
+- macOS and Android currently have no Workspace projection backend and expose no Workspace App. Their ordinary execution directories continue to work.
+
+Restart the service after changing native filesystem dependencies. Test the engine with `cargo test -p daat-locus-workspace --locked`. On a provisioned machine, explicitly run `cargo test -p daat-locus-workspace --locked --test native_mounts -- --ignored`; these tests fail when mount prerequisites are unavailable. Actor/App contract tests use `cargo test --lib workspace_tests` with the usual backend build settings. Passing the engine or App tests alone does not verify native mounts.
+
 ## Build and run
 
 From the repository root:

@@ -691,6 +691,40 @@ impl ActorStore {
             self.commit(tx)
         })
     }
+    pub(crate) fn select_actor_workspace(
+        &self,
+        actor_id: &str,
+        message_id: &str,
+        expected: &Path,
+        directory: &Path,
+    ) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let message = message_tx(&tx, message_id)?;
+            let mut actor = actor_tx(&tx, actor_id)?;
+            if actor_id == crate::stage::shared::ACTOR_ID
+                || actor.remote_read_only
+                || message.actor_id != actor_id
+                || message.status != MessageStatus::Running
+                || message.cancel_requested
+                || actor.config.workspace != expected
+                || message
+                    .remote_authority
+                    .as_ref()
+                    .is_some_and(|authority| authority.read_only)
+            {
+                return Err(ActorError::Forbidden(
+                    "Workspace selection authority is no longer valid".into(),
+                )
+                .into());
+            }
+            actor.config.workspace = directory.to_owned();
+            actor.updated_at_ms = now();
+            save_actor(&tx, &actor)?;
+            self.commit(tx)
+        })
+    }
     pub(crate) fn account_actor_ids(
         &self,
         sender: &str,

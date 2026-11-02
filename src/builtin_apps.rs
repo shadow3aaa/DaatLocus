@@ -37,6 +37,7 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "admin_actors",
     "actors",
     "files",
+    "workspace",
     "terminal",
     "sudo",
     "web",
@@ -81,12 +82,12 @@ pub fn create_apps(
     let state_dir = system.actor_state_dir(&actor.id);
     let mut apps: Vec<Box<dyn App>> = Vec::new();
     let installed = if actor.id == crate::stage::shared::ACTOR_ID {
-        &["actors", "admin_actors"][..]
+        vec!["actors".to_owned(), "admin_actors".to_owned()]
     } else {
-        DEVICE_APPS
+        system.device_app_names()?
     };
     for name in installed {
-        let inner: Box<dyn App> = match *name {
+        let inner: Box<dyn App> = match name.as_str() {
             "admin_actors" => Box::new(AdminActorsApp::new(system.clone())),
             "actors" => Box::new(ActorApp::new(actor.id.clone(), system.clone())),
             "apps_manager" => Box::new(crate::mcp::AppsManager::new(
@@ -96,6 +97,10 @@ pub fn create_apps(
             "files" => Box::new(FilesApp::new(
                 state_dir.join("images"),
                 vision_support(actor, config)?,
+            )),
+            "workspace" => Box::new(crate::workspace_app::WorkspaceApp::new(
+                actor.id.clone(),
+                system.clone(),
             )),
             "terminal" if !cfg!(target_os = "android") => {
                 Box::new(TerminalApp::with_system(system.clone()))

@@ -744,10 +744,7 @@ impl App for ActorApp {
                 if parent.remote_read_only {
                     return Err(miette!("Remote read-only authority cannot create Actors"));
                 }
-                let apps = crate::builtin_apps::DEVICE_APPS
-                    .iter()
-                    .map(|app| (*app).to_owned())
-                    .collect();
+                let apps = self.system.device_app_names()?;
                 let config = ActorConfig {
                     name: args.name,
                     workspace,

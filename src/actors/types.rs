@@ -122,6 +122,9 @@ impl ActorConfig {
     pub(crate) fn same_apps(&self, other: &Self) -> bool {
         let mut current = self.clone();
         current.model = other.model.clone();
+        // The Workspace App changes the execution directory in the serial tool
+        // stream. Neither a model preference nor cwd replaces live App instances.
+        current.workspace = other.workspace.clone();
         current == *other
     }
 }

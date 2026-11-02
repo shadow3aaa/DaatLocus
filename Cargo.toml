@@ -47,6 +47,7 @@ members = [
     "crates/daat-locus-virtual-workspace",
     "crates/daat-locus-virtual-workspace/hook",
     "crates/daat-locus-computer-use",
+    "crates/daat-locus-workspace",
     "clients/app/src-tauri",
     "xtask",
 ]
@@ -119,6 +120,7 @@ daat-locus-sandbox = { path = "crates/daat-locus-sandbox" }
 daat-locus-bash = { path = "crates/daat-locus-bash" }
 daat-locus-uutils = { path = "crates/daat-locus-uutils" }
 daat-locus-client-protocol = { path = "crates/daat-locus-client-protocol" }
+daat-locus-workspace = { path = "crates/daat-locus-workspace" }
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 getrandom = "0.4.2"
 rcgen = "0.14.10"

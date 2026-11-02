@@ -93,6 +93,9 @@ impl SystemPrompt {
             .extend(prompt!("actors.md" { models: &models }).files);
         if !core {
             prompt.files.extend(prompt!("worker.md").files);
+            if system.workspace_available()? {
+                prompt.files.extend(prompt!("workspaces.md").files);
+            }
             prompt
                 .files
                 .extend(Self::platform(std::env::consts::OS).files);

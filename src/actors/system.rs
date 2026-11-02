@@ -57,6 +57,8 @@ struct Worker {
     task: JoinHandle<()>,
 }
 struct Inner {
+    workspace_backend: Mutex<Option<bool>>,
+    workspaces: Mutex<Option<Arc<daat_locus_workspace::Workspaces>>>,
     sudo_host: tokio::sync::Mutex<Option<Arc<crate::sudo_host::Client>>>,
     web_host: Arc<crate::web_host::Host>,
     temporary: Mutex<Option<crate::runtime_temp::RuntimeTemp>>,
@@ -402,6 +404,8 @@ impl ActorSystem {
         let builtin_resources = crate::builtin_resources::publish(&temporary)?;
         let system = Self {
             inner: Arc::new(Inner {
+                workspace_backend: Mutex::new(None),
+                workspaces: Mutex::new(None),
                 sudo_host: tokio::sync::Mutex::new(None),
                 web_host: Arc::new(crate::web_host::Host::default()),
                 temporary: Mutex::new(Some(temporary)),
@@ -523,6 +527,150 @@ impl ActorSystem {
     pub fn device_workspace(&self) -> &Path {
         &self.inner.workspace
     }
+    pub(crate) fn workspace_available(&self) -> Result<bool> {
+        let mut backend = self.inner.workspace_backend.lock();
+        if let Some(ready) = *backend {
+            return Ok(ready);
+        }
+        let available = match daat_locus_workspace::native::available() {
+            Err(daat_locus_workspace::Error::Unsupported(reason)) => {
+                tracing::debug!(reason, "Workspace filesystem backend is unavailable");
+                false
+            }
+            result => result.into_diagnostic()?,
+        };
+        let ready = if available {
+            self.workspaces()?;
+            match daat_locus_workspace::native::probe(&self.inner.data_dir.join("workspaces")) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    tracing::warn!(%error, "Workspace filesystem mount probe failed; App is unavailable");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        *backend = Some(ready);
+        Ok(ready)
+    }
+    pub(crate) fn device_app_names(&self) -> Result<Vec<String>> {
+        let mut apps: Vec<String> = crate::builtin_apps::DEVICE_APPS
+            .iter()
+            .map(|name| (*name).into())
+            .collect();
+        if self.workspace_available()? {
+            apps.push("workspace".into());
+        }
+        Ok(apps)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_workspace_backend_for_test(&self, available: bool) {
+        *self.inner.workspace_backend.lock() = Some(available);
+    }
+    pub(crate) fn workspaces(&self) -> Result<Arc<daat_locus_workspace::Workspaces>> {
+        let mut workspaces = self.inner.workspaces.lock();
+        if let Some(manager) = workspaces.as_ref() {
+            return Ok(manager.clone());
+        }
+        let directory = self.inner.data_dir.join("workspaces");
+        std::fs::create_dir_all(&directory).into_diagnostic()?;
+        protect_private_path(&directory)?;
+        let mounts = directory.join("mounts");
+        std::fs::create_dir_all(&mounts).into_diagnostic()?;
+        protect_private_path(&mounts)?;
+        let store = daat_locus_workspace::Store::open(&directory.join("store.sqlite3"))
+            .into_diagnostic()?;
+        store.recover_native_files().into_diagnostic()?;
+        let manager = Arc::new(daat_locus_workspace::Workspaces::new(store, mounts));
+        *workspaces = Some(manager.clone());
+        Ok(manager)
+    }
+    pub(crate) fn workspace_authorize(
+        &self,
+        call: Option<ActorCallContext>,
+    ) -> Result<daat_locus_workspace::Authorize> {
+        let read_only = call
+            .as_ref()
+            .map(|call| {
+                self.record_for_tool(&call.actor_id, call)
+                    .map(|actor| actor.remote_read_only)
+            })
+            .transpose()?
+            .unwrap_or(false);
+        let mut policy = crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, read_only);
+        // Validate native-source policy before entering a CAS transaction. A
+        // scope on our projections can issue FUSE/Dokan callbacks during
+        // canonicalization, which would re-enter the locked store. Such scopes
+        // cannot authorize the original native directory in any case.
+        let manager = self.inner.workspaces.lock().clone();
+        let mut projected = if let Some(manager) = manager {
+            manager.projected_directories().into_diagnostic()?
+        } else {
+            vec![]
+        };
+        let canonical: Vec<_> = projected
+            .iter()
+            .filter_map(|path| path.canonicalize().ok())
+            .collect();
+        projected.extend(canonical);
+        let native = |path: &Path| !projected.iter().any(|root| path.starts_with(root));
+        policy.filesystem.bound_roots.retain(|path| native(path));
+        policy.filesystem.readable_roots.retain(|path| native(path));
+        policy
+            .filesystem
+            .deny_read_paths
+            .retain(|path| native(path));
+        policy
+            .filesystem
+            .deny_write_paths
+            .retain(|path| native(path));
+        policy
+            .filesystem
+            .writable_roots
+            .retain(|root| native(&root.root));
+        for root in &mut policy.filesystem.writable_roots {
+            root.read_only_subpaths.retain(|path| native(path));
+        }
+        // Held Directory capabilities may outlive an App, but never retain the
+        // ActorSystem through a mount -> authorizer -> system reference cycle.
+        let system = Arc::downgrade(&self.inner);
+        Ok(Arc::new(move |path, access| {
+            let inner = system.upgrade().ok_or_else(|| {
+                daat_locus_workspace::Error::Conflict("Workspace host has stopped".into())
+            })?;
+            let system = Self { inner };
+            let authorize = || -> Result<()> {
+                if system.is_stopping() {
+                    return Err(forbidden("Workspace host is stopping"));
+                }
+                let read_only = if let Some(call) = &call {
+                    system
+                        .record_for_tool(&call.actor_id, call)?
+                        .remote_read_only
+                } else {
+                    false
+                };
+                let mut policy = policy.clone();
+                policy.filesystem.deny_all_writes |= read_only;
+                match access {
+                    daat_locus_workspace::Access::Read => {
+                        crate::file_io::ensure_authorized_read(path, &policy, "workspace source")
+                    }
+                    daat_locus_workspace::Access::Write => {
+                        policy.ensure_path_writable(path, "workspace merge")
+                    }
+                }
+            };
+            authorize().map_err(|error| {
+                if let Some(denial) = error.downcast_ref::<crate::sandbox::AccessDenied>() {
+                    daat_locus_workspace::Error::Authorization(Box::new(denial.clone()))
+                } else {
+                    std::io::Error::other(error).into()
+                }
+            })
+        }))
+    }
     #[cfg(test)]
     pub(crate) fn seed_test_actor(&self, id: &str) {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID).unwrap();
@@ -530,18 +678,12 @@ impl ActorSystem {
         actor.parent_id = Some(crate::stage::shared::ACTOR_ID.into());
         actor.depth = 1;
         actor.config.name = format!("Fixture {id}");
-        actor.config.apps = crate::builtin_apps::DEVICE_APPS
-            .iter()
-            .map(|app| (*app).to_owned())
-            .collect();
+        actor.config.apps = self.device_app_names().unwrap();
         self.prepare_dirs(id).unwrap();
         self.store().save_actor(&actor).unwrap();
     }
     fn hosted_config(&self, mut config: ActorConfig) -> Result<ActorConfig> {
-        config.apps = crate::builtin_apps::DEVICE_APPS
-            .iter()
-            .map(|app| (*app).to_owned())
-            .collect();
+        config.apps = self.device_app_names()?;
         normalize_config(config)
     }
     pub fn infrastructure_dir(&self) -> PathBuf {
@@ -1960,6 +2102,9 @@ impl ActorSystem {
         if let Some(host) = self.inner.sudo_host.lock().await.take() {
             host.close();
         }
+        if let Some(workspaces) = self.inner.workspaces.lock().take() {
+            workspaces.close();
+        }
         let temporary = self.inner.temporary.lock().take();
         drop(temporary);
     }
@@ -1997,6 +2142,19 @@ impl ActorSystem {
         turn_epoch: u64,
         device_policy: Option<ActorConfig>,
     ) -> Result<AppToolExecutionContext> {
+        // A persisted projection must be remounted before any App or native
+        // process observes cwd. Missing drivers must never expose the empty
+        // directory underneath a former mount as an ordinary workspace.
+        if self
+            .inner
+            .data_dir
+            .join("workspaces/store.sqlite3")
+            .exists()
+        {
+            self.workspaces()?
+                .restore(&actor.config.workspace)
+                .into_diagnostic()?;
+        }
         let config = self.config();
         let tool_output_max_tokens = config
             .models
@@ -2376,6 +2534,9 @@ mod tests {
         system.seed_test_actor(FIXTURE_ACTOR_ID);
         (directory, system)
     }
+
+    #[path = "workspace_tests.rs"]
+    mod workspace_tests;
 
     #[tokio::test]
     async fn actor_archive_retains_history_across_recovery_and_unarchive() {

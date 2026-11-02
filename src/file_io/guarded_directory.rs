@@ -1,4 +1,4 @@
-//! Directory-relative mutations on Unix; pinned non-reparse ancestors on Windows.
+//! Directory-relative mutations on Unix; pinned local ancestors on Windows.
 #[cfg(any(windows, test))]
 use std::fs;
 use std::{
@@ -82,7 +82,7 @@ impl GuardedDirectory {
         {
             use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
             use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
                 FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
                 FILE_SHARE_READ, FILE_SHARE_WRITE,
             };
@@ -119,13 +119,32 @@ impl GuardedDirectory {
                     .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                     .open(ancestor)?;
                 let metadata = handle.metadata()?;
-                if !metadata.is_dir()
-                    || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                {
+                if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY == 0 {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        "directory reparse point is forbidden",
+                        "directory ancestor is not a directory",
                     ));
+                }
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    // Only our live native workspace mounts may cross a
+                    // reparse point. Pin the point without SHARE_WRITE or
+                    // SHARE_DELETE so its target cannot change, then compare
+                    // the followed handle's kernel device path with the host's
+                    // mount record. Ordinary junctions/symlinks remain denied.
+                    let point = fs::OpenOptions::new()
+                        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+                        .share_mode(FILE_SHARE_READ)
+                        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(ancestor)?;
+                    let directory = daat_locus_workspace::native::open_mount_directory(ancestor)?
+                        .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "directory reparse point is forbidden",
+                        )
+                    })?;
+                    ancestors.extend([point, directory]);
+                    continue;
                 }
                 ancestors.push(handle);
             }
@@ -913,6 +932,24 @@ mod tests {
         assert!(fs::rename(&parent, dir.path().join("moved")).is_err());
         drop(guard);
         fs::rename(&parent, dir.path().join("moved")).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_junctions_are_not_accepted_as_workspace_mounts() {
+        use std::os::windows::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("target")).unwrap();
+        let output = std::process::Command::new("cmd.exe")
+            .current_dir(dir.path())
+            .args(["/D", "/V:OFF", "/C"])
+            .raw_arg("mklink /J junction target")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let junction = dir.path().canonicalize().unwrap().join("junction");
+        assert!(GuardedDirectory::open(&junction, false).is_err());
+        assert!(!dir.path().join("target/escaped").exists());
     }
     #[cfg(windows)]
     #[test]

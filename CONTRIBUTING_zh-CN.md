@@ -13,6 +13,16 @@
 
 原生客户端和 Android 的环境要求见[客户端指南](clients/app/README.md)。
 
+## Workspace 文件系统
+
+服务的原生挂载探测通过后，非 Core Actor 会安装可选的 Workspace App。`default` 直接使用原目录；命名分支在设备配置目录中共享不可变内容，在显式合并前保持隔离。多个 Actor 选择相同原目录和分支名，即共享同一工作区。创建另一个 Actor 时，可将返回的执行目录作为它的 workspace。选择工作区不会授予文件权限。
+
+- Windows 需要与服务架构匹配的 Dokan 2 上游发行版（2.0.6 或更新的 2.x 版本）。通过管理员授权安装其已签名驱动。服务以普通 OS 用户身份探测挂载，探测失败就不提供该 App。Daat Locus 不导入文件系统驱动证书，也不启用测试签名。目前不支持 Windows 分支内部的 reparse point 和符号链接。
+- Linux 需要可访问的 `/dev/fuse`、可用的 `fusermount3` 或 `fusermount`，以及挂载到 `/sys/fs/fuse/connections` 的 fusectl，并允许挂载用户访问自己连接的 abort 控制。通过发行版常规管理员流程安装 FUSE 软件包。Workspace 挂载不请求 `allow_other`。
+- macOS 和 Android 暂无 Workspace 投影后端，不暴露 Workspace App；普通执行目录继续可用。
+
+修改原生文件系统依赖后重启服务。引擎测试运行 `cargo test -p daat-locus-workspace --locked`。在具备依赖的机器上显式运行 `cargo test -p daat-locus-workspace --locked --test native_mounts -- --ignored`，缺少挂载条件会使这些测试失败。Actor/App 契约测试使用 `cargo test --lib workspace_tests`，并遵循常规后端构建设置。引擎或 App 测试通过不能证明原生挂载可用。
+
 ## 构建与运行
 
 在仓库根目录执行：
