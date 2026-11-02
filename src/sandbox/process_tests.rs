@@ -101,28 +101,33 @@ async fn terminal_requires_the_same_read_scope_as_files_and_keeps_external_write
 fn command(tools: &Path, outside: &Path) -> String {
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"));
     let executable = tools.join(if cfg!(windows) {
-        "dl-external-tool.cmd"
+        "echo.exe"
     } else {
         "dl-external-tool"
     });
-    std::fs::write(
+    #[cfg(windows)]
+    // Copy, rather than hardlink, so the shell host's exact runtime grant cannot
+    // authorize this separate executable through filesystem-object aliasing.
+    std::fs::copy(
+        daat_locus_bash::ProcessPolicy::shell_executable(&RuntimeSandboxPolicy::disabled())
+            .unwrap(),
         &executable,
-        if cfg!(windows) {
-            "@echo off\r\necho external-tool-ran\r\n"
-        } else {
-            "#!/bin/sh\nprintf 'external-tool-ran\\n'\n"
-        },
     )
     .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'external-tool-ran\\n'\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let invocation = if cfg!(windows) {
+        format!("{} external-tool-ran", quote(&executable))
+    } else {
+        quote(&executable)
+    };
     format!(
-        r#"set -eu; export PATH={}:"$PATH"; '{}'; while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; done < {}; for path in {} {}; do if (printf bad > "$path") 2>/dev/null; then exit 20; fi; done; printf '\noutside-write-denied\n'; printf 'workspace output' > output.txt"#,
+        r#"set -eu; export PATH={}:"$PATH"; {invocation}; while IFS= read -r line || [[ -n $line ]]; do printf '%s\n' "$line"; done < {}; for path in {} {}; do if (printf bad > "$path") 2>/dev/null; then exit 20; fi; done; printf '\noutside-write-denied\n'; printf 'workspace output' > output.txt"#,
         quote(tools),
-        executable.display(),
         quote(outside),
         quote(outside),
         quote(&tools.join("created.txt"))
