@@ -30,8 +30,7 @@ make custom surfaces accept native background input; if the required action is
 unsupported, return the window to the user and explain the remaining step.
 
 Keep intermediate work on the virtual display. Use give_window when a result is
-ready for the user, choosing original, center, left_half or right_half placement
-on a user display. Use release_window to return an acquired window to its original
+ready for the user. Use release_window to return an acquired window to its original
 placement without closing the app. Each window, including separately acquired
 dialogs, needs its own handoff. Old references are revoked; discover and explicitly
 open again to reacquire. If a return is unconfirmed, input stays revoked; use
@@ -41,5 +40,4 @@ to the Owner; applying them returns acquired windows and requires fresh discover
 Refresh the observation after geometry changes. After an uncertain launch or
 input, timeout or capture failure, inspect actual windows and their current state
 before deciding the next action. Do not replay the uncertain effect. A minimized
-window can be restored with adjust_window; a null state_id permits geometry
-recovery after capture failure.
+window can be restored with adjust_window.

@@ -176,6 +176,7 @@ impl App for FilesApp {
 mod tests {
     use super::*;
     use crate::sandbox::RuntimeSandboxPolicy;
+    use crate::sandbox::test_support::scoped_directory;
 
     const BUILTIN_SKILL: &[u8] = b"---\nname: builtin-fixture\ndescription: Trusted test skill.\n---\nUse this built-in instruction.\n";
 
@@ -237,27 +238,14 @@ mod tests {
         );
     }
 
-    /// Fixtures that exercise missing-scope, built-in-exemption and
-    /// search boundaries must stay outside the system temporary
-    /// directories: the baseline temporary authorization would otherwise
-    /// mask the boundaries these tests verify.
-    fn non_temporary_scratch() -> tempfile::TempDir {
-        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
-        std::fs::create_dir_all(&base).unwrap();
-        tempfile::Builder::new()
-            .prefix("notemp-files-app-")
-            .tempdir_in(&base)
-            .unwrap()
-    }
-
     fn builtin_context() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         AppToolExecutionContext,
         PathBuf,
     ) {
-        let workspace = non_temporary_scratch();
-        let resources = non_temporary_scratch();
+        let workspace = scoped_directory();
+        let resources = scoped_directory();
         let cwd = workspace.path().canonicalize().unwrap();
         let root = resources.path().canonicalize().unwrap();
         let skill = root.join("skills/builtin-fixture/SKILL.md");
@@ -422,8 +410,8 @@ mod tests {
 
     #[tokio::test]
     async fn execution_enforces_current_sandbox_after_schema_validation() {
-        let dir = non_temporary_scratch();
-        let outside = non_temporary_scratch();
+        let dir = scoped_directory();
+        let outside = scoped_directory();
         let target = outside.path().join("new.txt");
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_read = false;
@@ -477,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn denied_write_does_not_change_file() {
-        let dir = non_temporary_scratch();
+        let dir = scoped_directory();
         std::fs::write(dir.path().join("source.txt"), "alpha\n").unwrap();
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_write = false;

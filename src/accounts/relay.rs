@@ -14,7 +14,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tokio_tungstenite::tungstenite::Message;
 #[derive(Serialize)]
 struct Registration {
     version: u16,
@@ -141,14 +141,7 @@ async fn register_inner(
     label: String,
 ) -> std::result::Result<(Socket, Vec<Candidate>), Failure> {
     let mut url = url::Url::parse(endpoint).map_err(|_| Failure::Protocol)?;
-    if url.scheme() != "wss" && !(url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
+    if !websocket::valid_origin(&url) {
         return Err(Failure::Protocol);
     }
     let hash = network::lookup(name);
@@ -156,14 +149,9 @@ async fn register_inner(
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
     url.set_path(&format!("/accounts/{hash}"));
-    let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(64 * 1024);
-    config.max_frame_size = Some(64 * 1024);
-    config.max_write_buffer_size = 128 * 1024;
-    config.write_buffer_size = 16 * 1024;
     let mut socket = tokio::time::timeout(
         Duration::from_secs(20),
-        websocket::connect(url.as_str(), config),
+        websocket::connect(url.as_str(), websocket::relay_config()),
     )
     .await
     .map_err(|_| Failure::Timeout)?

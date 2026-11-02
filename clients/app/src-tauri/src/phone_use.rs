@@ -2,7 +2,7 @@
 use daat_locus::computer_use_app::android::{self, Backend, Reply};
 use jni::{
     jni_sig, jni_str,
-    objects::{JByteArray, JClass, JObject, JString},
+    objects::{JByteArray, JClass, JString},
     refs::Global,
 };
 use std::sync::Arc;
@@ -155,25 +155,7 @@ pub fn initialize() -> Result<(), Box<dyn std::error::Error>> {
     let context = ndk_context::android_context();
     let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
     let class = vm.attach_current_thread(|env| -> jni::errors::Result<_> {
-        let object = unsafe { JObject::from_raw(env, context.context().cast()) };
-        let loader = env
-            .call_method(
-                &object,
-                jni_str!("getClassLoader"),
-                jni_sig!("()Ljava/lang/ClassLoader;"),
-                &[],
-            )?
-            .l()?;
-        let name = env.new_string("io.shadow3aaa.daatlocus.PhoneUseController")?;
-        let class = env
-            .call_method(
-                &loader,
-                jni_str!("loadClass"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
-                &[(&name).into()],
-            )?
-            .l()?;
-        let class = env.cast_local::<JClass>(class)?;
+        let class = crate::android::load_class(env, "io.shadow3aaa.daatlocus.PhoneUseController")?;
         env.new_global_ref(&class)
     })?;
     let bridge = Arc::new(Bridge { class });

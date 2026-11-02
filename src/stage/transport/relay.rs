@@ -7,7 +7,7 @@ use crate::stage::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 pub const WINDOW: usize = 64 * 1024;
 pub const CHUNK: usize = 16 * 1024;
@@ -87,14 +87,7 @@ impl RelaySocket {
     ) -> Result<Self> {
         let mut url =
             url::Url::parse(endpoint).map_err(|_| StageError::Invalid("Invalid relay endpoint"))?;
-        if url.scheme() != "wss" && !(url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-        {
+        if !websocket::valid_origin(&url) {
             return Err(StageError::Invalid(
                 "Relay requires an explicitly configured WSS origin",
             ));
@@ -103,14 +96,9 @@ impl RelaySocket {
             let _ = rustls::crypto::ring::default_provider().install_default();
         }
         url.set_path(&format!("/connect/{}", enrollment.root.group_id));
-        let mut config = WebSocketConfig::default();
-        config.max_message_size = Some(64 * 1024);
-        config.max_frame_size = Some(64 * 1024);
-        config.max_write_buffer_size = 128 * 1024;
-        config.write_buffer_size = 16 * 1024;
         let socket = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            websocket::connect(url.as_str(), config),
+            websocket::connect(url.as_str(), websocket::relay_config()),
         )
         .await
         .map_err(|_| StageError::Unavailable("Relay connection timed out"))?

@@ -48,15 +48,7 @@ impl Settings {
         if let Some(value) = self.relay_origin.as_deref() {
             let url =
                 url::Url::parse(value).map_err(|_| StageError::Invalid("Invalid relay origin"))?;
-            if url.scheme() != "wss"
-                && !(url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.path() != "/"
-            {
+            if !super::transport::websocket::valid_origin(&url) {
                 return Err(StageError::Invalid("Relay requires an explicit WSS origin"));
             }
         }
@@ -511,24 +503,5 @@ mod tests {
             assert_eq!(reopened.settings().mode, mode);
             system.shutdown().await;
         }
-    }
-
-    #[test]
-    fn relay_mode_requires_a_credential_free_secure_origin() {
-        let mut settings = Settings {
-            mode: Connectivity::Relay,
-            ..Settings::default()
-        };
-        assert!(settings.validate().is_ok());
-        for endpoint in [
-            "wss://relay.example/path",
-            "wss://user:secret@relay.example/",
-            "http://relay.example/",
-        ] {
-            settings.relay_origin = Some(endpoint.into());
-            assert!(settings.validate().is_err());
-        }
-        settings.relay_origin = Some("wss://relay.example".into());
-        assert!(settings.validate().is_ok());
     }
 }

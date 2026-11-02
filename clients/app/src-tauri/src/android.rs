@@ -6,6 +6,33 @@ static SERVICE: std::sync::OnceLock<std::sync::Weak<MobileService>> = std::sync:
 static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 static SAFE_AREA: std::sync::Mutex<[f32; 4]> = std::sync::Mutex::new([0.0; 4]);
 
+pub(crate) fn load_class<'local>(
+    env: &mut jni::Env<'local>,
+    name: &str,
+) -> jni::errors::Result<jni::objects::JClass<'local>> {
+    use jni::{jni_sig, jni_str, objects::JObject};
+    let context = ndk_context::android_context();
+    let activity = unsafe { JObject::from_raw(env, context.context().cast()) };
+    let loader = env
+        .call_method(
+            &activity,
+            jni_str!("getClassLoader"),
+            jni_sig!("()Ljava/lang/ClassLoader;"),
+            &[],
+        )?
+        .l()?;
+    let name = env.new_string(name)?;
+    let class = env
+        .call_method(
+            &loader,
+            jni_str!("loadClass"),
+            jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+            &[(&name).into()],
+        )?
+        .l()?;
+    env.cast_local::<jni::objects::JClass>(class)
+}
+
 fn apply_safe_area(window: &tauri::WebviewWindow) {
     let values = *SAFE_AREA.lock().unwrap_or_else(|e| e.into_inner());
     // OS geometry only, with no JS-to-native capability. Explicit values also

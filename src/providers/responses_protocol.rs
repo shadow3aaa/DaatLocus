@@ -227,7 +227,6 @@ pub(super) async fn parse_stream(
         })?;
         diagnostics.received(chunk.len());
         buffer.extend_from_slice(&chunk);
-        buffer.normalize();
 
         while let Some(event) = buffer.next_event() {
             let data = event

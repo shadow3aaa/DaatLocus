@@ -1325,24 +1325,12 @@ pub(crate) fn view_image_bytes(
 
 #[cfg(test)]
 mod tests {
+    use crate::sandbox::test_support::scoped_directory;
     use serde_json::json;
     const BUILTIN_BYTES: &[u8] = b"trusted built-in instructions\n";
 
-    /// Fixtures that exercise missing-scope, built-in-exemption and
-    /// search boundaries must stay outside the system temporary
-    /// directories: the baseline temporary authorization would otherwise
-    /// mask the boundaries these tests verify.
-    fn non_temporary_scratch() -> tempfile::TempDir {
-        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
-        std::fs::create_dir_all(&base).unwrap();
-        tempfile::Builder::new()
-            .prefix("notemp-file-io-")
-            .tempdir_in(&base)
-            .unwrap()
-    }
-
     fn builtin_fixture() -> (tempfile::TempDir, RuntimeSandboxPolicy, PathBuf) {
-        let directory = non_temporary_scratch();
+        let directory = scoped_directory();
         let root = directory.path().canonicalize().unwrap();
         let path = root.join("skills/computer-use/SKILL.md");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1737,7 +1725,7 @@ mod tests {
         }
         // Keep rules outside implicit temporary scopes and Windows short-name
         // temp paths: ignore expands every '~' in excludesFile as a home path.
-        let temp = crate::sandbox::test_support::scoped_directory();
+        let temp = scoped_directory();
         let root = temp.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::write(root.join("visible.txt"), "needle visible\n").unwrap();
@@ -1961,7 +1949,7 @@ mod tests {
 
     #[test]
     fn edit_file_batch_abort_leaves_the_file_untouched() {
-        let dir = non_temporary_scratch();
+        let dir = scoped_directory();
         let file = dir.path().join("doc.txt");
         fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
         let error = edit_file(
@@ -1984,7 +1972,7 @@ mod tests {
 
     #[test]
     fn edit_file_single_pair_stays_supported() {
-        let dir = non_temporary_scratch();
+        let dir = scoped_directory();
         let file = dir.path().join("doc.txt");
         fs::write(&file, "alpha\n").unwrap();
         let error = edit_file(
@@ -2004,7 +1992,7 @@ mod tests {
 
     #[test]
     fn edit_file_batch_applies_all_edits_with_one_write() {
-        let dir = non_temporary_scratch();
+        let dir = scoped_directory();
         let file = dir.path().join("doc.txt");
         fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
         let result = edit_file(
@@ -2124,7 +2112,7 @@ mod tests {
 
     #[test]
     fn ensure_directory_preserves_readonly_and_checks_each_missing_parent() {
-        let dir = non_temporary_scratch();
+        let dir = scoped_directory();
         let root = dir.path().canonicalize().unwrap();
         let mut policy = RuntimeSandboxPolicy::disabled();
         policy.filesystem.full_disk_read = false;
@@ -2154,7 +2142,7 @@ mod tests {
 
     #[test]
     fn readonly_and_protected_paths_are_denied_before_access() {
-        let dir = crate::sandbox::test_support::scoped_directory();
+        let dir = scoped_directory();
         let private = dir.path().join("private");
         fs::create_dir(&private).unwrap();
         fs::write(private.join("secret.txt"), "private").unwrap();
@@ -2184,8 +2172,8 @@ mod tests {
     #[test]
     #[cfg_attr(windows, ignore = "requires Windows symlink creation privileges")]
     fn symlink_escape_is_denied() {
-        let dir = crate::sandbox::test_support::scoped_directory();
-        let outside = crate::sandbox::test_support::scoped_directory();
+        let dir = scoped_directory();
+        let outside = scoped_directory();
         fs::write(outside.path().join("a.txt"), "outside").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
@@ -2389,7 +2377,7 @@ mod tests {
     #[test]
     fn subdirectory_search_inherits_repository_rules_and_stops_at_git_boundary() {
         for git_file in [false, true] {
-            let dir = non_temporary_scratch();
+            let dir = scoped_directory();
             let outer = dir.path().canonicalize().unwrap();
             let root = outer.join("repo");
             let subdir = root.join("src/deep");

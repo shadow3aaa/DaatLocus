@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::sandbox::test_support::scoped_directory;
 use async_trait::async_trait;
 pub use daat_locus_bash::{TerminalSessionState, TerminalToolResult};
 use miette::{Result, bail, miette};
@@ -1404,25 +1406,12 @@ mod tests {
     }
 }
 
-/// Fixtures that exercise missing-scope behavior must stay outside the
-/// system temporary directories: the baseline temporary authorization
-/// would otherwise mask the boundary this test verifies.
-#[cfg(test)]
-fn non_temporary_scratch() -> tempfile::TempDir {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
-    std::fs::create_dir_all(&base).unwrap();
-    tempfile::Builder::new()
-        .prefix("notemp-terminal-")
-        .tempdir_in(&base)
-        .unwrap()
-}
-
 #[tokio::test]
 async fn live_terminal_rejects_new_input_after_scope_change_but_keeps_observation_available() {
     if !crate::sandbox::test_support::native_sandbox_available() {
         return;
     }
-    let dir = non_temporary_scratch();
+    let dir = scoped_directory();
     let mut policy = RuntimeSandboxPolicy::disabled();
     policy.filesystem.full_disk_read = false;
     policy.filesystem.full_disk_write = false;

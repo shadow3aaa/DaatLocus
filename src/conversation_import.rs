@@ -190,15 +190,7 @@ pub(crate) fn prepare_evidence(
     crate::actors::permissions::protect_private_path(&dir)?;
     let base = std::fs::canonicalize(base)
         .map_err(|_| miette!("Cannot resolve private import storage"))?;
-    let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-    policy.filesystem.full_disk_read = false;
-    policy.filesystem.full_disk_write = false;
-    policy.filesystem.readable_roots = vec![base.clone()];
-    policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
-        root: base.clone(),
-        read_only_subpaths: vec![],
-    }];
-    policy.filesystem.bound_roots = vec![base.clone()];
+    let policy = crate::resources::storage_write_policy(&base);
     let path = dir.join(&resource.id);
     crate::file_io::create_file_bytes(&base, &policy, &path.to_string_lossy(), &bytes)?;
     Ok(crate::actors::StoredResource {

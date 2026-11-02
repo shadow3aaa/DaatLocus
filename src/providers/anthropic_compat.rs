@@ -277,7 +277,6 @@ impl AnthropicCompatibleClient {
             })?;
             diagnostics.received(chunk.len());
             buffer.extend_from_slice(&chunk);
-            buffer.normalize();
 
             while let Some(event) = buffer.next_event() {
                 let data = sse_event_data(&event);

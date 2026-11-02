@@ -10,6 +10,24 @@ use tokio_tungstenite::{
 
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+pub(crate) fn valid_origin(url: &url::Url) -> bool {
+    (url.scheme() == "wss" || url.scheme() == "ws" && url.host_str() == Some("127.0.0.1"))
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/"
+}
+
+pub(crate) fn relay_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(64 * 1024))
+        .max_frame_size(Some(64 * 1024))
+        .max_write_buffer_size(128 * 1024)
+        .write_buffer_size(16 * 1024)
+}
+
 /// The relay issues a 30-second challenge using its own clock. Allow bounded
 /// clock skew here; the signed deadline is unchanged and the relay still checks
 /// it against its original nonce/deadline, so this does not extend its lifetime.
@@ -145,6 +163,30 @@ mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn origins_require_secure_transport_without_credentials_or_extra_components() {
+        for (origin, valid) in [
+            ("wss://relay.example", true),
+            ("wss://relay.example:8443/", true),
+            ("ws://127.0.0.1:8080/", true),
+            ("ws://relay.example/", false),
+            ("ws://localhost/", false),
+            ("http://relay.example/", false),
+            ("wss://relay.example/path", false),
+            ("wss://user@relay.example/", false),
+            ("wss://user:secret@relay.example/", false),
+            ("wss://relay.example/?query", false),
+            ("wss://relay.example/#fragment", false),
+            ("file:///", false),
+        ] {
+            assert_eq!(
+                valid_origin(&url::Url::parse(origin).unwrap()),
+                valid,
+                "{origin}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn stalled_handshake_does_not_block_another_resolved_address() {

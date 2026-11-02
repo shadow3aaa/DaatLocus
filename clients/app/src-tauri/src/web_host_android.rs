@@ -4,7 +4,7 @@ use daat_locus_client_protocol::web::{
 };
 use jni::{
     jni_sig, jni_str,
-    objects::{JClass, JObject, JString},
+    objects::{JClass, JString},
     refs::Global,
 };
 use std::sync::Arc;
@@ -74,25 +74,7 @@ pub async fn browser_control(
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
         vm.attach_current_thread(|env| -> jni::errors::Result<String> {
-            let activity = unsafe { JObject::from_raw(env, context.context().cast()) };
-            let loader = env
-                .call_method(
-                    &activity,
-                    jni_str!("getClassLoader"),
-                    jni_sig!("()Ljava/lang/ClassLoader;"),
-                    &[],
-                )?
-                .l()?;
-            let name = env.new_string("io.shadow3aaa.daatlocus.WebHost")?;
-            let class = env
-                .call_method(
-                    &loader,
-                    jni_str!("loadClass"),
-                    jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
-                    &[(&name).into()],
-                )?
-                .l()?;
-            let class = env.cast_local::<JClass>(class)?;
+            let class = crate::android::load_class(env, "io.shadow3aaa.daatlocus.WebHost")?;
             let profile = env.new_string(&input)?;
             let value = env
                 .call_static_method(
@@ -159,25 +141,7 @@ pub fn start(
     let context = ndk_context::android_context();
     let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
     let class = vm.attach_current_thread(|env| -> jni::errors::Result<_> {
-        let object = unsafe { JObject::from_raw(env, context.context().cast()) };
-        let loader = env
-            .call_method(
-                &object,
-                jni_str!("getClassLoader"),
-                jni_sig!("()Ljava/lang/ClassLoader;"),
-                &[],
-            )?
-            .l()?;
-        let name = env.new_string("io.shadow3aaa.daatlocus.WebHost")?;
-        let class = env
-            .call_method(
-                &loader,
-                jni_str!("loadClass"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
-                &[(&name).into()],
-            )?
-            .l()?;
-        let class = env.cast_local::<JClass>(class)?;
+        let class = crate::android::load_class(env, "io.shadow3aaa.daatlocus.WebHost")?;
         let origin = env.new_string(origin)?;
         env.call_static_method(
             &class,

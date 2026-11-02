@@ -78,8 +78,8 @@ async fn portable_commands_obey_native_filesystem_authority() {
     if !crate::sandbox::test_support::native_sandbox_available() {
         return;
     }
-    let workspace = super::non_temporary_scratch();
-    let outside = super::non_temporary_scratch();
+    let workspace = scoped_directory();
+    let outside = scoped_directory();
     std::fs::write(workspace.path().join("input.txt"), "needle\n").unwrap();
     std::fs::write(outside.path().join("private.txt"), "secret\n").unwrap();
     let mut policy = RuntimeSandboxPolicy::disabled();

@@ -13,6 +13,20 @@ static INSTALLATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 pub(crate) fn lock_storage_lifecycle() -> parking_lot::MutexGuard<'static, ()> {
     INSTALLATION.lock()
 }
+
+pub(crate) fn storage_write_policy(base: &std::path::Path) -> crate::sandbox::RuntimeSandboxPolicy {
+    let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
+    policy.filesystem.full_disk_read = false;
+    policy.filesystem.full_disk_write = false;
+    policy.filesystem.readable_roots = vec![base.to_owned()];
+    policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
+        root: base.to_owned(),
+        read_only_subpaths: vec![],
+    }];
+    policy.filesystem.bound_roots = vec![base.to_owned()];
+    policy
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
@@ -513,15 +527,7 @@ pub fn install(system: &ActorSystem, actor: &str, resource: &Resource) -> Result
     directory.protect_private()?;
     let path = dir.join(&resource.id);
     let base = std::fs::canonicalize(&base)?;
-    let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-    policy.filesystem.full_disk_read = false;
-    policy.filesystem.full_disk_write = false;
-    policy.filesystem.readable_roots = vec![base.clone()];
-    policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
-        root: base.clone(),
-        read_only_subpaths: vec![],
-    }];
-    policy.filesystem.bound_roots = vec![base.clone()];
+    let policy = storage_write_policy(&base);
     if let Ok(stored) = system.store().resource(actor, &resource.id)
         && crate::file_io::read_bytes(&stored.path, resource.content.size, &policy)
             .is_ok_and(|existing| existing == bytes)

@@ -31,9 +31,7 @@ its handoff.
 
 ## Observe, act, verify
 
-`open_page`, `observe` and successful inputs return an observation containing
-`tab_id`, `state_id`, `width`, `height`, `screenshot_url` and the actual viewport
-image. Inspect that image before choosing the next action.
+Inspect the returned viewport image before choosing the next action.
 
 - Ground targets in visible content. Coordinates are pixels of the returned
   image, with origin at its top left: `0 <= x < width`, `0 <= y < height`.
@@ -56,9 +54,7 @@ image. Inspect that image before choosing the next action.
   avoid repeatedly checking the same fact.
 
 Use `move_pointer` for hover menus, then inspect the returned image before
-clicking the revealed control. `click` supports `button` values `left`, `right`, `middle`
-or null and `click_count` values 1, 2 or null; null means left/single.
-`drag` takes the start `x`/`y` and end `to_x`/`to_y` inside the same image.
+clicking the revealed control.
 
 For offscreen content, `scroll` over the intended scrollable region and inspect
 the result. Its point uses image pixels, but `delta_x` and `delta_y` are CSS
@@ -73,8 +69,6 @@ value, focus it, use `press_key` with `key: "A"` and the platform's select-all
 modifier (`control` on Windows/Android, `meta` on macOS), then type the new value.
 Use the new returned state at each step and check the field before submission.
 
-`press_key` accepts Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right,
-Home, End, PageUp/Down, Space, F3, F5, +, - and = or one ASCII letter/digit.
 Use `type_text` for ordinary prose.
 
 Use `navigate` for an intended HTTP(S) destination and `back`/`forward` for page

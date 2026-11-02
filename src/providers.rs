@@ -63,14 +63,14 @@ mod timeout_tests;
 pub(crate) use failure::{ModelFailureKind, ModelRequestFailure};
 mod io;
 use io::{
-    StreamingToolCallBuilder, default_rate_limit_backoff, format_request_error,
+    SseBuffer, StreamingToolCallBuilder, default_rate_limit_backoff, format_request_error,
     looks_like_context_window_error, looks_like_vision_unsupported_error, non_empty_string,
-    normalize_sse_buffer, parse_agent_turn_stream_result_from_json, parse_retry_after_seconds,
+    parse_agent_turn_stream_result_from_json, parse_retry_after_seconds,
     parse_usage_from_response_json, read_response_text_with_idle_timeout,
     send_request_for_streaming_response, should_retry_prompt_request_with_nested_thinking_budget,
     should_retry_request_without_reasoning_content, should_retry_request_without_thinking_budget,
-    summarize_agent_turn_request, summarize_prompt_request, take_next_sse_event,
-    truncate_for_error, truncate_for_json_error,
+    summarize_agent_turn_request, summarize_prompt_request, truncate_for_error,
+    truncate_for_json_error,
 };
 mod payload;
 mod thinking;
@@ -697,7 +697,7 @@ impl OpenAIClient {
             Some(allowed_tool_names)
         };
 
-        let mut buffer = Vec::new();
+        let mut buffer = SseBuffer::default();
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
@@ -759,8 +759,7 @@ impl OpenAIClient {
                 })?,
             };
             buffer.extend_from_slice(&chunk);
-            normalize_sse_buffer(&mut buffer);
-            while let Some(event) = take_next_sse_event(&mut buffer) {
+            while let Some(event) = buffer.next_event() {
                 let Some(data) = sse_event_data(&event) else {
                     continue;
                 };

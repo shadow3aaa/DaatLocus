@@ -84,15 +84,7 @@ pub(super) async fn upload(
     crate::actors::permissions::protect_private_path(&dir).map_err(|_| ApiError::forbidden())?;
     let base = std::fs::canonicalize(&base).map_err(|_| ApiError::internal())?;
     let path = dir.join(&id);
-    let mut policy = crate::sandbox::RuntimeSandboxPolicy::disabled();
-    policy.filesystem.full_disk_read = false;
-    policy.filesystem.full_disk_write = false;
-    policy.filesystem.readable_roots = vec![base.clone()];
-    policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
-        root: base.clone(),
-        read_only_subpaths: vec![],
-    }];
-    policy.filesystem.bound_roots = vec![base.clone()];
+    let policy = crate::resources::storage_write_policy(&base);
     crate::file_io::create_file_bytes(&base, &policy, &path.to_string_lossy(), &bytes)
         .map_err(|_| ApiError::internal())?;
     let uri = format!("/v1/actors/{actor}/resources/{id}");

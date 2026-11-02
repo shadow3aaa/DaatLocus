@@ -337,99 +337,23 @@ pub(super) fn parse_usage_from_response_json(
     if usage.is_zero() { None } else { Some(usage) }
 }
 
-const SSE_CURSOR_HEADER: usize = 8;
-const SSE_CURSOR_MAGIC: u32 = 0x444c_5343;
-
-fn framed(buffer: &[u8]) -> bool {
-    buffer.len() >= SSE_CURSOR_HEADER && buffer[..4] == SSE_CURSOR_MAGIC.to_le_bytes()
-}
-
-fn sse_cursor(buffer: &[u8]) -> usize {
-    if !framed(buffer) {
-        return 0;
-    }
-    let cursor = u32::from_le_bytes(buffer[4..8].try_into().unwrap_or([0; 4])) as usize;
-    if cursor <= buffer.len() - SSE_CURSOR_HEADER {
-        cursor
-    } else {
-        0
-    }
-}
-
-fn write_sse_cursor(buffer: &mut Vec<u8>, cursor: usize) {
-    let cursor = u32::try_from(cursor).unwrap_or(u32::MAX);
-    if framed(buffer) {
-        buffer[4..8].copy_from_slice(&cursor.to_le_bytes());
-        return;
-    }
-    let mut framed_buffer = Vec::with_capacity(SSE_CURSOR_HEADER + buffer.len());
-    framed_buffer.extend_from_slice(&SSE_CURSOR_MAGIC.to_le_bytes());
-    framed_buffer.extend_from_slice(&cursor.to_le_bytes());
-    framed_buffer.extend_from_slice(buffer);
-    *buffer = framed_buffer;
-}
-
-fn sse_bytes(buffer: &mut [u8]) -> &mut [u8] {
-    if framed(buffer) {
-        &mut buffer[SSE_CURSOR_HEADER..]
-    } else {
-        buffer
-    }
-}
-
-pub(super) fn normalize_sse_buffer(buffer: &mut Vec<u8>) {
-    let cursor = sse_cursor(buffer);
-    let needs_rewrite = sse_bytes(buffer).contains(&b'\r');
-    if !needs_rewrite {
-        return;
-    }
-    let payload = sse_bytes(buffer).to_vec();
-    // Replace \r\n with \n and bare \r with \n, operating on raw bytes.
-    let mut out = Vec::with_capacity(payload.len());
-    let mut i = 0;
-    while i < payload.len() {
-        if payload[i] == b'\r' {
-            out.push(b'\n');
-            i += if i + 1 < payload.len() && payload[i + 1] == b'\n' {
-                2
-            } else {
-                1
-            };
-        } else {
-            out.push(payload[i]);
-            i += 1;
-        }
-    }
-    *buffer = out;
-    write_sse_cursor(buffer, cursor.min(buffer.len()));
-}
-
 /// Byte cursor over an SSE buffer so consuming an event does not shift the tail.
 #[derive(Default)]
 pub(super) struct SseBuffer {
     bytes: Vec<u8>,
     cursor: usize,
+    after_cr: bool,
 }
 
 impl SseBuffer {
     pub(super) fn extend_from_slice(&mut self, chunk: &[u8]) {
         self.compact_if_needed();
-        self.bytes.extend_from_slice(chunk);
-    }
-
-    pub(super) fn normalize(&mut self) {
-        if self.cursor == 0 {
-            normalize_sse_buffer(&mut self.bytes);
-            return;
+        for &byte in chunk {
+            if byte != b'\n' || !self.after_cr {
+                self.bytes.push(if byte == b'\r' { b'\n' } else { byte });
+            }
+            self.after_cr = byte == b'\r';
         }
-        if !self.bytes[self.cursor..].contains(&b'\r') {
-            return;
-        }
-        let mut pending = self.bytes.split_off(self.cursor);
-        self.cursor = 0;
-        self.bytes.clear();
-        normalize_sse_buffer(&mut pending);
-        self.bytes = pending;
     }
 
     pub(super) fn next_event(&mut self) -> Option<String> {
@@ -449,25 +373,6 @@ impl SseBuffer {
             self.cursor = 0;
         }
     }
-}
-
-pub(super) fn take_next_sse_event(buffer: &mut Vec<u8>) -> Option<String> {
-    let mut cursor = sse_cursor(buffer);
-    let base = usize::from(framed(buffer)) * SSE_CURSOR_HEADER;
-    let payload = &buffer[base..];
-    let delimiter_index = payload
-        .get(cursor..)?
-        .windows(2)
-        .position(|window| window == b"\n\n")?;
-    let event = String::from_utf8_lossy(&payload[cursor..cursor + delimiter_index]).into_owned();
-    cursor += delimiter_index + 2;
-    if cursor >= 4096 {
-        let rest = buffer[base + cursor..].to_vec();
-        *buffer = rest;
-    } else {
-        write_sse_cursor(buffer, cursor);
-    }
-    Some(event)
 }
 
 pub fn format_request_error(
@@ -793,64 +698,26 @@ mod tests {
     }
 
     #[test]
-    fn sse_cursor_survives_the_next_appended_chunk() {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(b"data: one\n\ndata: tw");
-        normalize_sse_buffer(&mut buffer);
-        assert_eq!(
-            take_next_sse_event(&mut buffer).as_deref(),
-            Some("data: one")
-        );
-        assert!(take_next_sse_event(&mut buffer).is_none());
-
-        buffer.extend_from_slice(b"o\n\n");
-        normalize_sse_buffer(&mut buffer);
-        assert_eq!(
-            take_next_sse_event(&mut buffer).as_deref(),
-            Some("data: two")
-        );
-        assert!(take_next_sse_event(&mut buffer).is_none());
-
-        let mut tight = Vec::new();
-        tight.extend_from_slice(b"data: one\n\ndata: tw");
-        normalize_sse_buffer(&mut tight);
-        assert_eq!(
-            take_next_sse_event(&mut tight).as_deref(),
-            Some("data: one")
-        );
-        let fill = tight
-            .capacity()
-            .saturating_sub(tight.len())
-            .saturating_sub(1);
-        tight.extend(std::iter::repeat_n(b'x', fill));
-        assert!(tight.capacity() - tight.len() < 4);
-        tight.extend_from_slice(b"\n\n");
-        normalize_sse_buffer(&mut tight);
-        let mut events = Vec::new();
-        while let Some(event) = take_next_sse_event(&mut tight) {
-            events.push(event);
+    fn sse_buffer_handles_line_endings_chunking_and_compaction() {
+        for newline in ["\n", "\r", "\r\n"] {
+            for padding in [0, 4096] {
+                let first = format!("data: {}one", "x".repeat(padding));
+                let stream = format!(
+                    "{first}{newline}{newline}data: 二{newline}{newline}data: three{newline}{newline}"
+                );
+                for chunk_size in [1, 2, 7, 4096, 8192] {
+                    let mut buffer = SseBuffer::default();
+                    let mut events = Vec::new();
+                    for chunk in stream.as_bytes().chunks(chunk_size) {
+                        buffer.extend_from_slice(chunk);
+                        while let Some(event) = buffer.next_event() {
+                            events.push(event);
+                        }
+                    }
+                    assert_eq!(events, [first.as_str(), "data: 二", "data: three"]);
+                    assert!(buffer.next_event().is_none());
+                }
+            }
         }
-        assert_eq!(events.len(), 1);
-        assert!(events[0].starts_with("data: tw"));
-        assert!(events[0].ends_with("x".repeat(fill).as_str()));
-        assert!(!events[0].contains("data: one"));
-
-        let mut growing = Vec::with_capacity(b"data: one\n\ndata: tw".len());
-        growing.extend_from_slice(b"data: one\n\ndata: tw");
-        normalize_sse_buffer(&mut growing);
-        assert_eq!(
-            take_next_sse_event(&mut growing).as_deref(),
-            Some("data: one")
-        );
-        growing.extend(std::iter::repeat_n(b'y', growing.capacity()));
-        growing.extend_from_slice(b"\n\n");
-        normalize_sse_buffer(&mut growing);
-        events.clear();
-        while let Some(event) = take_next_sse_event(&mut growing) {
-            events.push(event);
-        }
-        assert_eq!(events.len(), 1);
-        assert!(events[0].starts_with("data: tw"));
-        assert!(!events.iter().any(|event| event.contains("data: one")));
     }
 }
