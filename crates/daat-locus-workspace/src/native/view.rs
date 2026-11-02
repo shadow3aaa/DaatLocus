@@ -177,9 +177,25 @@ impl View {
     pub(super) fn write(
         &self,
         handle: u64,
-        mut offset: u64,
+        offset: u64,
         bytes: &[u8],
         append: bool,
+    ) -> Result<usize> {
+        self.write_inner(handle, offset, bytes, append, false)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn write_paging(&self, handle: u64, offset: u64, bytes: &[u8]) -> Result<usize> {
+        self.write_inner(handle, offset, bytes, false, true)
+    }
+
+    fn write_inner(
+        &self,
+        handle: u64,
+        mut offset: u64,
+        mut bytes: &[u8],
+        append: bool,
+        paging: bool,
     ) -> Result<usize> {
         let mut state = self.state.lock();
         let open = state
@@ -190,18 +206,45 @@ impl View {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
         let inode = open.inode;
-        let append = append || open.append;
+        let append = !paging && (append || open.append);
         if let Some(file) = state.unlinked.get_mut(&inode) {
             if append {
                 offset = file.entry().size;
             }
-            return file.write(offset, bytes);
+            if paging {
+                let length = file
+                    .entry()
+                    .size
+                    .saturating_sub(offset)
+                    .min(bytes.len() as u64);
+                bytes = &bytes[..length as usize];
+            }
+            return if bytes.is_empty() {
+                Ok(0)
+            } else {
+                file.write(offset, bytes)
+            };
         }
         let path = Self::path(&state, inode)?;
         if append {
             offset = self.workspace.entry(path)?.size;
         }
-        self.workspace.write(path, offset, bytes)
+        if paging {
+            // Windows flushes complete mapped pages, including padding beyond
+            // EOF. Paging I/O must never grow the file or apply append mode.
+            let length = self
+                .workspace
+                .entry(path)?
+                .size
+                .saturating_sub(offset)
+                .min(bytes.len() as u64);
+            bytes = &bytes[..length as usize];
+        }
+        if bytes.is_empty() {
+            Ok(0)
+        } else {
+            self.workspace.write(path, offset, bytes)
+        }
     }
 
     pub(super) fn truncate(&self, inode: u64, size: u64) -> Result<()> {

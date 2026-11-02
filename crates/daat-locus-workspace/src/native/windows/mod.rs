@@ -542,12 +542,18 @@ extern "system" fn write(
         } else {
             unsafe { std::slice::from_raw_parts(buffer.cast(), length as usize) }
         };
-        let length = handler.view.write(
-            info.Context,
-            offset.max(0) as u64,
-            bytes,
-            info.WriteToEndOfFile != 0,
-        )?;
+        let length = if info.PagingIo != 0 {
+            handler
+                .view
+                .write_paging(info.Context, offset.max(0) as u64, bytes)?
+        } else {
+            handler.view.write(
+                info.Context,
+                offset.max(0) as u64,
+                bytes,
+                info.WriteToEndOfFile != 0,
+            )?
+        };
         unsafe {
             *written = length as u32;
         }

@@ -26,6 +26,9 @@ dunce = "1.0.5"
 libloading = "0.8.9"
 winapi = { version = "0.3.9", features = ["std", "basetsd", "fileapi", "minwinbase", "minwindef", "ntdef", "ntstatus", "winnt", "sysinfoapi", "securitybaseapi", "handleapi", "processthreadsapi", "winbase", "errhandlingapi", "sddl"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { version = "0.3.9", features = ["memoryapi", "ioapiset"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.18.0"
 libc = "0.2"
