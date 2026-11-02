@@ -227,6 +227,12 @@ impl Directory {
             self.access(path, Access::Write)?;
             directory.rename(&temporary, &directory, name)?;
             installed = true;
+            // cap-std directory capabilities may use O_PATH on Linux. Reopen
+            // the held directory itself with read access before fsync; the
+            // capability's pathname is never reopened through the host tree.
+            #[cfg(unix)]
+            directory.open(".")?.sync_all()?;
+            #[cfg(not(unix))]
             directory
                 .try_clone()?
                 .into_std_file()
@@ -283,6 +289,17 @@ impl Directory {
             permissions.set_readonly(mode & 0o222 == 0);
             permissions
         };
+        #[cfg(unix)]
+        {
+            // Linux does not implement lchmod/fchmodat(AT_SYMLINK_NOFOLLOW).
+            // Change the opened target with fchmod, retaining no-follow I/O.
+            let mut options = OpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            directory
+                .open_with(name, &options)?
+                .set_permissions(permissions)?;
+        }
+        #[cfg(not(unix))]
         directory.set_symlink_permissions(name, permissions)?;
         Ok(())
     }
