@@ -274,6 +274,37 @@ fn windows_mapped_writes_reach_branch_storage_and_range_locks_remain_enforced() 
 #[cfg(windows)]
 #[test]
 #[ignore = "requires the installed Dokan 2 driver and permission to mount directories"]
+fn windows_native_programs_can_execute_from_a_branch() {
+    use std::os::windows::process::CommandExt;
+    let (_temp, _source, manager, location) = windows_fixture();
+    let executable = location.directory.join("command.exe");
+    let system = std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap());
+    fs::copy(system.join("System32/cmd.exe"), &executable).unwrap();
+    let mut child = std::process::Command::new(executable)
+        .args(["/D", "/C", "exit 37"])
+        .current_dir(&location.directory)
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("native branch executable did not exit");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(37));
+    manager.close();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the installed Dokan 2 driver and permission to mount directories"]
 fn windows_unsupported_links_and_streams_do_not_modify_branch_or_source_files() {
     use std::os::windows::io::AsRawHandle;
     use winapi::um::ioapiset::DeviceIoControl;
