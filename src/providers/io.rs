@@ -24,11 +24,6 @@ impl StreamingToolCallBuilder {
         }
     }
 
-    /// A builder that never received any `tool_call` delta content. Some
-    /// OpenAI-compatible proxies (e.g. Anthropic models fronted by a gateway)
-    /// emit `tool_call` deltas with a non-zero `index`, leaving lower indices as
-    /// empty placeholders that must be skipped rather than treated as
-    /// incomplete calls.
     pub(crate) const fn is_empty(&self) -> bool {
         self.id.is_empty() && self.name.is_empty() && self.arguments.is_empty()
     }

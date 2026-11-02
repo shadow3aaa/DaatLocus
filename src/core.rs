@@ -219,11 +219,6 @@ impl TokenUsageInfo {
         }
     }
 }
-/// An explicit, runtime-owned sink for streaming model progress.
-///
-/// Model providers may report model output through this sink, but they never
-/// receive mutable execution state.
-/// Model output observations, independent of clients and transports.
 /// Text events contain only newly generated text, never cumulative snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelProgressEvent {

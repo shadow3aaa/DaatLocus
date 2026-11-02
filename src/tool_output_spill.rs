@@ -9,17 +9,9 @@ use std::time::{Duration, SystemTime};
 use crate::context_budget::APPROX_BYTES_PER_TOKEN;
 
 /// How long a spill stays readable.
-///
-/// This must comfortably exceed the longest plausible single turn. A read that
-/// lands after expiry fails as an ordinary file-not-found tool error, which the
-/// model can recover from, so expiry is a cost, not a correctness break.
 pub const SPILL_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// How often the service sweeps the pool.
-///
-/// Bounds worst-case overshoot at roughly a tenth of the TTL. This is the only
-/// knob controlling how promptly expired spills are reclaimed, and a longer
-/// period is strictly fine: nothing depends on exact expiry.
 pub const SPILL_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60);
 
 const POOL_DIR_NAME: &str = "daat-locus";
@@ -52,8 +44,7 @@ pub fn pool_dir() -> PathBuf {
         .join(POOL_SUBDIR_NAME)
 }
 
-/// Create the pool if needed. Idempotent; the service calls it at boot and
-/// every spill write calls it before writing.
+/// Create the pool if needed.
 pub fn ensure_pool_dir() -> std::io::Result<PathBuf> {
     let dir = pool_dir();
     std::fs::create_dir_all(&dir)?;
@@ -66,25 +57,11 @@ pub enum OverflowTarget<'a> {
     /// The full text cannot be re-derived from anywhere, so it is written to
     /// the shared spill pool and the marker names the file.
     Spill(SpillContext<'a>),
-    /// The caller can read the source again, so the marker says how to
-    /// continue instead.
-    ///
-    /// Copying content that already exists on disk into a temp file would only
-    /// hand the model a worse copy of what it just asked for: the copy has no
-    /// line anchors the model can edit against, and its line numbering does not
-    /// match the real file unless the read happened to start at line one.
+    /// Continue reading the original source.
     Continue { instruction: String },
 }
 
-/// Applies the tool-output budget to already-rendered model content.
-///
-/// This is unconditional, including for content a tool supplied as an explicit
-/// `model_content_override`. Call it where a tool result becomes an
-/// `AgentMessage::tool`, after source-line elision.
-///
-/// When the content does not fit, the target decides what the model is told.
-/// A tool that can be re-read supplies `Continue`; anything else spills to the
-/// pool. With no target at all this degrades to a plain prefix truncation.
+/// Bound rendered tool content; overflow continues at the target or is truncated.
 pub fn bound_tool_model_content(
     text: &str,
     max_tokens: usize,
@@ -314,13 +291,6 @@ fn sweep_dir(dir: &Path, now: SystemTime) -> SweepReport {
     report
 }
 
-/// service-side collection: one pass at boot, then one per interval.
-///
-/// There is deliberately no filesystem watcher here. The sweep is authoritative
-/// and the watcher could only ever shave the sweep interval off a file's
-/// expiry, which nothing depends on; a notifier would add a long-lived handle
-/// and Windows-specific failure modes in exchange for a delay that is already
-/// bounded and harmless.
 pub async fn run_gc_loop() {
     sweep_once();
     let mut ticker = tokio::time::interval(SPILL_SWEEP_INTERVAL);

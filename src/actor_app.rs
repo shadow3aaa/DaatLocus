@@ -38,41 +38,7 @@ impl ActorApp {
             .into_diagnostic()?;
         Ok(result.with_output_schema::<crate::app::output::ActorOutput>())
     }
-    fn conversation_url(&self, actor: &str) -> Result<String> {
-        Ok(crate::stage::ActorAddress {
-            stage_id: self
-                .system
-                .store()
-                .public_stage_id()
-                .map_err(|error| miette!("{error}"))?,
-            actor_id: actor.into(),
-        }
-        .conversation_url())
-    }
-    fn require_local_stage(&self, stage: Option<&str>) -> Result<()> {
-        if let Some(stage) = stage {
-            let local = self
-                .system
-                .store()
-                .public_stage_id()
-                .map_err(|error| miette!("{error}"))?;
-            if stage != local.to_string() {
-                return Err(miette!("Operation targets another device"));
-            }
-        }
-        Ok(())
-    }
-    fn approval_stage(&self, stage: Option<&str>) -> Result<crate::stage::StageId> {
-        if let Some(stage) = stage {
-            serde_json::from_value(json!(stage))
-                .map_err(|_| miette!("Invalid approval source device"))
-        } else {
-            self.system
-                .store()
-                .public_stage_id()
-                .map_err(|error| miette!("{error}"))
-        }
-    }
+
     pub fn new(actor_id: String, system: ActorSystem) -> Self {
         Self { actor_id, system }
     }
@@ -436,7 +402,10 @@ impl App for ActorApp {
                 let args: AppealApprovalArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
                 let source = args.source()?;
-                let source_stage = self.approval_stage(args.stage_id.as_deref())?.to_string();
+                let source_stage = self
+                    .system
+                    .approval_stage(args.stage_id.as_deref())?
+                    .to_string();
                 let application = crate::actors::ReviewApplication {
                     task: self
                         .system
@@ -459,7 +428,7 @@ impl App for ActorApp {
                 let record = crate::actors::runtime_permissions::submit_from_actor(
                     &self.system,
                     caller,
-                    self.approval_stage(args.stage_id.as_deref())?,
+                    self.system.approval_stage(args.stage_id.as_deref())?,
                     context,
                     source,
                     application,
@@ -507,7 +476,7 @@ impl App for ActorApp {
                     return Self::sent_message(
                         "Message delivered".into(),
                         receipt,
-                        self.conversation_url(&actor_id)?,
+                        self.system.conversation_url(&actor_id)?,
                         content,
                     );
                 }
@@ -520,7 +489,7 @@ impl App for ActorApp {
             "status" | "cancel" => {
                 let args: RequestArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let request = self.system.request_for_tool(
                     caller,
                     &args.message_id,
@@ -706,7 +675,7 @@ impl App for ActorApp {
             "list" => {
                 let args: ListActorArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let limit = args.limit.unwrap_or(25);
                 if limit == 0 || limit > 100 {
                     return Err(miette!("Actor page limit must be between 1 and 100"));
@@ -716,7 +685,7 @@ impl App for ActorApp {
                 let start = args.cursor.unwrap_or(0);
                 let next = start.saturating_add(limit);
                 let next_cursor = (next < actors.len()).then_some(next);
-                let actors = actors.iter().skip(start).take(limit).map(|actor| Ok(json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)?, "workspace": actor.config.workspace, "apps": actor.config.apps, "status": actor.status }))).collect::<Result<Vec<_>>>()?;
+                let actors = actors.iter().skip(start).take(limit).map(|actor| Ok(json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.system.conversation_url(&actor.id)?, "workspace": actor.config.workspace, "apps": actor.config.apps, "status": actor.status }))).collect::<Result<Vec<_>>>()?;
                 let parent = self.system.record_for_tool(&self.actor_id, caller)?;
                 Ok(AppToolExecutionResult::new(
                     format!("listed {} Actors", actors.len()),
@@ -729,7 +698,7 @@ impl App for ActorApp {
                     let args: ImportConversationArgs =
                         serde_json::from_value(call.arguments.clone())
                             .map_err(|_| miette!("invalid conversation import arguments"))?;
-                    self.require_local_stage(args.stage_id.as_deref())?;
+                    self.system.require_local_stage(args.stage_id.as_deref())?;
                     let message = self.system.store().message(&caller.message_id)?;
                     if !message.attachments.iter().any(|attachment| {
                         attachment.id == args.resource_id
@@ -765,7 +734,7 @@ impl App for ActorApp {
                     serde_json::from_value(call.arguments.clone())
                         .map_err(|_| miette!("invalid Actor creation arguments"))?
                 };
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let parent = self.system.record_for_tool(&self.actor_id, caller)?;
                 let workspace = args
                     .workspace
@@ -802,7 +771,7 @@ impl App for ActorApp {
                 };
                 Ok(AppToolExecutionResult::new(
                     format!("created Actor {}", actor.id),
-                    json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.conversation_url(&actor.id)? }),
+                    json!({ "id": actor.id, "name": actor.config.name, "conversation_url": self.system.conversation_url(&actor.id)? }),
                     None,
                 ))
             }
@@ -852,8 +821,8 @@ impl App for ActorApp {
                 )?;
                 Self::sent_message(
                     format!("message accepted by {}", args.actor_id),
-                    json!({ "message_id": message.id, "actor_id": message.actor_id, "stage_id":self.system.store().public_stage_id()?, "conversation_url":self.conversation_url(&message.actor_id)?, "reply_to":message.in_reply_to, "status": message.status }),
-                    self.conversation_url(&message.actor_id)?,
+                    json!({ "message_id": message.id, "actor_id": message.actor_id, "stage_id":self.system.store().public_stage_id()?, "conversation_url":self.system.conversation_url(&message.actor_id)?, "reply_to":message.in_reply_to, "status": message.status }),
+                    self.system.conversation_url(&message.actor_id)?,
                     content,
                 )
             }

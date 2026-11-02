@@ -191,9 +191,6 @@ impl AnthropicCompatibleClient {
         anthropic_messages_url(&self.base_url)
     }
 
-    /// Output cap for one request. Anthropic requires `max_tokens` on every
-    /// call, so mirror the chat-completions budget: the smaller of the
-    /// configured completion limit and the reserved output window.
     fn max_output_tokens(&self) -> u64 {
         u64::try_from(
             self.max_completion_tokens
@@ -529,12 +526,6 @@ impl ModelProvider for AnthropicCompatibleClient {
 // URL helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve the Anthropic Messages endpoint from a configured base URL.
-///
-/// Daat's convention is that a base URL already includes the API version
-/// segment (`https://host/v1`), while Anthropic's own convention appends
-/// `/v1`. Accept both: a base already ending in `/v1` (or pointing straight at
-/// `/messages`) is used as-is, and anything else gets `/v1/messages` appended.
 fn anthropic_messages_url(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     if base.ends_with("/messages") {

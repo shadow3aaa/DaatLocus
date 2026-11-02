@@ -2,17 +2,13 @@
 
 The relay connects devices that use the same Daat Locus account. Purely local accounts do not need it. Choose either the Bun server or the Cloudflare Worker, then configure its public WSS address in the clients' account settings.
 
-## Install and test
+## Install
 
 From `workers/signaling`:
 
 ```sh
 bun install --frozen-lockfile
-bun run typecheck
-bun test
 ```
-
-Normal tests use local sockets and disposable identities. To test the real local Cloudflare adapter, set `DAAT_LOCUS_TEST_RELAY_WORKER=1` and run `bun test tests/local.test.ts`.
 
 ## Bun server
 
@@ -42,5 +38,3 @@ bunx wrangler deploy
 ```
 
 For an existing deployment, preserve the `SignalGroup` and `AccountRoom` Durable Object bindings and their migrations. Use clients that support relay protocol 2.
-
-The [CI workflow](../../.github/workflows/ci.yaml) runs the relay checks. Deployment is separate from repository tests; do not point fixtures at a personal account or public relay.

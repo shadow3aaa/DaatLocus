@@ -23,7 +23,7 @@ bun scripts/build-webui.ts
 cargo run --locked -- --profile dev serve
 ```
 
-前端脚本安装锁定版本的依赖，构建认证 WASM 和界面。Cargo 读取构建结果，不调用 Bun 或 wasm-pack。前端变更后，需要先重新构建 UI，再构建嵌入页面的服务。
+前端变更后，需要先重新构建 UI，再构建嵌入页面的服务。
 
 仅使用网页时，首次注册通过本机 CLI 完成：停止开发服务，运行 `daat-locus --profile dev account create NAME --password-stdin`，通过标准输入提供至少 12 个字符的密码，再重新启动该配置目录的服务。原生客户端可以在应用内注册。
 
@@ -41,10 +41,6 @@ export DAAT_LOCUS_BUILD_WEBUI=0
 
 构建默认下载 models.dev 目录。离线时，把 `DAAT_LOCUS_MODEL_CATALOG_PATH` 设为已有 models.dev JSON 快照的路径；Cargo 的 `--offline` 不会阻止构建脚本发出 HTTP 请求。`DAAT_LOCUS_WEBUI_DIST` 可以指定另一个已构建的 UI 目录。
 
-导入 Codex 凭据会只读跟随所选源文件，包括同一账号的令牌轮换；请保持 Codex 登录，让它续期。若希望由 Daat Locus 管理登录和续期，使用浏览器或设备登录。加入来源记录之前导入的旧副本需要重新导入一次，程序无法安全推断其原始来源。
-
-模型推理没有总时限。`response_header_timeout_secs` 限制等待响应头的时间，`stream_idle_timeout_secs` 限制响应体数据块之间的空闲时间，也适用于非流式响应。两者设为零均表示不限时。加载旧配置时，`request_timeout_secs` 按响应头等待超时读取。等待期间仍支持取消和新消息中断。
-
 ## 前端开发
 
 mock 预览不需要服务、账号或 WASM 构建：
@@ -55,37 +51,11 @@ bun install --frozen-lockfile
 bun run dev:mock
 ```
 
-打开 Vite 输出地址下的 `/__mock`。场景使用实际组件和内存数据，提供 320px、390px 的预览宽度；切换场景会重置 mock 数据。
+打开 Vite 输出地址下的 `/__mock`。
 
 连接开发服务并热更新时，改用 `bun run dev`。默认 API 地址为 `http://127.0.0.1:45825`；地址不同时，在启动 Vite 前设置 `DAAT_LOCUS_DAEMON_URL`。账号请求使用相同的浏览器来源。
 
-`DAAT_LOCUS_MOCK_MACOS=1` 和 `DAAT_LOCUS_MOCK_PHONE=1` 可以选择平台 mock。mock 只能检查界面，不能证明原生输入、权限或 WebView 的实际行为。
-
-## 检查
-
-设置 `DAAT_LOCUS_BUILD_WEBUI=0` 后，在根目录运行与修改相关的检查：
-
-```sh
-cargo fmt --all -- --check
-cargo test --locked -p daat-locus --no-default-features --lib --bins --test http_api -- --test-threads=4
-cargo test --locked -p daat-locus-sandbox -p daat-locus-bash -p daat-locus-uutils -- --test-threads=4
-cargo clippy --locked -p daat-locus --no-default-features --all-targets -- -D warnings
-```
-
-在 `webui` 中运行：
-
-```sh
-bun run typecheck
-bun run typecheck:mock
-bun test
-bun run build
-```
-
-修改中转服务后，还要在 `workers/signaling` 中运行 `bun run typecheck` 和 `bun test`。[CI 配置](.github/workflows/ci.yaml) 列出各平台环境、驱动检查、单独运行的设备接管用例和原生可选测试。
-
-互不相关的 Rust 测试最多并行四个。原生沙箱测试需要真实系统环境；未能执行的覆盖与通过的测试分别报告，不能为了通过测试改为无隔离执行。
-
-测试应使用独立的预期结果验证行为，使用临时存储、模拟提供商和本地 fixture。真实桌面输入、提权、驱动安装和公网中转测试需要明确选定的测试环境，按需运行。
+`DAAT_LOCUS_MOCK_MACOS=1` 和 `DAAT_LOCUS_MOCK_PHONE=1` 可以选择平台 mock。
 
 ## 打包
 
@@ -98,7 +68,7 @@ bun run build
 | macOS 安装包，在 macOS 上构建 | `cargo xtask package macos` |
 | Android 调试 APK | `cargo xtask package android --debug` |
 
-服务归档内嵌网页界面；原生包由客户端包含页面，配套服务不重复嵌入。产物位于 `target/<triple>/<profile>/package`，可用 `--out-dir` 指定位置。签名与复用已有构建的参数见 `cargo xtask package <format> --help`。
+产物位于 `target/<triple>/<profile>/package`，可用 `--out-dir` 指定位置。签名与复用已有构建的参数见 `cargo xtask package <format> --help`。
 
 Windows GUI 打包需要已签名的虚拟显示驱动和匹配的辅助程序；macOS、Android 发布构建需要签名凭据。构建安装包前请阅读[客户端指南](clients/app/README.md)。
 

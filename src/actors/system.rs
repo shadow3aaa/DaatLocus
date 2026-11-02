@@ -492,6 +492,28 @@ impl ActorSystem {
     pub fn store(&self) -> &ActorStore {
         &self.inner.store
     }
+    pub(crate) fn conversation_url(&self, actor: &str) -> Result<String> {
+        Ok(crate::stage::ActorAddress {
+            stage_id: self.store().public_stage_id()?,
+            actor_id: actor.into(),
+        }
+        .conversation_url())
+    }
+    pub(crate) fn require_local_stage(&self, stage: Option<&str>) -> Result<()> {
+        if let Some(stage) = stage
+            && stage != self.store().public_stage_id()?.to_string()
+        {
+            return Err(miette::miette!("Operation targets another device"));
+        }
+        Ok(())
+    }
+    pub(crate) fn approval_stage(&self, stage: Option<&str>) -> Result<crate::stage::StageId> {
+        match stage {
+            Some(stage) => serde_json::from_value(serde_json::json!(stage))
+                .map_err(|_| miette::miette!("Invalid approval source device")),
+            None => self.store().public_stage_id().map_err(Into::into),
+        }
+    }
     pub fn web_host(&self) -> Arc<crate::web_host::Host> {
         self.inner.web_host.clone()
     }

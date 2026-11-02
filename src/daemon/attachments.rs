@@ -43,12 +43,6 @@ struct ParsedDataUrl<'a> {
     is_bare_payload: bool,
 }
 
-/// Parse a data URL into media type, parameters, the base64 flag, and payload.
-///
-/// A string without a `data:` prefix is treated as a bare base64 payload so
-/// existing attachment callers keep accepting the inputs they already do.
-/// Percent-decoding is only applied for non-base64 payloads; current callers
-/// require base64 and therefore decode the payload as base64 instead.
 fn parse_data_url(input: &str) -> Option<ParsedDataUrl<'_>> {
     let trimmed = input.trim();
     let Some(rest) = trimmed.strip_prefix("data:") else {

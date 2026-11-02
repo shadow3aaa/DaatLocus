@@ -23,7 +23,7 @@ bun scripts/build-webui.ts
 cargo run --locked -- --profile dev serve
 ```
 
-The frontend script installs locked WebUI dependencies and builds the authentication WASM and UI. Cargo consumes that output; it does not run Bun or wasm-pack. Rebuild the UI before rebuilding a service with embedded assets after frontend changes.
+Rebuild the UI before rebuilding a service with embedded assets after frontend changes.
 
 Browser-only first registration uses the local CLI: stop the development service, run `daat-locus --profile dev account create NAME --password-stdin` with a password of at least 12 characters supplied on stdin, then restart that profile. Native clients can register in the app.
 
@@ -41,10 +41,6 @@ export DAAT_LOCUS_BUILD_WEBUI=0
 
 The build normally downloads the models.dev catalog. For an offline build, set `DAAT_LOCUS_MODEL_CATALOG_PATH` to an existing models.dev JSON snapshot. Cargo's `--offline` flag alone does not stop build-script HTTP requests. `DAAT_LOCUS_WEBUI_DIST` selects a different prebuilt UI directory.
 
-Codex credential imports follow the selected source file read-only, including token rotations for the same account. Keep Codex signed in so it can renew that login. For a login managed and refreshed by Daat Locus, use browser or device login instead. Imports made before source tracking was added need to be imported again once; their original source cannot be inferred safely.
-
-Model inference has no total time limit. `response_header_timeout_secs` limits waiting for response headers; `stream_idle_timeout_secs` limits gaps between response body chunks, including non-streaming responses. Zero disables either limit. The former `request_timeout_secs` field is accepted as a response-header timeout when loading existing configuration. Cancellation and incoming-message interruption remain available while waiting.
-
 ## Frontend development
 
 The mock preview runs without a service, account or WASM build:
@@ -55,37 +51,11 @@ bun install --frozen-lockfile
 bun run dev:mock
 ```
 
-Open `/__mock` at the address Vite prints. Scenes use the actual UI components with in-memory data; the frame controls include 320px and 390px widths. Changing a scene resets mock data.
+Open `/__mock` at the address Vite prints.
 
 For hot reload against a development service, run `bun run dev` instead. The default API target is `http://127.0.0.1:45825`; set `DAAT_LOCUS_DAEMON_URL` to match the service's printed address. Set it before starting Vite. Use the same browser origin for account requests.
 
-`DAAT_LOCUS_MOCK_MACOS=1` and `DAAT_LOCUS_MOCK_PHONE=1` select platform mocks. Mock rendering cannot establish native input, permission or WebView behavior.
-
-## Checks
-
-With `DAAT_LOCUS_BUILD_WEBUI=0`, run the relevant backend checks from the root:
-
-```sh
-cargo fmt --all -- --check
-cargo test --locked -p daat-locus --no-default-features --lib --bins --test http_api -- --test-threads=4
-cargo test --locked -p daat-locus-sandbox -p daat-locus-bash -p daat-locus-uutils -- --test-threads=4
-cargo clippy --locked -p daat-locus --no-default-features --all-targets -- -D warnings
-```
-
-In `webui`:
-
-```sh
-bun run typecheck
-bun run typecheck:mock
-bun test
-bun run build
-```
-
-Relay changes also need `bun run typecheck` and `bun test` in `workers/signaling`. The [CI workflow](.github/workflows/ci.yaml) lists the platform matrix, driver checks, separate device-takeover case and native opt-in tests.
-
-Limit unrelated Rust fixtures to four concurrent cases. Native sandbox tests need their real OS prerequisites. Report unavailable coverage separately from passed tests; do not replace isolation with unrestricted execution to make a check pass.
-
-Tests should verify behavior with independent expected results. Use temporary storage, mock providers and local fixtures. Actual desktop input, elevation, driver installation and public-relay checks are opt-in and need an explicitly chosen test environment.
+`DAAT_LOCUS_MOCK_MACOS=1` and `DAAT_LOCUS_MOCK_PHONE=1` select platform mocks.
 
 ## Packaging
 
@@ -98,7 +68,7 @@ Run packaging from the repository root. It prepares the shared frontend before b
 | macOS package, on macOS | `cargo xtask package macos` |
 | Android debug APK | `cargo xtask package android --debug` |
 
-Binary archives embed the browser UI. Native packages put the assets in the client and build the companion service without duplicate assets. Outputs go under `target/<triple>/<profile>/package`; `--out-dir` overrides the package directory. Use `cargo xtask package <format> --help` for signing and reuse options.
+Outputs go under `target/<triple>/<profile>/package`; `--out-dir` overrides the package directory. Use `cargo xtask package <format> --help` for signing and reuse options.
 
 Windows GUI packaging needs a signed virtual-display package and matching helpers. macOS and Android release builds need their signing credentials. See [the client guide](clients/app/README.md) before building installers.
 

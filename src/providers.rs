@@ -303,11 +303,6 @@ impl OpenAIClient {
         }
     }
 
-    /// Step adapter state to the next downgrade level on a 400 response.
-    /// Order: omit function `strict`, downgrade `tool_choice`
-    /// (`NamedFunction` → `RequiredString` → Omit), then downgrade the
-    /// thinking budget (`ReasoningEffortString` → `NestedReasoningObject` → Unsupported).
-    /// Returns false when no further downgrade is available.
     fn step_adapter_state_for_bad_request(
         state: &mut ChatCompletionsAdapterState,
         has_thinking_budget: bool,
@@ -1517,14 +1512,6 @@ pub fn build_model_provider(
     )
 }
 
-/// Prefix applied to the tool names Daat shows a model.
-///
-/// Some models were trained against another agent's built-in tool surface —
-/// Claude Code's `Read` tool takes `file_path`/`offset`/`limit`, for example —
-/// and carry a memorized signature for those names. When Daat declares a tool
-/// called `read_file`, such a model ignores the declared schema and emits the
-/// memorized fields instead, which our strict argument parsing then rejects and
-/// the turn loops on failures. Namespacing the tool names removes the collision.
 const MODEL_FACING_TOOL_NAME_PREFIX: &str = "dl_";
 
 /// Whether model-facing tool names should be namespaced for this model id.
@@ -1614,11 +1601,6 @@ impl ModelProvider for PrefixedToolNameProvider {
     }
 }
 
-/// Shape requests the way the OpenCode gateway expects from its own CLI.
-///
-/// The gateway's free tier only serves requests that stream and declare at
-/// least two tools, one named `bash`, so mirror Daat's shell tool under that
-/// alias and translate the model's `bash` calls back to the canonical tool.
 struct OpenCodeGatewayProvider {
     inner: Box<dyn ModelProvider + Send + Sync>,
 }
@@ -1632,11 +1614,6 @@ const OPENCODE_GATEWAY_BASH_TOOL: &str = "bash";
 const OPENCODE_GATEWAY_READ_TOOL: &str = "read";
 
 impl OpenCodeGatewayProvider {
-    /// Add the CLI tool aliases the gateway's fingerprint check requires.
-    ///
-    /// The free tier is only served when the request declares both `bash` and
-    /// `read` tools (schema contents are not validated). Mirror Daat's shell
-    /// and file-read tools under those names.
     fn ensure_cli_tool_aliases(tools: &mut Vec<AgentToolSpec>) -> HashMap<String, String> {
         let mut mapping = HashMap::new();
         let aliases = [

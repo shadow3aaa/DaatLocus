@@ -35,44 +35,6 @@ impl AdminActorsApp {
         }
         Ok(caller)
     }
-    fn require_local_stage(&self, stage: Option<&str>) -> Result<()> {
-        if let Some(stage) = stage {
-            let local = self
-                .system
-                .store()
-                .public_stage_id()
-                .map_err(|error| miette!("{error}"))?;
-            if stage != local.to_string() {
-                return Err(miette!("Operation targets another device"));
-            }
-        }
-        Ok(())
-    }
-    fn approval_stage(&self, stage: Option<&str>) -> Result<crate::stage::StageId> {
-        stage.map_or_else(
-            || {
-                self.system
-                    .store()
-                    .public_stage_id()
-                    .map_err(|error| miette!("{error}"))
-            },
-            |stage| {
-                serde_json::from_value(json!(stage))
-                    .map_err(|_| miette!("Invalid approval source device"))
-            },
-        )
-    }
-    fn conversation_url(&self, actor: &str) -> Result<String> {
-        Ok(crate::stage::ActorAddress {
-            stage_id: self
-                .system
-                .store()
-                .public_stage_id()
-                .map_err(|error| miette!("{error}"))?,
-            actor_id: actor.into(),
-        }
-        .conversation_url())
-    }
 }
 #[model_schema]
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -146,7 +108,7 @@ impl App for AdminActorsApp {
                 let record = if let Some(core) = self.system.shared_core() {
                     core.resolve_approval_appeal(
                         caller,
-                        self.approval_stage(args.stage_id.as_deref())?,
+                        self.system.approval_stage(args.stage_id.as_deref())?,
                         args.approval_id,
                         decision,
                         args.reason,
@@ -154,7 +116,7 @@ impl App for AdminActorsApp {
                     .await
                     .map_err(|error| miette!("{error}"))?
                 } else {
-                    self.require_local_stage(args.stage_id.as_deref())?;
+                    self.system.require_local_stage(args.stage_id.as_deref())?;
                     self.system
                         .resolve_appeal_from_core(caller, &args.approval_id, decision, &args.reason)
                         .await?
@@ -171,7 +133,7 @@ impl App for AdminActorsApp {
             "archive" | "unarchive" => {
                 let args: ActorTargetArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let actor = self
                     .system
                     .archive_from_core(&args.actor_id, call.name == "archive", caller)
@@ -182,14 +144,14 @@ impl App for AdminActorsApp {
                     } else {
                         "Actor unarchived"
                     },
-                    json!({"actor_id":actor.id,"name":actor.config.name,"status":actor.status,"conversation_url":self.conversation_url(&actor.id)?}),
+                    json!({"actor_id":actor.id,"name":actor.config.name,"status":actor.status,"conversation_url":self.system.conversation_url(&actor.id)?}),
                     None,
                 ))
             }
             "stop" => {
                 let args: ActorTargetArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let cancelled_count = self.system.stop_from_core(&args.actor_id, caller).await?;
                 Ok(AppToolExecutionResult::new(
                     "Actor stopped",
@@ -201,7 +163,7 @@ impl App for AdminActorsApp {
             "set_model" => {
                 let args: SetModelArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.require_local_stage(args.stage_id.as_deref())?;
+                self.system.require_local_stage(args.stage_id.as_deref())?;
                 let actor = self
                     .system
                     .set_model_from_core(&args.actor_id, args.model, caller)

@@ -1,6 +1,6 @@
 # Native client
 
-Run commands from the repository root unless a different directory is shown. The [contribution guide](../../CONTRIBUTING.md) covers the shared WebUI and backend checks.
+Run commands from the repository root unless a different directory is shown. See the [contribution guide](../../CONTRIBUTING.md) for the shared WebUI build.
 
 ## Windows and macOS
 
@@ -23,8 +23,6 @@ For Tauri hot reload, first build the companion service, then run in `clients/ap
 bun install --frozen-lockfile
 bun run tauri dev
 ```
-
-Native browser and GUI checks need a real client. UI mocks do not test page capture, keyboard focus, system permissions or download dialogs.
 
 ## Desktop packaging
 
@@ -49,9 +47,9 @@ cargo xtask idd-driver
 
 The build downloads the pinned WDK dependencies and creates or reuses the local signing identity in `.dev/windows-signing`. It does not install a driver. Preserve that directory; `--check` and `--test` do not create keys. Distribution signing uses `cargo xtask idd-driver --release --certificate-thumbprint <thumbprint>`.
 
-Windows ComputerUse needs Windows 10 1903+ x64 and the matching installed driver. Driver installation and trust changes need an explicitly authorized elevated session. Native ComputerUse tests also need an unlocked test desktop.
+Windows ComputerUse needs Windows 10 1903+ x64 and the matching installed driver. Driver installation and trust changes need an explicitly authorized elevated session.
 
-macOS packaging uses `--macos-signing-identity <identity>` when selecting a Keychain identity. Sign and notarize distributed packages with your own credentials. ComputerUse needs macOS privacy permissions for the actual app bundle used in the test.
+macOS packaging uses `--macos-signing-identity <identity>` when selecting a Keychain identity. Sign and notarize distributed packages with your own credentials. ComputerUse needs macOS privacy permissions for the app bundle you run.
 
 ## Android
 
@@ -80,20 +78,3 @@ For release builds, set `DAAT_LOCUS_ANDROID_SIGNING` to an external properties f
 The APK is copied to `target/<Android-triple>/<release|debug>/package`; `--out-dir` overrides this location. The maintained Android project is in `src-tauri/gen/android`. Do not run `android init` over it.
 
 Android includes its own service and needs no companion executable. Terminal and Sudo are unavailable. PhoneUse requires Owner enablement and Shizuku or Root authorization. Work pauses in the background, and Android may terminate the process.
-
-## Native checks
-
-Run the backend contracts with `DAAT_LOCUS_BUILD_WEBUI=0`:
-
-```sh
-cargo test --locked -p daat-locus --no-default-features --lib web_
-cargo test --locked -p daat-locus --no-default-features --lib browser_use_app
-```
-
-On Windows or macOS, native browser checks are opt-in:
-
-```sh
-cargo test --locked -p daat-locus-app --features web-contract --test browser_live -- --ignored --test-threads=1
-```
-
-These checks open disposable native pages. Use a separate test environment for input or focus checks. Android instrumentation uses the runner in `src-tauri/gen/android/app/src/androidTest`; run `python clients/app/scripts/test-phone-use.py --help` from the repository root for the provisioned PhoneUse test. Use a disposable emulator or device, not a personal account.

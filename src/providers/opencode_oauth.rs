@@ -537,10 +537,6 @@ impl OpenCodeInner {
 }
 
 /// OpenAI-compatible provider for OpenCode Console OAuth connections.
-///
-/// The access token is resolved (and refreshed) from a Daat-owned auth file on
-/// each request, then installed on an inner chat-completions or responses
-/// client chosen by the model's `api_style`.
 pub struct OpenCodeOAuthClient {
     auth_file: PathBuf,
     model: String,
