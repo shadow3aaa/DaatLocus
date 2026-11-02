@@ -263,6 +263,19 @@ impl SandboxAsyncChild {
             .filesystem
             .ensure_root_bindings()
             .map_err(std::io::Error::other)?;
+        // Native isolation cannot revoke the initial executable's image mapping.
+        // Reject explicit denials before the host loads that image.
+        let executable = Path::new(program);
+        if path_is_denied(executable, &policy.filesystem.deny_read_paths) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                AccessDenied::new(
+                    Access::Read,
+                    normalize_path(executable),
+                    "process executable",
+                ),
+            ));
+        }
         #[cfg(target_os = "windows")]
         {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off

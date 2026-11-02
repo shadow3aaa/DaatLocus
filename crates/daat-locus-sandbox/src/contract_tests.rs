@@ -84,6 +84,48 @@ async fn collect(mut child: SandboxAsyncChild) -> (ExitStatus, String, String) {
 }
 
 #[tokio::test]
+async fn native_executable_denials_override_read_grants_before_startup() {
+    if !native_sandbox_available() {
+        return;
+    }
+    let root = scoped_directory();
+    let (program, args) = command("exit 0".into());
+    let executable = Path::new(&program);
+    let mut policy = policy(root.path());
+    policy.filesystem.readable_roots.push(executable.to_owned());
+    let (status, out, err) = collect(launch(&policy, root.path(), "exit 0".into())).await;
+    assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+    for full_read in [false, true] {
+        policy.filesystem.full_disk_read = full_read;
+        for denied in [executable, executable.parent().unwrap()] {
+            policy.filesystem.deny_read_paths = vec![denied.to_owned()];
+            let result = SandboxAsyncChild::spawn_shell(
+                &policy,
+                &program,
+                args.clone(),
+                SandboxProcessOptions {
+                    current_dir: Some(root.path().to_owned()),
+                    ..Default::default()
+                },
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("Explicitly denied executable started: {}", denied.display()),
+            };
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            let denial = error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<super::AccessDenied>()
+                .expect("executable rejection must retain its typed policy observation");
+            assert_eq!(denial.record.access, super::Access::Read);
+            assert_eq!(denial.record.source, super::DenialSource::PolicyPreflight);
+            assert_eq!(denial.record.path, super::normalize_path(executable));
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_temporary_paths_share_host_bytes_under_the_common_policy() {
     if !native_sandbox_available() {
         return;
