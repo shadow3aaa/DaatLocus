@@ -1,0 +1,60 @@
+<WixLocalization Culture="zh-CN" Language="2052" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Caption" Value="安装 Daat Locus"/>
+  <String Id="Loading" Value="正在检查已安装的组件…"/>
+  <String Id="WelcomeStep" Value="1 / 5 · 欢迎"/>
+  <String Id="LicenseStep" Value="2 / 5 · 许可条款"/>
+  <String Id="DisplayStep" Value="3 / 5 · 虚拟显示器"/>
+  <String Id="WinFspStep" Value="4 / 5 · 工作区支持"/>
+  <String Id="ReadyStep" Value="5 / 5 · 确认安装"/>
+  <String Id="WelcomeHeading" Value="欢迎安装 Daat Locus"/>
+  <String Id="WelcomeNotice" Value="向导将引导你查看许可条款，并确认驱动安装所需的权限。点击下一步开始。"/>
+  <String Id="Next" Value="下一步(&amp;N)"/>
+  <String Id="DriverNextNotice" Value="点击下一步继续。驱动更改将在最后一页确认安装后开始。"/>
+  <String Id="InstallHeading" Value="准备安装"/>
+  <String Id="InstallLocation" Value="为当前账户安装到：&#10;[LocalAppDataFolder]Daat Locus"/>
+  <String Id="DisplayHeading" Value="虚拟显示器驱动"/>
+  <String Id="AdminRequired" Value="需要管理员授权"/>
+  <String Id="Ready" Value="已就绪 · 复用现有驱动"/>
+  <String Id="Unavailable" Value="此平台未包含"/>
+  <String Id="DisplayDescription" Value="用于创建虚拟屏幕。安装时会将 Daat Locus 的自签名公共证书添加到本机的「受信任的根证书颁发机构」和「受信任的发布者」。"/>
+  <String Id="DisplayUnavailable" Value="此安装包未包含虚拟显示器支持。"/>
+  <String Id="WinFspDescription" Value="用于隔离的工作区分支。安装已签名的 WinFsp 2.2 Beta 5 驱动，并为本机所有 cmd 进程启用 UNC 工作目录。版权所有 © Bill Zissimopoulos。"/>
+  <String Id="PermissionNotice" Value="即将安装 Daat Locus 及缺少的组件。点击「授权并安装」后，请在 Windows 提示中允许管理员授权以更改驱动。需要重启时，安装器会先询问。"/>
+  <String Id="DriversReadyNotice" Value="所需驱动均已就绪。点击「安装」将为当前账户安装 Daat Locus，并复用现有驱动。"/>
+  <String Id="AcceptLicense" Value="我接受许可条款(&amp;A)"/>
+  <String Id="LicenseButton" Value="查看许可条款"/>
+  <String Id="InstallButton" Value="授权并安装(&amp;I)"/>
+  <String Id="InstallOnlyButton" Value="安装(&amp;I)"/>
+  <String Id="Cancel" Value="取消"/>
+  <String Id="Close" Value="关闭"/>
+  <String Id="Back" Value="返回"/>
+  <String Id="ProgressHeading" Value="正在安装组件"/>
+  <String Id="ProgressNotice" Value="安装驱动时，Windows 可能会请求管理员授权。请保持安装器开启，等待所有组件安装完成。"/>
+  <String Id="ModifyHeading" Value="管理安装"/>
+  <String Id="ModifyNotice" Value="修复将重新安装 Daat Locus，并修复虚拟显示器和工作区支持。更改驱动需要管理员授权。&#10;&#10;卸载将移除 Daat Locus，保留共用驱动和你的数据。"/>
+  <String Id="Repair" Value="修复 Daat Locus 和驱动"/>
+  <String Id="Uninstall" Value="卸载 Daat Locus"/>
+  <String Id="SuccessHeading" Value="安装完成"/>
+  <String Id="LayoutSuccess" Value="安装文件已备妥"/>
+  <String Id="UninstallSuccess" Value="已卸载 Daat Locus"/>
+  <String Id="SuccessNotice" Value="Daat Locus 及其所需组件已安装完成。"/>
+  <String Id="RestartNotice" Value="重启 Windows 以完成驱动更改。保存工作后，可选择立即重启，或关闭安装器、稍后自行重启。"/>
+  <String Id="Launch" Value="打开 Daat Locus"/>
+  <String Id="Restart" Value="立即重启"/>
+  <String Id="FailureHeading" Value="安装未能完成"/>
+  <String Id="LogLink" Value="&lt;a href=&quot;#&quot;&gt;查看安装日志&lt;/a&gt;"/>
+  <String Id="HelpHeading" Value="安装选项"/>
+  <String Id="HelpText" Value="/install · 安装或升级&#10;/repair · 修复安装&#10;/uninstall · 卸载 Daat Locus&#10;/layout [目录] · 提取安装文件&#10;&#10;/passive · 仅显示进度&#10;/quiet · 静默安装&#10;/norestart · 稍后重启&#10;/log [文件] · 保存安装日志"/>
+  <String Id="ConfirmCancelMessage" Value="取消安装？"/>
+  <String Id="ExecuteUpgradeRelatedBundleMessage" Value="旧版本 Daat Locus"/>
+  <String Id="PauseAutomaticUpdatesMessage" Value="正在为安装准备 Windows"/>
+  <String Id="SystemRestorePointMessage" Value="正在创建 Windows 还原点"/>
+  <String Id="FilesInUseTitle" Value="关闭正在运行的应用"/>
+  <String Id="FilesInUseLabel" Value="以下应用正在使用需要更新的文件："/>
+  <String Id="FilesInUseCloseRadioButton" Value="关闭应用，并在可行时重新打开"/>
+  <String Id="FilesInUseDontCloseRadioButton" Value="保持应用开启，稍后重启 Windows"/>
+  <String Id="FilesInUseNetfxCloseRadioButton" Value="关闭应用"/>
+  <String Id="FilesInUseRetryButton" Value="重试"/>
+  <String Id="FilesInUseIgnoreButton" Value="忽略"/>
+  <String Id="FilesInUseExitButton" Value="退出安装"/>
+</WixLocalization>

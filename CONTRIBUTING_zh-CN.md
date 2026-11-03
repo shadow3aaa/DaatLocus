@@ -17,11 +17,8 @@
 
 设备支持原生挂载时，非 Core Actor 可使用 Workspace App。选择 `default` 在原目录工作，或用 `fork` 和 `select` 创建并选择共享的隔离分支。用 `commit` 保存版本，`history`、`diff` 和 `read` 查看历史及内容，从保存的版本创建分支以恢复早期工作。`merge` 将两个引用合并到新分支，`publish` 将分支或保存版本整合到原目录。发生冲突时，使用返回的固定版本和显式路径解决结果继续处理。创建协作 Actor 时，将选中的执行目录作为它的 workspace。
 
-- Windows 使用与服务架构匹配的 WinFsp 2.1 或更新的 2.x 版本。通过管理员授权安装官方签名驱动，服务仍以普通 OS 用户身份运行。文件符号链接、目录符号链接和 junction 会持久化保留类型及目标；指向项目内部的绝对路径链接在挂载时重定位到分支内，发布时再指回 default。项目外部链接保持原生目标语义，并继续受设备沙箱约束。发布符号链接到原生 NTFS 时，需要 OS 用户通常的符号链接创建权限或开发者模式。目前不支持硬链接和备用数据流。Daat Locus 不导入文件系统驱动证书，也不启用测试签名。[WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp)。
-  启动服务前，在管理员 PowerShell 中一次性启用 WinFsp 的驱动侧 Mount Manager 模式，使普通用户服务能够使用目录挂载和 Win32 规范路径：
-  ```powershell
-  reg.exe add HKLM\SOFTWARE\WinFsp /v MountUseMountmgrFromFSD /t REG_DWORD /d 1 /f /reg:32
-  ```
+- Windows 使用与服务架构匹配的 WinFsp 2.2 Beta 5 或更新的 2.x 版本。通过管理员授权安装官方签名驱动，服务仍以普通 OS 用户身份运行。文件符号链接、目录符号链接和 junction 会持久化保留类型及目标；指向项目内部的绝对路径链接在挂载时重定位到分支内，发布时再指回 default。项目外部链接保持原生目标语义，并继续受设备沙箱约束。发布符号链接到原生 NTFS 时，需要 OS 用户通常的符号链接创建权限或开发者模式。目前不支持硬链接和备用数据流。Daat Locus 不导入文件系统驱动证书，也不启用测试签名。[WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp)。
+  Windows 安装器通过管理员授权安装 WinFsp，并为本机 cmd 启用 UNC 工作目录（系统级 `DisableUNCCheck=1`）。Workspace 分支使用本地 WinFsp 网络卷。
 - Linux 需要可访问的 `/dev/fuse`、可用的 `fusermount3` 或 `fusermount`，以及挂载到 `/sys/fs/fuse/connections` 的 fusectl，并允许挂载用户访问自己连接的 abort 控制。通过发行版常规管理员流程安装 FUSE 软件包。Workspace 挂载不请求 `allow_other`。
 - macOS 和 Android 暂无 Workspace 投影后端，不暴露 Workspace App；普通执行目录继续可用。
 

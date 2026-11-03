@@ -1,0 +1,15 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Daat Locus Workspace Support" Manufacturer="Daat Locus" Version="$(var.Version)" UpgradeCode="17A32CCE-35E1-49BF-93D7-02C98955C232" Scope="perMachine">
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version is installed."/>
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1"/>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Component Id="UncCommands64" Bitness="always64" Permanent="yes">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Command Processor" Name="DisableUNCCheck" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+      <Component Id="UncCommands32" Bitness="always32" Permanent="yes">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Command Processor" Name="DisableUNCCheck" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </StandardDirectory>
+    <Feature Id="Workspace"><ComponentRef Id="UncCommands64"/><ComponentRef Id="UncCommands32"/></Feature>
+  </Package>
+</Wix>

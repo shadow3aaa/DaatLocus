@@ -8,6 +8,7 @@ mod idd_driver;
 #[cfg(target_os = "macos")]
 mod macos_signing;
 mod reporting;
+mod windows;
 
 use clap::{Args, Parser, Subcommand};
 use reporting::{packaged, status};
@@ -236,7 +237,7 @@ fn run() -> Result<()> {
     };
     match kind {
         "binary" => archive_with_assets(&context, computer_assets.as_ref())?,
-        "windows" => windows(&context, computer_assets.as_ref())?,
+        "windows" => windows::package(&context, computer_assets.as_ref())?,
         _ => macos(&context)?,
     };
     status(
@@ -418,182 +419,6 @@ fn png_file(source: &Path, path: &Path, size: u32, transparent_mark: bool) -> Re
     encoder
         .write_header()?
         .write_image_data(&raster(source, size, transparent_mark)?)?;
-    Ok(())
-}
-fn windows(context: &Context, computer: Option<&computer_use::Assets>) -> Result<()> {
-    let work = context.work()?;
-    let icon = work.join("app.ico");
-    let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
-    for size in [16, 24, 32, 48, 64, 128, 256] {
-        directory.add_entry(ico::IconDirEntry::encode(&ico::IconImage::from_rgba_data(
-            size,
-            size,
-            raster(&context.root.join("assets/logo.svg"), size, false)?,
-        ))?);
-    }
-    directory.write(fs::File::create(&icon)?)?;
-    let client = context.binary("daat-locus-app");
-    if !client.is_file() {
-        return Err("Desktop client is missing".into());
-    }
-    let source = work.join("package.wxs");
-    let msi = context.output.join(format!("{}.msi", context.stem()));
-    let hook_component = computer.map(|assets| format!(r#"<Component Id="ComputerHook"><File Id="ComputerHookDll" Source="{}" KeyPath="yes"/></Component>"#, xml(&assets.hook.to_string_lossy()))).unwrap_or_default();
-    let hook_reference = if computer.is_some() {
-        "<ComponentRef Id=\"ComputerHook\"/>"
-    } else {
-        ""
-    };
-    fs::write(
-        &source,
-        format!(
-            r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
-<Package Name="Daat Locus" Manufacturer="{}" Version="{}" UpgradeCode="B84D8EAD-E478-4567-9883-68D7395CBAE6" Scope="perUser">
-<MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version is installed."/><MediaTemplate EmbedCab="yes"/>
-<Icon Id="AppIcon" SourceFile="{}"/><Property Id="ARPPRODUCTICON" Value="AppIcon"/>
-<StandardDirectory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="Daat Locus">
-<Component Id="Main"><File Id="MainExe" Source="{}" KeyPath="yes"/></Component>
-<Component Id="Launcher"><File Id="LauncherExe" Source="{}" KeyPath="yes"/></Component>
-{}
-<Component Id="Path"><Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Path" Value="1" Type="integer" KeyPath="yes"/></Component>
-</Directory></StandardDirectory>
-<StandardDirectory Id="ProgramMenuFolder"><Directory Id="MenuFolder" Name="Daat Locus"><Component Id="Shortcut">
-<Shortcut Id="Launch" Name="Daat Locus" Target="[#LauncherExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon"/>
-<RemoveFolder Id="RemoveMenu" On="uninstall"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Menu" Value="1" Type="integer" KeyPath="yes"/>
-</Component></Directory></StandardDirectory>
-<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/>{}<ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
-</Package></Wix>"#,
-            xml(context
-                .meta
-                .authors
-                .first()
-                .map_or("Daat Locus", String::as_str)),
-            xml(context.meta.installer_version()),
-            xml(&icon.to_string_lossy()),
-            xml(&context.binary("daat-locus").to_string_lossy()),
-            xml(&client.to_string_lossy()),
-            hook_component,
-            hook_reference
-        ),
-    )?;
-    command(
-        Command::new("wix")
-            .args([
-                "build",
-                "-ext",
-                "WixToolset.Util.wixext",
-                "-arch",
-                if context.target.starts_with("aarch64") {
-                    "arm64"
-                } else {
-                    "x64"
-                },
-            ])
-            .arg(&source)
-            .arg("-o")
-            .arg(&msi),
-    )?;
-    let license = work.join("license.rtf");
-    let body = fs::read_to_string(context.root.join("LICENSE"))?
-        .replace('\\', "\\\\")
-        .replace('{', "\\{")
-        .replace('}', "\\}")
-        .replace('\n', "\\par\n");
-    let trust_notice = if computer.is_some() {
-        "This setup installs the Daat Locus virtual display driver and adds its bundled self-signed code-signing certificate to this computer's Trusted Root and Trusted Publishers stores. Administrator approval is required. Only the public certificate is installed.\\par\\par "
-    } else {
-        ""
-    };
-    fs::write(&license, format!("{{\\rtf1\\ansi {trust_notice}{body}}}"))?;
-    let logo = work.join("logo.png");
-    png_file(&context.root.join("assets/logo.svg"), &logo, 128, false)?;
-    let webview = work.join("MicrosoftEdgeWebview2Setup.exe");
-    let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?
-        .get("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
-        .send()?
-        .error_for_status()?;
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    response.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 4 * 1024 * 1024 || !bytes.starts_with(b"MZ") {
-        return Err("Invalid WebView2 bootstrapper".into());
-    }
-    fs::write(&webview, bytes)?;
-    // Validate the official bootstrapper before embedding any executable installer.
-    command(Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $signature=Get-AuthenticodeSignature -LiteralPath $env:DAAT_LOCUS_WEBVIEW_BOOTSTRAPPER; if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') { exit 1 }"])
-        .env_remove("PSModulePath")
-        .env("DAAT_LOCUS_WEBVIEW_BOOTSTRAPPER", &webview))?;
-    let bundle = work.join("bundle.wxs");
-    let (pause_service, resume_service) = computer_use::service_lifecycle(
-        &context.binary("daat-locus"),
-        "[LocalAppDataFolder]Daat Locus",
-    )?;
-    let setup = context.output.join(format!("{}-setup.exe", context.stem()));
-    fs::write(
-        &bundle,
-        format!(
-            r#"<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
-<Bundle Name="Daat Locus" Manufacturer="Daat Locus" Version="{}" UpgradeCode="38B2E30A-C2C8-4DEE-BD10-1520DF7A9E3F" IconSourceFile="{}">
-<BootstrapperApplication><bal:WixStandardBootstrapperApplication Theme="rtfLargeLicense" LicenseFile="{}" LogoFile="{}" SuppressOptionsUI="yes"/></BootstrapperApplication>
-<Variable Name="WebView2Machine32" Type="version" Value="0.0.0.0"/>
-<Variable Name="WebView2Machine64" Type="version" Value="0.0.0.0"/>
-<Variable Name="WebView2User32" Type="version" Value="0.0.0.0"/>
-<Variable Name="WebView2User64" Type="version" Value="0.0.0.0"/>
-<util:RegistrySearch Id="WebView2Machine32Search" Variable="WebView2Machine32" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
-<util:RegistrySearch Id="WebView2Machine64Search" Variable="WebView2Machine64" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
-<util:RegistrySearch Id="WebView2User32Search" Variable="WebView2User32" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
-<util:RegistrySearch Id="WebView2User64Search" Variable="WebView2User64" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
-{}
-<Chain>
-{}
-<ExePackage Id="WebView2" SourceFile="{}" InstallArguments="/silent /install" DetectCondition="WebView2Machine32 &gt; v0.0.0.0 OR WebView2Machine64 &gt; v0.0.0.0 OR WebView2User32 &gt; v0.0.0.0 OR WebView2User64 &gt; v0.0.0.0" Permanent="yes" PerMachine="no" Vital="yes">
-<ExitCode Value="0" Behavior="success"/>
-<!-- 0x80040828: a concurrent installer has already installed the runtime. -->
-<ExitCode Value="-2147219416" Behavior="success"/>
-<ExitCode Value="3010" Behavior="scheduleReboot"/>
-<ExitCode Value="1641" Behavior="forceReboot"/>
-<ExitCode Behavior="error"/>
-</ExePackage>
-{}
-<MsiPackage SourceFile="{}" Compressed="yes"/>
-{}
-</Chain>
-</Bundle>
-</Wix>"#,
-            xml(context.meta.installer_version()),
-            xml(&icon.to_string_lossy()),
-            xml(&license.to_string_lossy()),
-            xml(&logo.to_string_lossy()),
-            if computer.is_some() {
-                computer_use::detection()
-            } else {
-                String::new()
-            },
-            pause_service,
-            xml(&webview.to_string_lossy()),
-            computer.map(computer_use::prerequisite).unwrap_or_default(),
-            xml(&msi.to_string_lossy()),
-            resume_service
-        ),
-    )?;
-    command(
-        Command::new("wix")
-            .args([
-                "build",
-                "-ext",
-                "WixToolset.BootstrapperApplications.wixext",
-                "-ext",
-                "WixToolset.Util.wixext",
-            ])
-            .arg(bundle)
-            .arg("-o")
-            .arg(&setup),
-    )?;
-    packaged("Windows MSI", &msi)?;
-    packaged("Windows setup", &setup)?;
     Ok(())
 }
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {

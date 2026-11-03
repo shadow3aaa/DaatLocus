@@ -188,7 +188,7 @@ pub(crate) fn prerequisite(assets: &Assets) -> String {
     );
     let install = format!("NOT ({present}) OR WixBundleAction = 8");
     format!(
-        r#"<ExePackage Id="VirtualDisplay" SourceFile="{}" InstallArguments="install" RepairArguments="install" DetectCondition="{}" InstallCondition="{}" Permanent="yes" PerMachine="yes" Vital="yes" Cache="keep">
+        r#"<ExePackage Id="VirtualDisplay" DisplayName="Daat Locus Virtual Display" SourceFile="{}" InstallArguments="install" RepairArguments="install" DetectCondition="{}" InstallCondition="{}" Permanent="yes" PerMachine="yes" Vital="yes" Cache="keep">
 <ExitCode Value="0" Behavior="success"/><ExitCode Value="3010" Behavior="scheduleReboot"/><ExitCode Behavior="error"/>
 {}
 </ExePackage>"#,
@@ -231,7 +231,7 @@ pub(crate) fn service_lifecycle(
     };
     let package = |id, install, rollback| {
         format!(
-            r#"<ExePackage Id="{id}" Name="{id}.exe" CacheId="DaatLocus-{id}-{digest}" SourceFile="{}" PerMachine="no" Permanent="no" Vital="yes" DetectCondition="0" InstallCondition="WixBundleAction &lt;&gt; 3" InstallArguments="{}" RepairArguments="{}" UninstallArguments="{}"><ExitCode Value="0" Behavior="success"/><ExitCode Behavior="error"/></ExePackage>"#,
+            r#"<ExePackage Id="{id}" DisplayName="Daat Locus" Name="{id}.exe" CacheId="DaatLocus-{id}-{digest}" SourceFile="{}" PerMachine="no" Permanent="no" Vital="yes" DetectCondition="0" InstallCondition="WixBundleAction &lt;&gt; 3" InstallArguments="{}" RepairArguments="{}" UninstallArguments="{}"><ExitCode Value="0" Behavior="success"/><ExitCode Behavior="error"/></ExePackage>"#,
             xml(&companion.to_string_lossy()),
             arguments(install),
             arguments(install),
