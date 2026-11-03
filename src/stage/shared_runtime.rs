@@ -705,6 +705,15 @@ impl Controller {
                 .peer(peer, chrono::Utc::now().timestamp_millis())?;
         }
         match request {
+            Request::Skills { query } => {
+                let context = system
+                    .owner_app_context()
+                    .map_err(|_| StageError::Unavailable("Skill context unavailable"))?;
+                let page = crate::super_skills_app::SuperSkillsApp::new(system.clone())
+                    .list(&query, &context)
+                    .map_err(|_| StageError::Invalid("Skill query unavailable or unauthorized"))?;
+                Ok(Response::Skills { page })
+            }
             Request::SubmitApproval {
                 epoch,
                 message,

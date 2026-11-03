@@ -190,8 +190,11 @@ describe("durable drafts are identity/Actor partitioned data, never credentials"
     const store = memory();
     const attachments = Array.from({length: 6}, (_, index) => ({id: `attachment-${index}`, name: `File ${index}`, media_type: "text/plain", size_bytes: index, uri: "https://unsafe.example/file"}));
     const ids = attachments.map(item => item.id);
-    saveDraft("owner:id:root", "root", {text: "draft", attachments, pending: {content: "draft", attachments: ids, key: "operation-key"}}, store, 100);
+    const skills = [{stage_id:"11111111-1111-1111-1111-111111111111", workspace:"/work", path:"/work/.agents/skills/review/SKILL.md", name:"review"}];
+    saveDraft("owner:id:root", "root", {text: "$review draft", attachments, skills, pending: {content: "$review draft", attachments: ids, skills, key: "operation-key"}}, store, 100);
     const recovered = loadDraft("owner:id:root", "root", store, 101)!;
+    expect(recovered.skills).toEqual(skills);
+    expect(recovered.pending?.skills).toEqual(skills);
     expect(recovered.attachments.map(item => item.id)).toEqual(ids);
     expect(recovered.pending?.attachments).toEqual(ids);
   });

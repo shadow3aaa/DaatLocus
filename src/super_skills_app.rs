@@ -21,9 +21,9 @@ pub struct SuperSkillsApp {
 }
 
 #[model_schema]
-#[derive(Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ListSkillsArgs {
+pub struct ListSkillsArgs {
     /// Device from Actors devices; null selects the local device in a local account.
     stage_id: Option<String>,
     /// Absolute directory for project Skill discovery; null uses this device's default workspace.
@@ -74,17 +74,18 @@ struct SearchArgs {
     search: SearchTextArgs,
 }
 
-#[derive(Serialize, JsonSchema)]
-struct SkillEntry {
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SkillEntry {
     name: String,
     description: String,
     path: String,
     auto_use_enabled: bool,
+    scope: crate::openskills::OpenSkillScope,
 }
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(extend("x-dl-content" = "skills"))]
-struct SkillsPage {
+pub struct SkillsPage {
     workspace: String,
     skills: Vec<SkillEntry>,
     next_cursor: Option<usize>,
@@ -93,6 +94,46 @@ struct SkillsPage {
 impl SuperSkillsApp {
     pub fn new(system: ActorSystem) -> Self {
         Self { system }
+    }
+
+    pub(crate) fn list(
+        &self,
+        args: &ListSkillsArgs,
+        context: &AppToolExecutionContext,
+    ) -> Result<SkillsPage> {
+        self.system.require_local_stage(args.stage_id.as_deref())?;
+        if args.query.as_ref().is_some_and(|query| query.len() > 512) {
+            return Err(miette!("Skill query is too long"));
+        }
+        let workspace = self.workspace(args.workspace.as_deref())?;
+        let catalog = load_openskills_with_policy(&workspace, &context.sandbox_policy);
+        let query = args.query.as_deref().unwrap_or_default().to_lowercase();
+        let cursor = args.cursor.unwrap_or(0);
+        let limit = args.limit.unwrap_or(30).clamp(1, 100);
+        let mut skills = catalog
+            .skills()
+            .iter()
+            .filter(|skill| {
+                skill.name.to_lowercase().contains(&query)
+                    || skill.description.to_lowercase().contains(&query)
+            })
+            .skip(cursor)
+            .take(limit + 1)
+            .map(|skill| SkillEntry {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                path: skill.path.to_string_lossy().into_owned(),
+                auto_use_enabled: skill.auto_use_enabled(),
+                scope: skill.scope,
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = (skills.len() > limit).then(|| cursor.saturating_add(limit));
+        skills.truncate(limit);
+        Ok(SkillsPage {
+            workspace: workspace.to_string_lossy().into_owned(),
+            skills,
+            next_cursor,
+        })
     }
 
     fn workspace(&self, value: Option<&str>) -> Result<PathBuf> {
@@ -188,39 +229,8 @@ impl App for SuperSkillsApp {
             "list_skills" => {
                 let args: ListSkillsArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
-                self.system.require_local_stage(args.stage_id.as_deref())?;
-                let workspace = self.workspace(args.workspace.as_deref())?;
-                let catalog = load_openskills_with_policy(&workspace, &context.sandbox_policy);
-                let query = args.query.unwrap_or_default().to_lowercase();
-                let cursor = args.cursor.unwrap_or(0);
-                let limit = args.limit.unwrap_or(30).clamp(1, 100);
-                let mut skills = catalog
-                    .skills()
-                    .iter()
-                    .filter(|skill| {
-                        skill.name.to_lowercase().contains(&query)
-                            || skill.description.to_lowercase().contains(&query)
-                    })
-                    .skip(cursor)
-                    .take(limit + 1)
-                    .map(|skill| SkillEntry {
-                        name: skill.name.clone(),
-                        description: skill.description.clone(),
-                        path: skill.path.to_string_lossy().into_owned(),
-                        auto_use_enabled: skill.auto_use_enabled(),
-                    })
-                    .collect::<Vec<_>>();
-                let next_cursor = (skills.len() > limit).then(|| cursor.saturating_add(limit));
-                skills.truncate(limit);
-                AppToolExecutionResult::structured(
-                    format!("listed {} Skills", skills.len()),
-                    &SkillsPage {
-                        workspace: workspace.to_string_lossy().into_owned(),
-                        skills,
-                        next_cursor,
-                    },
-                    None,
-                )
+                let page = self.list(&args, context)?;
+                AppToolExecutionResult::structured("Skills", &page, None)
             }
             "read_file" => {
                 let mut args: ReadArgs =

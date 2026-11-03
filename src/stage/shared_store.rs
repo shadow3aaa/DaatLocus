@@ -1166,6 +1166,7 @@ mod tests {
     }
     pub(super) fn input() -> MessageRecord {
         MessageRecord {
+            skills: Vec::new(),
             seq: 0,
             id: Uuid::new_v4().to_string(),
             actor_id: ACTOR_ID.into(),

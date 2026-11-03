@@ -256,6 +256,15 @@ pub struct RemoteAuthority {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SkillReference {
+    pub stage_id: crate::stage::StageId,
+    pub workspace: String,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageRecord {
     pub seq: i64,
     pub id: String,
@@ -273,6 +282,8 @@ pub struct MessageRecord {
     pub remote_authority: Option<RemoteAuthority>,
     pub content: String,
     pub attachments: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillReference>,
     pub status: MessageStatus,
     pub cancel_requested: bool,
     #[serde(default)]

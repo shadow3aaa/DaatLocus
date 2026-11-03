@@ -38,7 +38,8 @@ pub struct OpenSkill {
     pub user_disabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum OpenSkillScope {
     Project,
     DaatLocusHome,

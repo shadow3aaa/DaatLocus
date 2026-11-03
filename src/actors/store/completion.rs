@@ -183,6 +183,7 @@ pub(super) fn finish_message_tx(
                 Some(insert_message(
                     tx,
                     MessageRecord {
+                        skills: Vec::new(),
                         seq: 0,
                         id: result_id,
                         actor_id: actor_id.clone(),

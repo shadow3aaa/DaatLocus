@@ -346,6 +346,25 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     };
     return json(stage);
   }
+  if (/^\/v1\/stages\/[^/]+\/skills$/.test(path) && method === "GET") {
+    const stage = path.split("/")[3];
+    if (stage !== STAGE_ID && !previewState.devices.some(device => device.stage_id === stage)) return notFound("Unknown device");
+    const workspace = stage === STAGE_ID ? "C:/Projects/DaatLocus" : "/home/owner/projects";
+    const catalog = [
+      {name:"actor-coordination", description:"拆解任务，并行分配 Actor，并汇总执行结果", scope:"user"},
+      {name:"code-review", description:"检查代码的正确性、边界与潜在回归", scope:"project"},
+      {name:"browser-use", description:"浏览网页、检索资料并核实来源", scope:"builtin"},
+      {name:"documents", description:"创建、阅读和编辑多文档项目", scope:"user"},
+      {name:"skill-creator", description:"创建和完善可复用的 Skill", scope:"builtin"},
+      {name:"spreadsheets", description:"分析表格数据、公式与图表", scope:"user"},
+    ].map(item => ({...item, path:`${workspace}/.agents/skills/${item.name}/SKILL.md`, auto_use_enabled:true}));
+    const query = (url.searchParams.get("query") || "").toLowerCase();
+    const cursor = Number(url.searchParams.get("cursor") || 0);
+    const limit = limitParam(url, "limit", 20, 100);
+    if (limit === null || !Number.isSafeInteger(cursor) || cursor < 0) return invalidRequest();
+    const matches = catalog.filter(skill => `${skill.name} ${skill.description}`.toLowerCase().includes(query));
+    return json({workspace, skills:matches.slice(cursor,cursor+limit), next_cursor:cursor+limit<matches.length?cursor+limit:null});
+  }
   if (path === "/v1/stage/status" && method === "GET") return json({ core: coreStatus(), public_login: publicLogin(), work_generation: workReset.generation });
   if (path === "/v1/stage/devices" && method === "GET") {
     const limit = limitParam(url, "limit", 64, 64);
@@ -448,7 +467,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
         const existing = store.idempotency.get(key);
         if (existing && existing.actor_id === actor.summary.id) {
           // Same key + identical payload replays the record (202 again); a changed payload conflicts.
-          if (existing.content === body.content && JSON.stringify(existing.attachments.map(item => item.id)) === attachmentIds)
+          if (existing.content === body.content && JSON.stringify(existing.attachments.map(item => item.id)) === attachmentIds && JSON.stringify(existing.skills || []) === JSON.stringify(Array.isArray(body.skills) ? body.skills : []))
             return json(existing, 202);
           return conflict();
         }
@@ -461,6 +480,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
         content: body.content,
         status: busy ? "queued" : "running",
         attachments: attachmentsFromIds(body.attachments),
+        skills: Array.isArray(body.skills) ? body.skills : [],
       });
       if (key) store.idempotency.set(key, message);
       if (previewState.id === "core-motion") acceptCoreMotionInput(message);

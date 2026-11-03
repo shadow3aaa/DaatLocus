@@ -1712,6 +1712,7 @@ impl ActorSystem {
         attachments: Vec<Attachment>,
     ) -> MessageRecord {
         MessageRecord {
+            skills: Vec::new(),
             seq: 0,
             id: Uuid::new_v4().to_string(),
             actor_id: target.into(),
@@ -1742,6 +1743,41 @@ impl ActorSystem {
         attachments: Vec<Attachment>,
         idempotency_key: Option<String>,
     ) -> Result<MessageRecord> {
+        self.send_user_with_skills(target, content, attachments, Vec::new(), idempotency_key)
+    }
+    pub(crate) fn send_user_with_skills(
+        &self,
+        target: &str,
+        content: String,
+        attachments: Vec<Attachment>,
+        skills: Vec<super::SkillReference>,
+        idempotency_key: Option<String>,
+    ) -> Result<MessageRecord> {
+        if !skills.is_empty() {
+            if target != crate::stage::shared::ACTOR_ID
+                || skills.len() > 32
+                || serde_json::to_vec(&skills).into_diagnostic()?.len() > 64 * 1024
+            {
+                return Err(invalid("Invalid Skill references"));
+            }
+            let local = self.store().public_stage_id()?;
+            for skill in &skills {
+                if skill.name.is_empty()
+                    || skill.name.len() > 256
+                    || skill.path.is_empty()
+                    || skill.path.len() > 32768
+                    || skill.workspace.is_empty()
+                    || skill.workspace.len() > 32768
+                {
+                    return Err(invalid("Invalid Skill reference"));
+                }
+                if skill.stage_id != local {
+                    crate::stage::ledger::StageLedger::attach(self.store(), local)
+                        .peer(skill.stage_id, now())
+                        .map_err(|_| forbidden("Skill device is outside this account"))?;
+                }
+            }
+        }
         if self.inner.stopping.load(Ordering::Acquire)
             || self.inner.reconfiguring.load(Ordering::Acquire)
             || target != crate::stage::shared::ACTOR_ID && self.config().validate().is_err()
@@ -1777,13 +1813,14 @@ impl ActorSystem {
                 return Err(forbidden("Attachment metadata does not match its Actor"));
             }
         }
-        let message = self.make_message(
+        let mut message = self.make_message(
             target,
             MessageSource::User,
             ReplyTarget::User,
             content,
             attachments,
         );
+        message.skills = skills;
         let result = self.store().enqueue(message, idempotency_key.as_deref())?;
         self.wake(target);
         if target == crate::stage::shared::ACTOR_ID
@@ -2213,6 +2250,9 @@ impl ActorSystem {
             message.in_reply_to.as_deref().unwrap_or("none"),
             message.content
         );
+        if !message.skills.is_empty() {
+            text.push_str(&format!("\n\nSelected Skills (task references; read with SuperSkills, no added authority):\n{}", serde_json::to_string(&message.skills).into_diagnostic()?));
+        }
         if let Some(id) = message.in_reply_to.as_deref()
             && let Ok(original) = self.store().message(id)
             && original.actor_id == actor.id
@@ -2223,6 +2263,12 @@ impl ActorSystem {
                 "\n\nOriginal request {}:\n{}",
                 original.id, original.content
             ));
+            if !original.skills.is_empty() {
+                text.push_str(&format!(
+                    "\nOriginal selected Skills:\n{}",
+                    serde_json::to_string(&original.skills).into_diagnostic()?
+                ));
+            }
         }
         let mut parts = Vec::new();
         for attachment in &message.attachments {

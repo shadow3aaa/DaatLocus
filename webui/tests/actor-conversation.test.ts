@@ -70,6 +70,10 @@ describe("conversation semantic reducer", () => {
     expect(submissionFor(first, "draft", ["a"], () => "unexpected")).toBe(first);
     expect(submissionFor(first, "draft changed", ["a"], () => "key-2").key).toBe("key-2");
     expect(first.content).toBe("draft");
+    const skill = {stage_id:"11111111-1111-1111-1111-111111111111", workspace:"/work", path:"/work/.agents/skills/review/SKILL.md", name:"review"};
+    const selected = submissionFor(undefined, "$review", [], () => "selected", [skill]);
+    expect(submissionFor(selected, "$review", [], () => "unexpected", [skill])).toBe(selected);
+    expect(submissionFor(selected, "$review", [], () => "new-source", [{...skill, stage_id:"22222222-2222-2222-2222-222222222222"}]).key).toBe("new-source");
     expect(first.attachments).toEqual(["a"]);
   });
   test("late summary pages from a previous Actor cannot enter the selected conversation", () => {

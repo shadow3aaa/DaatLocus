@@ -87,6 +87,7 @@ impl ActorStore {
             insert_message(
                 &tx,
                 MessageRecord {
+                    skills: Vec::new(),
                     seq: 0,
                     id: message_id.clone(),
                     actor_id: core.into(),
@@ -205,6 +206,7 @@ impl ActorStore {
             let notification_id = Uuid::new_v4().to_string();
             let now = now();
             insert_message(&tx, MessageRecord {
+                skills: Vec::new(),
                 seq:0, id:notification_id.clone(), actor_id:original.actor_id.clone(),
                 source:MessageSource::Actor{actor_id:core.into()}, reply_to:original.reply_to.clone(),
                 kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()), input_batch: None,

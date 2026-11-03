@@ -3,6 +3,7 @@ use crate::actors::{MessageSource, MessageStatus, ReplyTarget};
 
 fn message(id: &str, kind: MessageKind, content: &str, parent: Option<&str>) -> MessageRecord {
     MessageRecord {
+        skills: Vec::new(),
         seq: 0,
         id: id.into(),
         actor_id: "worker".into(),

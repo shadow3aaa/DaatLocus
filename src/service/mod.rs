@@ -691,6 +691,8 @@ struct SendRequest {
     content: String,
     #[serde(default)]
     attachments: Vec<String>,
+    #[serde(default)]
+    skills: Vec<crate::actors::SkillReference>,
 }
 async fn send_core_message(
     State(state): State<ServiceState>,
@@ -738,7 +740,7 @@ async fn send_core_message(
     }
     let record = state
         .system
-        .send_user(actor, request.content, attachments, key)
+        .send_user_with_skills(actor, request.content, attachments, request.skills, key)
         .map_err(ApiError::from_report)?;
     if remote::core_source(&state).is_some() {
         state

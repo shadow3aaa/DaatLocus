@@ -47,6 +47,7 @@ fn input(
     actor: &str,
 ) {
     let message = MessageRecord {
+        skills: Vec::new(),
         seq: 0,
         id: id.into(),
         actor_id: actor.into(),

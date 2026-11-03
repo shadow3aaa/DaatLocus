@@ -78,6 +78,17 @@
     "search_this_conversation": "Search this conversation"
   },
   "composer": {
+      "skills": "Skills",
+      "skills_loading": "Finding Skills…",
+      "skills_empty": "No matching Skills",
+      "skills_failed": "Some Skills could not be loaded",
+      "skills_more": "Load more · {{device}}",
+      "skills_offline": "{{count}} devices offline",
+      "skill_scope_builtin": "Built-in",
+      "skill_scope_project": "Project",
+      "skill_scope_user": "Local file",
+      "skill_scope_daat_locus_home": "Local file",
+
     "auto_approval": "Auto approval",
     "ask_for_approval": "Ask for approval",
     "full_access": "Full access",

@@ -26,6 +26,7 @@ pub(super) fn routes() -> Router<ServiceState> {
         .route("/v1/stage/devices", get(devices))
         .route("/v1/stage/devices/{stage}", axum::routing::delete(revoke))
         .route("/v1/stages/{stage}/actors", get(actors))
+        .route("/v1/stages/{stage}/skills", get(skills))
 }
 pub(super) fn runtime(state: &ServiceState) -> ApiResult<Arc<Runtime>> {
     state.stage.clone().ok_or_else(ApiError::unavailable)
@@ -214,4 +215,39 @@ async fn actors(
         return Err(ApiError::internal());
     };
     Ok(Json(json!({"items":actors,"next_cursor":next})))
+}
+
+async fn skills(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Path(stage): Path<StageId>,
+    Query(query): Query<crate::super_skills_app::ListSkillsArgs>,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    let runtime = runtime(&state)?;
+    let page = if stage == runtime.host.local {
+        let context = state
+            .system
+            .owner_app_context()
+            .map_err(ApiError::from_report)?;
+        crate::super_skills_app::SuperSkillsApp::new(state.system.clone())
+            .list(&query, &context)
+            .map_err(ApiError::from_report)?
+    } else {
+        let core = state
+            .system
+            .shared_core()
+            .ok_or_else(ApiError::unavailable)?;
+        let crate::stage::core_wire::Response::Skills { page } = core
+            .request(stage, crate::stage::core_wire::Request::Skills { query })
+            .await
+            .map_err(failure)?
+        else {
+            return Err(ApiError::unavailable());
+        };
+        page
+    };
+    Ok(Json(
+        serde_json::to_value(page).map_err(|_| ApiError::internal())?,
+    ))
 }

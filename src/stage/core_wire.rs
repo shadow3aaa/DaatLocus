@@ -49,6 +49,9 @@ pub struct Installation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Skills {
+        query: crate::super_skills_app::ListSkillsArgs,
+    },
     SubmitApproval {
         epoch: u64,
         message: String,
@@ -141,6 +144,9 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    Skills {
+        page: crate::super_skills_app::SkillsPage,
+    },
     ApprovalSubmitted {
         record: Box<crate::actors::ApprovalRecord>,
     },

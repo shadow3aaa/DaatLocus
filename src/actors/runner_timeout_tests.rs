@@ -31,6 +31,7 @@ async fn stop_and_exact_input_cancel_interrupt_unbounded_app_preparation() {
         actor.id = "waiting-actor".into();
         let context = system.owner_app_context().unwrap();
         let message = MessageRecord {
+            skills: Vec::new(),
             seq: 0,
             id: uuid::Uuid::new_v4().to_string(),
             actor_id: actor.id.clone(),

@@ -96,6 +96,23 @@ async fn superskills_routes_reads_and_searches_to_the_source_device_without_sync
             .exists()
     );
     let selected = location(&workspace, &skill);
+    let core = net_a.core.read().as_ref().unwrap().clone();
+    let crate::stage::core_wire::Response::Skills { page } = core
+        .request(
+            net_b.host.local,
+            crate::stage::core_wire::Request::Skills {
+                query: serde_json::from_value(list_arguments(&workspace)).unwrap(),
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("missing Skill catalog");
+    };
+    assert_eq!(
+        serde_json::to_value(page).unwrap()["skills"][0]["path"],
+        json!(skill)
+    );
     coordinator.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall { id:"remote-skill-catalog".into(), name:"super_skills__list_skills".into(), arguments:json!({"stage_id":net_b.host.local,"workspace":workspace,"query":"superskills-fixture","cursor":null,"limit":10}) }]),
         MockReply::Calls(vec![AgentToolCall { id:"remote-skill-search".into(), name:"super_skills__search_text".into(), arguments:json!({"stage_id":net_b.host.local,"skill":selected,"search":{"path":".","query":"independent","case_sensitive":true,"depth":3,"include_ignored":false,"limit":1}}) }]),
@@ -142,4 +159,62 @@ async fn superskills_routes_reads_and_searches_to_the_source_device_without_sync
     net_b.stop().await;
     a.shutdown().await;
     b.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_skills_survive_retry_and_reach_the_core_model_as_source_references() {
+    let (_directory, system, _) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    let workspace = system.device_workspace().canonicalize().unwrap();
+    let path = publish_skill(&workspace, "selected");
+    let selected = crate::actors::SkillReference {
+        stage_id: system.store().public_stage_id().unwrap(),
+        workspace: workspace.to_string_lossy().into(),
+        path: path.to_string_lossy().into(),
+        name: "superskills-fixture".into(),
+    };
+    let input = system
+        .send_user_with_skills(
+            "core",
+            "$superskills-fixture".into(),
+            vec![],
+            vec![selected.clone()],
+            Some("selected".into()),
+        )
+        .unwrap();
+    let retry = system
+        .send_user_with_skills(
+            "core",
+            input.content.clone(),
+            vec![],
+            vec![selected.clone()],
+            Some("selected".into()),
+        )
+        .unwrap();
+    assert_eq!(input.id, retry.id);
+    let mut changed = selected.clone();
+    changed.path.push_str(".changed");
+    assert!(
+        system
+            .send_user_with_skills(
+                "core",
+                input.content.clone(),
+                vec![],
+                vec![changed],
+                Some("selected".into())
+            )
+            .is_err()
+    );
+    let running = system.store().claim_next("core").unwrap().unwrap();
+    assert_eq!(running.skills, vec![selected]);
+    let actor = system.core_device_actor().unwrap();
+    let context = system.execution_context(&actor, &running).unwrap();
+    let rendered = system.message_content(&actor, &running, &context).unwrap();
+    let content = rendered.as_text();
+    assert!(content.contains(&serde_json::to_string(&path).unwrap()));
+    assert!(
+        !content.contains("Coordinate independent Actors"),
+        "references must not inject Skill bodies"
+    );
+    system.shutdown().await;
 }

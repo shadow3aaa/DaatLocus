@@ -1451,3 +1451,15 @@ html[data-native-browser] :is(#root,.dl-app,.dl-shell-body,.dl-main-view,.dl-bro
 .dl-contacts-page[data-search-open=true]>.dl-apps-header>button { visibility: hidden; }
 @media (hover:hover) and (pointer:fine) { .dl-contacts-search-trigger { display: none; } }
 @media (max-width:767px) { .dl-contacts-page[data-search-open=true]>.dl-apps-header { visibility: hidden; } }
+
+.dl-skill-suggestions { width: var(--radix-popover-trigger-width); max-height: min(460px,var(--radix-popover-content-available-height)); overflow-y: auto; overscroll-behavior: contain; border-radius: 24px; padding: 6px; gap: 2px; }
+.dl-skill-option { display: flex; flex-shrink: 0; width: 100%; height: auto; min-height: 40px; justify-content: flex-start; gap: 10px; border-radius: 20px; padding: 8px 12px; font-weight: 400; }
+.dl-skill-option[aria-selected=true] { background: var(--accent); color: var(--accent-foreground); }
+.dl-skill-name { text-align: left; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+.dl-skill-description { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; color: var(--muted-foreground); }
+.dl-skill-source { flex-shrink: 0; max-width: 28%; overflow: hidden; text-overflow: ellipsis; color: var(--muted-foreground); font-size: .85em; }
+.dl-skill-notice { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; color: var(--muted-foreground); font-size: .9em; }
+.dl-skill-path { overflow-wrap: anywhere; white-space: normal; }
+.dl-skill-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.dl-bubble .dl-skill-chips { margin-top: 6px; }
+@media(max-width:600px) { .dl-skill-option { flex-wrap: wrap; gap: 4px 8px; } .dl-skill-name { flex: 1; min-width: 0; max-width: none; } .dl-skill-description { order: 1; flex-basis: calc(100% - 26px); margin-left: 26px; } .dl-skill-source { max-width: 45%; margin-left: auto; } }

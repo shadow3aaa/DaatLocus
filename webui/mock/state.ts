@@ -246,6 +246,7 @@ export type NewMessage = {
   content: string;
   status: MessageStatus;
   attachments?: Attachment[];
+  skills?: MessageRecord["skills"];
 };
 
 export function addMessage(actor: ActorStore, input: NewMessage): MessageRecord {
@@ -260,6 +261,7 @@ export function addMessage(actor: ActorStore, input: NewMessage): MessageRecord 
     in_reply_to: input.in_reply_to ?? null,
     content: input.content,
     attachments: input.attachments ?? [],
+    skills: input.skills,
     status: input.status,
     cancel_requested: false,
     started_at_ms: input.status === "running" ? ts : null,

@@ -145,6 +145,7 @@ async fn submit(
         State(state),
         headers,
         Json(super::SendRequest {
+            skills: Vec::new(),
             content: "Import the attached conversation.".into(),
             attachments: vec![resource.id],
         }),

@@ -1,3 +1,4 @@
+import { mentionsSkill, type SkillReference } from "@/lib/skills";
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import * as api from "@/lib/actor-api";
@@ -133,20 +134,22 @@ export function conversationReducer(state: ConversationState, action: Conversati
   }
 }
 export type PendingSubmission = {
+  skills?: SkillReference[];
   content: string;
   attachments: string[];
   key: string;
 };
-export function submissionFor(previous: PendingSubmission | undefined, content: string, attachments: string[], createKey = () => crypto.randomUUID()): PendingSubmission {
-  if (previous && previous.content === content && JSON.stringify(previous.attachments) === JSON.stringify(attachments))
+export function submissionFor(previous: PendingSubmission | undefined, content: string, attachments: string[], createKey = () => crypto.randomUUID(), skills: SkillReference[] = []): PendingSubmission {
+  if (previous && previous.content === content && JSON.stringify(previous.attachments) === JSON.stringify(attachments) && JSON.stringify(previous.skills || []) === JSON.stringify(skills))
     return previous;
-  return { content, attachments: [...attachments], key: createKey() };
+  return { content, attachments: [...attachments], key: createKey(), ...(skills.length ? {skills: [...skills]} : {}) };
 }
 type AttachmentDraft = {
   attachments: api.Attachment[];
   uploadQueue?: { pending: number; tail: Promise<void> };
 };
 type DraftEntry = AttachmentDraft & {
+  skills?: SkillReference[];
   text: string;
   pending?: PendingSubmission;
 };
@@ -214,6 +217,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   const onAccessRevoked = useRef(options.onAccessRevoked);
   onAccessRevoked.current = options.onAccessRevoked;
   const [draft, setDraftState] = useState("");
+  const [skills, setSkillsState] = useState<SkillReference[]>([]);
   const [attachments, setAttachments] = useState<api.Attachment[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -228,7 +232,8 @@ export function useActorConversation(actorId: string | null, options: Conversati
     sessionDrafts.set(draftKey, entry);
   } return entry; }, [draftKey, actorId]);
   const persistDraft = useCallback(() => { if (actorId) saveDraft(draftKey, actorId, draftEntry()); }, [draftKey, actorId, draftEntry]);
-  const setDraft = useCallback((text: string) => { draftEntry().text = text; persistDraft(); setDraftState(text); notifyDraft(draftKey); }, [draftEntry, draftKey, persistDraft]);
+  const setDraft = useCallback((text: string) => { const entry = draftEntry(); entry.text = text; entry.skills = entry.skills?.filter(skill => mentionsSkill(text, skill.name)); persistDraft(); setDraftState(text); notifyDraft(draftKey); }, [draftEntry, draftKey, persistDraft]);
+  const setSkills = useCallback((skills: SkillReference[]) => { draftEntry().skills = skills; notifyDraft(draftKey); }, [draftEntry, draftKey]);
   const valid = useCallback((generation: number) => generation === epoch.current, []);
   const accessFailure = useCallback(async (generation: number, signal: AbortSignal, failure?: unknown) => {
     try {
@@ -265,7 +270,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   }, [loadTools]);
   useEffect(() => {
     if (!acceptsInput) return;
-    const sync = () => { const entry = draftEntry(); setDraftState(entry.text); setAttachments([...entry.attachments]); setUploading(Boolean(entry.uploadQueue?.pending)); };
+    const sync = () => { const entry = draftEntry(); setDraftState(entry.text); setSkillsState(entry.skills || []); setAttachments([...entry.attachments]); setUploading(Boolean(entry.uploadQueue?.pending)); };
     let listeners = draftListeners.get(draftKey);
     if (!listeners) {
       listeners = new Set();
@@ -288,6 +293,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setLoadingOlder(false);
     const entry = acceptsInput ? draftEntry() : {text:"",attachments:[]} as DraftEntry;
     setDraftState(entry.text);
+    setSkillsState(entry.skills || []);
     setAttachments([...entry.attachments]);
     setUploading(Boolean(entry.uploadQueue?.pending));
     if (!actorId || !enabled) {
@@ -430,7 +436,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
       return;
     const generation = epoch.current;
     const entry = draftEntry();
-    const submission = submissionFor(entry.pending, content ?? entry.text, attachmentIds ?? entry.attachments.map(item => item.id));
+    const submission = submissionFor(entry.pending, content ?? entry.text, attachmentIds ?? entry.attachments.map(item => item.id), undefined, (entry.skills || []).filter(skill => mentionsSkill(content ?? entry.text, skill.name)));
     if (!submission.content.trim() && submission.attachments.length === 0)
       return;
     entry.pending = submission;
@@ -438,18 +444,20 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setSending(true);
     setError(null);
     try {
-      const message = await api.sendCoreMessage({ content: submission.content, attachments: submission.attachments }, submission.key, { signal: controller.current?.signal });
+      const message = await api.sendCoreMessage({ content: submission.content, attachments: submission.attachments, skills: submission.skills }, submission.key, { signal: controller.current?.signal });
       if (entry.pending?.key === submission.key)
         delete entry.pending;
-      if (entry.text === submission.content && JSON.stringify(entry.attachments.map(item => item.id)) === JSON.stringify(submission.attachments)) {
+      if (entry.text === submission.content && JSON.stringify(entry.attachments.map(item => item.id)) === JSON.stringify(submission.attachments) && JSON.stringify(entry.skills || []) === JSON.stringify(submission.skills || [])) {
         entry.text = "";
         entry.attachments = [];
+        entry.skills = [];
       }
       notifyDraft(draftKey);
       if (valid(generation)) {
         onAccepted?.(message);
         dispatch({ type: "message", message });
         setDraftState(entry.text);
+        setSkillsState(entry.skills || []);
         setAttachments([...entry.attachments]);
       }
       return message;
@@ -500,6 +508,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   const live = useMemo(() => new Map(Object.entries(state.generations)), [state.generations]);
   const current = state.actorId === actorId && enabled;
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
+    skills: current ? skills : acceptsInput ? draftEntry().skills || [] : [], setSkills,
     draft: current ? draft : acceptsInput ? draftEntry().text : "", setDraft, attachments: current ? attachments : acceptsInput ? draftEntry().attachments : [], uploading, addAttachments, removeAttachment,
     loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder, revealMessage,
     sending, send, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,

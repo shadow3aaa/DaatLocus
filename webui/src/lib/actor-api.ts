@@ -1,3 +1,4 @@
+import type { SkillReference } from "./skills";
 import { apiErrorText } from "./i18n";
 import { subscribe, type StreamOptions } from "./event-stream";
 import { serviceFetch } from "./transport";
@@ -103,6 +104,7 @@ export type MessageRecord = {
   in_reply_to: string | null;
   content: string;
   attachments: Attachment[];
+  skills?: SkillReference[];
   status: MessageStatus;
   cancel_requested: boolean;
   started_at_ms?: number | null;
@@ -376,6 +378,7 @@ export const getMessage = (actor: string, id: string, options?: FetchOptions) =>
 export const sendCoreMessage = (input: {
   content: string;
   attachments: string[];
+  skills?: SkillReference[];
 }, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>("/v1/core/messages", { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
 export const listMessageActivity = (actor: string, message: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<EventRecord>>(query(`${actorPath(actor)}/messages/${segment(message)}/activity`, { after: options.after, limit: options.limit ?? 100 }), options);
 export const validateAttachment = async (actor: string, item: Attachment, options?: FetchOptions) => {

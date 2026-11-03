@@ -3211,6 +3211,7 @@ async fn remote_delegation_retains_readonly_authority() {
         )
         .unwrap();
     let mut input = MessageRecord {
+        skills: Vec::new(),
         seq: 0,
         id: uuid::Uuid::new_v4().to_string(),
         actor_id: "root".into(),
@@ -3916,6 +3917,7 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
         .store()
         .enqueue(
             MessageRecord {
+                skills: Vec::new(),
                 seq: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 actor_id: "root".into(),

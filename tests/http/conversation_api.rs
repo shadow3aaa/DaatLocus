@@ -699,3 +699,46 @@ async fn owner_can_open_and_control_created_actors() {
         format!("/actors/{}", internal.id)
     );
 }
+
+#[tokio::test]
+async fn skill_completion_is_an_owner_metadata_query_without_starting_core() {
+    let f = Fixture::new().await;
+    let root = f
+        .system
+        .device_workspace()
+        .join(".agents/skills/completion-fixture");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("SKILL.md"),
+        "---\nname: completion-fixture\ndescription: Coordinate work.\n---\nPrivate Skill body\n",
+    )
+    .unwrap();
+    let path = format!(
+        "/v1/stages/{}/skills?query=completion-fixture&limit=1",
+        f.stage.host.local
+    );
+    assert_eq!(
+        f.client
+            .get(format!("{}{}", f.url, path))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = f.owner(reqwest::Method::GET, &path).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: Value = response.json().await.unwrap();
+    assert_eq!(
+        page["skills"][0]["path"],
+        json!(root.join("SKILL.md").canonicalize().unwrap())
+    );
+    assert!(
+        f.system
+            .store()
+            .messages("core", None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}

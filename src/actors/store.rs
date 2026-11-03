@@ -1049,7 +1049,7 @@ impl ActorStore {
             if let Some(key) = key
             && let Some(id)=sql(tx.query_row("SELECT message_id FROM idempotency WHERE actor_id=?1 AND principal=?2 AND key=?3",params![message.actor_id,principal,key],|r|r.get::<_,String>(0)).optional())? {
                 let existing=message_tx(&tx,&id)?;
-                if existing.content!=message.content || existing.attachments!=message.attachments {return Err(ActorError::Conflict("Idempotency key was used for another message".into()).into());}
+                if existing.content!=message.content || existing.attachments!=message.attachments || existing.skills!=message.skills {return Err(ActorError::Conflict("Idempotency key was used for another message".into()).into());}
                 return Ok(existing);
         }
             let result = insert_message(&tx, message)?;
@@ -2181,6 +2181,7 @@ impl ActorStore {
             }
             let id = delivery_id(actor, input, call);
             let mut delivery = MessageRecord {
+                skills: Vec::new(),
                 seq: 0,
                 id,
                 actor_id: actor.into(),
