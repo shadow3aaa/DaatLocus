@@ -417,7 +417,7 @@ async fn live_process_scope_change_requires_explicit_restart_without_replaying_e
     let mut child = launch(&original, root, script_with_root(root, body));
     child.ensure_policy(&original).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !root.join("once.txt").exists() {
+        while std::fs::read(root.join("once.txt")).ok().as_deref() != Some(b"once".as_slice()) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
