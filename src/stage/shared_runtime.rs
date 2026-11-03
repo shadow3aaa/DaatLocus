@@ -2518,6 +2518,7 @@ impl Controller {
                     devices.push(runtime.host.local);
                     let source = if call.name.starts_with("actors__")
                         || call.name.starts_with("admin_actors__")
+                        || call.name.starts_with("super_skills__")
                     {
                         call.arguments
                             .get("stage_id")

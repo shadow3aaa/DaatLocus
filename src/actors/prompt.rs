@@ -155,7 +155,7 @@ impl SystemPrompt {
         prompt
             .files
             .extend(Self::for_role(system, actor.id == crate::stage::shared::ACTOR_ID)?.files);
-        // Core never loads device-local project instructions or Skills.
+        // Core reads Skills on demand through SuperSkills; never inject a device catalog.
         if actor.id == crate::stage::shared::ACTOR_ID {
             return Ok(prompt);
         }

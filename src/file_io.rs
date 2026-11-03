@@ -570,6 +570,25 @@ pub(crate) fn read_authorized_bytes(
     limit: u64,
     policy: &RuntimeSandboxPolicy,
 ) -> Result<Vec<u8>> {
+    read_authorized_bytes_within(path, limit, policy, None)
+}
+
+pub(crate) fn ensure_read_boundary(path: &Path, boundary: Option<&Path>) -> Result<()> {
+    if boundary.is_some_and(|root| !path.starts_with(root)) {
+        return Err(miette!(
+            "file target is outside the selected resource directory"
+        ));
+    }
+    Ok(())
+}
+
+fn read_authorized_bytes_within(
+    path: &Path,
+    limit: u64,
+    policy: &RuntimeSandboxPolicy,
+    boundary: Option<&Path>,
+) -> Result<Vec<u8>> {
+    ensure_read_boundary(path, boundary)?;
     guarded_directory::local_path(path)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
     if !policy.is_path_readable(path)
@@ -597,6 +616,7 @@ pub(crate) fn read_authorized_bytes(
         }
     }
     let actual = opened_file_path(&file, path)?;
+    ensure_read_boundary(&actual, boundary)?;
     policy.ensure_path_readable(&actual, "opened file")?;
     let metadata = file
         .metadata()
@@ -736,11 +756,22 @@ pub fn list_directory(
     policy: &RuntimeSandboxPolicy,
     args: &ListDirectoryArgs,
 ) -> Result<DirectoryPage> {
+    list_directory_within(cwd, policy, args, None)
+}
+
+pub(crate) fn list_directory_within(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    args: &ListDirectoryArgs,
+    boundary: Option<&Path>,
+) -> Result<DirectoryPage> {
     let path = authorized_path(cwd, policy, &args.path, false)?;
+    ensure_read_boundary(&path, boundary)?;
     let limit = args.limit.unwrap_or(100).clamp(1, 200);
     let directory = guarded_directory::GuardedDirectory::open(&path, false)
         .map_err(|_| miette!("unable to pin listing directory"))?;
     check_opened_file(directory.handle(), &path, policy, false)?;
+    ensure_read_boundary(&opened_file_path(directory.handle(), &path)?, boundary)?;
     let names = directory
         .names()
         .map_err(|_| miette!("unable to enumerate the authorized directory"))?;
@@ -756,6 +787,9 @@ pub fn list_directory(
         let Ok(actual) = authorized_path(cwd, policy, &entry_path.to_string_lossy(), false) else {
             continue;
         };
+        if ensure_read_boundary(&actual, boundary).is_err() {
+            continue;
+        }
         let metadata =
             fs::metadata(&actual).map_err(|_| miette!("unable to inspect directory entry"))?;
         let kind = if metadata.is_dir() {
@@ -797,7 +831,16 @@ pub fn search_text(
     policy: &RuntimeSandboxPolicy,
     args: &SearchTextArgs,
 ) -> Result<SearchResult> {
-    search_text_with_global_rules(cwd, policy, args, true)
+    search_text_with_global_rules(cwd, policy, args, true, None)
+}
+
+pub(crate) fn search_text_within(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    args: &SearchTextArgs,
+    boundary: &Path,
+) -> Result<SearchResult> {
+    search_text_with_global_rules(cwd, policy, args, true, Some(boundary))
 }
 
 fn search_text_with_global_rules(
@@ -805,11 +848,13 @@ fn search_text_with_global_rules(
     policy: &RuntimeSandboxPolicy,
     args: &SearchTextArgs,
     global_rules: bool,
+    boundary: Option<&Path>,
 ) -> Result<SearchResult> {
     if args.query.is_empty() {
         return Err(miette!("search query must not be empty"));
     }
     let root = authorized_path(cwd, policy, &args.path, false)?;
+    ensure_read_boundary(&root, boundary)?;
     let query = if args.case_sensitive {
         args.query.clone()
     } else {
@@ -829,6 +874,7 @@ fn search_text_with_global_rules(
     let use_ignore_files = !args.include_ignored.unwrap_or(false);
     let filter_cwd = cwd.to_path_buf();
     let filter_policy = policy.clone();
+    let filter_boundary = boundary.map(Path::to_owned);
     let mut walker = ignore::WalkBuilder::new(&root);
     walker
         .standard_filters(false)
@@ -853,11 +899,17 @@ fn search_text_with_global_rules(
             ) else {
                 return false;
             };
+            if ensure_read_boundary(&actual, filter_boundary.as_deref()).is_err() {
+                return false;
+            }
             if entry.file_type().is_some_and(|kind| kind.is_dir()) {
                 return guarded_directory::GuardedDirectory::open(&actual, false).is_ok_and(
                     |directory| {
                         check_opened_file(directory.handle(), &actual, &filter_policy, false)
                             .is_ok()
+                            && opened_file_path(directory.handle(), &actual).is_ok_and(|path| {
+                                ensure_read_boundary(&path, filter_boundary.as_deref()).is_ok()
+                            })
                     },
                 );
             }
@@ -876,7 +928,7 @@ fn search_text_with_global_rules(
         else {
             continue;
         };
-        let bytes = read_bytes(&actual, u64::MAX, policy)?;
+        let bytes = read_authorized_bytes_within(&actual, u64::MAX, policy, boundary)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
@@ -914,8 +966,17 @@ pub fn read_file(
     policy: &RuntimeSandboxPolicy,
     args: &ReadFileArgs,
 ) -> Result<ReadFileResult> {
+    read_file_within(cwd, policy, args, None)
+}
+
+pub(crate) fn read_file_within(
+    cwd: &Path,
+    policy: &RuntimeSandboxPolicy,
+    args: &ReadFileArgs,
+    boundary: Option<&Path>,
+) -> Result<ReadFileResult> {
     let path = authorized_path(cwd, policy, &args.path, false)?;
-    let bytes = read_bytes(&path, u64::MAX, policy)?;
+    let bytes = read_authorized_bytes_within(&path, u64::MAX, policy, boundary)?;
     let text = String::from_utf8(bytes).map_err(|_| miette!("file is not UTF-8 text"))?;
     let start_line = args.start_line.unwrap_or(1);
     let count = args.line_count.unwrap_or(80).clamp(1, 2000);
@@ -1327,6 +1388,100 @@ pub(crate) fn view_image_bytes(
 mod tests {
     use crate::sandbox::test_support::scoped_directory;
     use serde_json::json;
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn resource_queries_confine_paths_and_opened_targets_to_the_selected_directory() {
+        let directory = scoped_directory();
+        let root = directory.path().join("resources");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("guide.txt"), "inside\nsecond line\n").unwrap();
+        fs::write(outside.join("secret.txt"), "OUTSIDE_SECRET").unwrap();
+        let root = root.canonicalize().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let result = std::process::Command::new("cmd.exe")
+                .current_dir(&root)
+                .args(["/D", "/V:OFF", "/C"])
+                .raw_arg(r#"mklink /J escape ..\outside"#)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let policy = RuntimeSandboxPolicy::disabled();
+        // The requested spelling is inside; only the opened target exposes the escape.
+        assert!(
+            read_authorized_bytes_within(
+                &root.join("escape/secret.txt"),
+                u64::MAX,
+                &policy,
+                Some(&root)
+            )
+            .is_err()
+        );
+        let page = read_file_within(
+            &root,
+            &policy,
+            &ReadFileArgs {
+                path: "guide.txt".into(),
+                start_line: Some(2),
+                line_count: Some(1),
+            },
+            Some(&root),
+        )
+        .unwrap();
+        assert_eq!(page.content, "second line\n");
+        let listing = list_directory_within(
+            &root,
+            &policy,
+            &ListDirectoryArgs {
+                path: ".".into(),
+                cursor: None,
+                limit: None,
+            },
+            Some(&root),
+        )
+        .unwrap();
+        assert!(listing.entries.iter().all(|entry| entry.name != "escape"));
+        assert!(
+            list_directory_within(
+                &root,
+                &policy,
+                &ListDirectoryArgs {
+                    path: "escape".into(),
+                    cursor: None,
+                    limit: None
+                },
+                Some(&root)
+            )
+            .is_err()
+        );
+        let mut search = SearchTextArgs {
+            path: ".".into(),
+            query: "OUTSIDE_SECRET".into(),
+            case_sensitive: true,
+            depth: 3,
+            include_ignored: Some(true),
+            limit: None,
+        };
+        assert!(
+            search_text_within(&root, &policy, &search, &root)
+                .unwrap()
+                .matches
+                .is_empty()
+        );
+        search.path = "escape".into();
+        assert!(search_text_within(&root, &policy, &search, &root).is_err());
+    }
+
     const BUILTIN_BYTES: &[u8] = b"trusted built-in instructions\n";
 
     fn builtin_fixture() -> (tempfile::TempDir, RuntimeSandboxPolicy, PathBuf) {
@@ -1687,7 +1842,7 @@ mod tests {
         policy: &RuntimeSandboxPolicy,
         args: &SearchTextArgs,
     ) -> Result<SearchResult> {
-        super::search_text_with_global_rules(cwd, policy, args, false)
+        super::search_text_with_global_rules(cwd, policy, args, false, None)
     }
 
     #[test]

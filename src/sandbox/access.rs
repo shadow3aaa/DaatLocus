@@ -101,12 +101,21 @@ impl<'a> FileSystem<'a> {
         Ok(administrator)
     }
 
-    async fn read_policy(&self, value: &str) -> Result<RuntimeSandboxPolicy> {
-        let path = file_io::resolve_read_file_path(
-            &self.context.execution_cwd,
-            &self.context.sandbox_policy,
-            value,
-        )?;
+    async fn read_policy(
+        &self,
+        value: &str,
+        boundary: Option<&Path>,
+    ) -> Result<RuntimeSandboxPolicy> {
+        let path = if let Some(root) = boundary {
+            file_io::resolve_file_path(root, value)?
+        } else {
+            file_io::resolve_read_file_path(
+                &self.context.execution_cwd,
+                &self.context.sandbox_policy,
+                value,
+            )?
+        };
+        file_io::ensure_read_boundary(&path, boundary)?;
         self.access(&self.context.sandbox_policy, &path, Access::Read)
             .await
     }
@@ -138,8 +147,35 @@ impl<'a> FileSystem<'a> {
                 )
                 .await;
         }
-        let policy = self.read_policy(&args.path).await?;
+        let policy = self.read_policy(&args.path, None).await?;
         file_io::read_file(&self.context.execution_cwd, &policy, args)
+    }
+
+    pub(crate) async fn read_file_within(
+        &self,
+        root: &Path,
+        args: &file_io::ReadFileArgs,
+    ) -> Result<file_io::ReadFileResult> {
+        let policy = self.read_policy(&args.path, Some(root)).await?;
+        file_io::read_file_within(root, &policy, args, Some(root))
+    }
+
+    pub(crate) async fn list_directory_within(
+        &self,
+        root: &Path,
+        args: &file_io::ListDirectoryArgs,
+    ) -> Result<file_io::DirectoryPage> {
+        let policy = self.read_policy(&args.path, Some(root)).await?;
+        file_io::list_directory_within(root, &policy, args, Some(root))
+    }
+
+    pub(crate) async fn search_text_within(
+        &self,
+        root: &Path,
+        args: &file_io::SearchTextArgs,
+    ) -> Result<file_io::SearchResult> {
+        let policy = self.read_policy(&args.path, Some(root)).await?;
+        file_io::search_text_within(root, &policy, args, root)
     }
     pub async fn list_directory(
         &self,
@@ -154,7 +190,7 @@ impl<'a> FileSystem<'a> {
                 )
                 .await;
         }
-        let policy = self.read_policy(&args.path).await?;
+        let policy = self.read_policy(&args.path, None).await?;
         file_io::list_directory(&self.context.execution_cwd, &policy, args)
     }
     pub async fn search_text(
@@ -170,7 +206,7 @@ impl<'a> FileSystem<'a> {
                 )
                 .await;
         }
-        let policy = self.read_policy(&args.path).await?;
+        let policy = self.read_policy(&args.path, None).await?;
         file_io::search_text(&self.context.execution_cwd, &policy, args)
     }
     pub async fn write_file(
@@ -222,7 +258,7 @@ impl<'a> FileSystem<'a> {
                 )
                 .await;
         }
-        let read = self.read_policy(&args.source).await?;
+        let read = self.read_policy(&args.source, None).await?;
         let write = self.write_policy(&read, &args.destination).await?;
         let source =
             file_io::resolve_read_file_path(&self.context.execution_cwd, &read, &args.source)?;
@@ -298,7 +334,7 @@ impl<'a> FileSystem<'a> {
                 .await?;
             return file_io::view_image_bytes(&bytes, image_dir, args);
         }
-        let policy = self.read_policy(&args.path).await?;
+        let policy = self.read_policy(&args.path, None).await?;
         file_io::view_image(
             &self.context.execution_cwd,
             &policy,

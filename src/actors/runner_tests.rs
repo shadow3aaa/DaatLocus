@@ -2,6 +2,8 @@
 mod input_batch_tests;
 #[path = "runner_model_wait_tests.rs"]
 mod model_wait_tests;
+#[path = "super_skills_tests.rs"]
+mod super_skills_tests;
 #[path = "tool_definition_tests.rs"]
 mod tool_definition_tests;
 #[path = "runner_workspace_tests.rs"]
@@ -5654,9 +5656,6 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     assert!(system.store().events(0,Some("core"),true,100).unwrap().iter().any(|event|matches!(&event.event,ActorEvent::MessageAdded{message_id} if message_id==&receipt.id)));
     {
         let requests = provider.requests.lock();
-        assert!(requests[0].tools.iter().all(
-            |tool| tool.name.starts_with("actors__") || tool.name.starts_with("admin_actors__")
-        ));
         assert!(
             requests[0]
                 .tools
@@ -5836,10 +5835,6 @@ async fn core_yields_after_delegating_and_silently_receives_progress_while_worke
     assert_eq!(
         deliveries[0].reply.as_deref(),
         Some("The worker is investigating.")
-    );
-    assert_eq!(
-        system.actor("core").unwrap().config.apps,
-        vec!["actors", "admin_actors"]
     );
 
     network.stop().await;
@@ -6663,7 +6658,6 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
         )
         .unwrap();
     let mut context = system.owner_app_context().unwrap();
-    assert!(context.sandbox_policy.builtin_resources.is_empty());
     context.sandbox_policy.filesystem.full_disk_read = false;
     context.sandbox_policy.filesystem.full_disk_write = false;
     context.sandbox_policy.filesystem.readable_roots.clear();

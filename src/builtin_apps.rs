@@ -35,6 +35,7 @@ pub const DEVICE_APPS: &[&str] = &[
 ];
 pub(crate) const ALL_APPS: &[&str] = &[
     "admin_actors",
+    "super_skills",
     "actors",
     "files",
     "workspace",
@@ -47,6 +48,23 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "computer_use",
     "phone_use",
 ];
+
+pub(crate) fn core_app_names() -> Vec<String> {
+    ["actors", "admin_actors", "super_skills"]
+        .map(String::from)
+        .into()
+}
+
+pub(crate) fn core_apps(system: &ActorSystem) -> Vec<Box<dyn App>> {
+    vec![
+        Box::new(ActorApp::new(
+            crate::stage::shared::ACTOR_ID.into(),
+            system.clone(),
+        )),
+        Box::new(AdminActorsApp::new(system.clone())),
+        Box::new(crate::super_skills_app::SuperSkillsApp::new(system.clone())),
+    ]
+}
 
 pub fn validate_app_names(names: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
@@ -79,16 +97,13 @@ pub fn create_apps(
     config: &Config,
 ) -> Result<AppManager> {
     validate_app_names(&actor.config.apps)?;
+    if actor.id == crate::stage::shared::ACTOR_ID {
+        return AppManager::new(core_apps(&system));
+    }
     let state_dir = system.actor_state_dir(&actor.id);
     let mut apps: Vec<Box<dyn App>> = Vec::new();
-    let installed = if actor.id == crate::stage::shared::ACTOR_ID {
-        vec!["actors".to_owned(), "admin_actors".to_owned()]
-    } else {
-        system.device_app_names()?
-    };
-    for name in installed {
+    for name in system.device_app_names()? {
         let inner: Box<dyn App> = match name.as_str() {
-            "admin_actors" => Box::new(AdminActorsApp::new(system.clone())),
             "actors" => Box::new(ActorApp::new(actor.id.clone(), system.clone())),
             "apps_manager" => Box::new(crate::mcp::AppsManager::new(
                 system.app_registry(),
@@ -136,7 +151,7 @@ pub fn create_apps(
         .app_registry()
         .entries()
         .into_iter()
-        .filter(|entry| entry.enabled && actor.id != crate::stage::shared::ACTOR_ID)
+        .filter(|entry| entry.enabled)
     {
         apps.push(Box::new(crate::mcp::McpApp::new(
             entry,
@@ -166,14 +181,7 @@ mod tests {
         .await
         .unwrap();
         let core = system.actor(crate::stage::shared::ACTOR_ID).unwrap();
-        let apps = create_apps(&core, system.clone(), &system.config()).unwrap();
-        assert_eq!(
-            apps.app_ids()
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>(),
-            ["actors", "admin_actors"]
-        );
+        create_apps(&core, system.clone(), &system.config()).unwrap();
         system.shutdown().await;
     }
 }

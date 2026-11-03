@@ -82,8 +82,8 @@ client are connected.
   effect. Cancel MCP requests by their protocol request ID and retain uncertain outcomes.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
-  Core composes the portable Actors and AdminActors Apps. Only Core receives
-  AdminActors; Actors exposes the same tools and schemas for every Actor, including
+  Core composes the portable Actors, AdminActors and SuperSkills Apps. Only Core receives
+  AdminActors and SuperSkills; Actors exposes the same tools and schemas for every Actor, including
   device discovery and bounded account conversation reads.
   Other Actors receive every
   device-provided App; there are no Actor App or tool capability allowlists.
@@ -95,7 +95,10 @@ client are connected.
   permission relationship, not a user-visible access level.
 - Ownership determines hierarchy; delegation does not change ownership or
   access. Results remain associated with the originating request.
-- The account Core directly exposes the portable Actors and AdminActors Apps. Hosted Actors
+- The account Core directly exposes the portable Actors, AdminActors and SuperSkills Apps.
+  SuperSkills provides bounded discovery, search and Skill-relative document reads on
+  available account devices, including coordination Skills. Skill files stay device-local.
+  Other Actors retain local Skills discovery and Files access. Hosted Actors
   on the same device install the same device-provided Apps; creation cannot select
   Apps. Do not retain App access lists, tool allowlists, delegation App ceilings,
   local read-only Actor identities or recipient lists. Hosted Actors perform
@@ -222,7 +225,7 @@ Sandbox expansion uses the unified review/application path.
   Completing an input does not complete its delegated work. Progress and results
   return as correlated inputs; Core chooses meaningful user updates without polling
   or a second fast-response model. Core excludes platform patches, device project
-  instructions and Skills.
+  instructions and automatically injected Skill catalogs; it reads Skills on demand through SuperSkills.
 - The Agent loop has no fixed message, ReAct-step or tool-batch count limit. On
   input-budget pressure have the current Actor write a handoff note before clearing
   the working window and injecting archive recovery instructions; preserve durable

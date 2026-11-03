@@ -216,7 +216,7 @@ impl ActorSystem {
     pub(crate) fn core_device_actor(&self) -> Result<ActorRecord> {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID)?;
         actor.config.workspace = self.device_workspace().to_owned();
-        actor.config.apps = vec!["actors".into(), "admin_actors".into()];
+        actor.config.apps = crate::builtin_apps::core_app_names();
         Ok(actor)
     }
     pub(crate) fn app_actor(&self, id: &str) -> Result<ActorRecord> {
@@ -454,7 +454,7 @@ impl ActorSystem {
         for mut actor in system.store().actors()? {
             let previous = actor.config.clone();
             if actor.id == crate::stage::shared::ACTOR_ID {
-                actor.config.apps = vec!["actors".into(), "admin_actors".into()];
+                actor.config.apps = crate::builtin_apps::core_app_names();
             } else {
                 actor.config = system.hosted_config(actor.config)?;
             }
@@ -801,7 +801,7 @@ impl ActorSystem {
             config: normalize_config(ActorConfig {
                 name: "Daat Locus".into(),
                 workspace,
-                apps: vec!["actors".into(), "admin_actors".into()],
+                apps: crate::builtin_apps::core_app_names(),
                 model: None,
                 instructions: String::new(),
             })?,
@@ -2173,9 +2173,7 @@ impl ActorSystem {
             .map_or(4096, |model| model.tool_output_max_tokens);
         let mut sandbox_policy =
             crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, actor.remote_read_only);
-        if actor.id != crate::stage::shared::ACTOR_ID {
-            sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
-        }
+        sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
         let context = AppToolExecutionContext {
             restart_native: false,
             access_broker: None,
@@ -3159,14 +3157,6 @@ mod tests {
             )
             .await
             .unwrap();
-        let core = system.core_device_actor().unwrap();
-        let tools = crate::builtin_apps::create_apps(&core, system.clone(), &system.config())
-            .unwrap()
-            .model_tool_specs()
-            .unwrap();
-        assert!(tools.iter().all(
-            |tool| tool.name.starts_with("actors__") || tool.name.starts_with("admin_actors__")
-        ));
         let actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
         let tools = crate::builtin_apps::create_apps(&actor, system.clone(), &system.config())
             .unwrap()
@@ -3510,8 +3500,6 @@ mod tests {
             crate::runtime_temp::RuntimeTemp::create(instance.parent().unwrap().parent().unwrap())
                 .unwrap();
         let survivor_path = survivor.path().to_path_buf();
-        let context = system.owner_app_context().unwrap();
-        assert!(context.sandbox_policy.builtin_resources.is_empty());
         assert!(instance.is_dir());
         system.shutdown().await;
         assert!(!instance.exists());

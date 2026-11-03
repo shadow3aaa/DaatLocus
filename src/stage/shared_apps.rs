@@ -7,9 +7,7 @@ use super::{
     shared_runtime::Controller,
 };
 use crate::{
-    actor_app::ActorApp,
     actors::{ActorRecord, ActorSystem},
-    admin_actors_app::AdminActorsApp,
     app::{App, AppId, AppManager, AppToolExecutionContext, AppToolExecutionResult, AppToolSpec},
     model_protocol::AgentToolCall,
 };
@@ -153,12 +151,8 @@ pub fn manager(
     actor: ActorRecord,
     system: ActorSystem,
 ) -> miette::Result<AppManager> {
-    let local: Vec<Box<dyn App>> = vec![
-        Box::new(ActorApp::new(shared::ACTOR_ID.into(), system.clone())),
-        Box::new(AdminActorsApp::new(system.clone())),
-    ];
     AppManager::new(
-        local
+        crate::builtin_apps::core_apps(&system)
             .into_iter()
             .map(|local| {
                 Box::new(AccountApp {

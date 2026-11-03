@@ -48,6 +48,7 @@ pub mod service;
 pub mod stage;
 pub mod sudo_app;
 pub mod sudo_host;
+pub mod super_skills_app;
 pub mod system_info;
 pub mod terminal_app;
 pub mod tool_output_spill;

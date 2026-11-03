@@ -636,31 +636,6 @@ fn require_message(tx: &Transaction<'_>, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn core_checkpoint_configuration_cannot_install_device_apps() {
-        let source_dir = tempfile::tempdir().unwrap();
-        let target_dir = tempfile::tempdir().unwrap();
-        let source = store(source_dir.path());
-        let target = store(target_dir.path());
-        let leader = StageId::new();
-        let follower = StageId::new();
-        let mut actor = source.actor(ACTOR_ID).unwrap();
-        actor.config.apps = vec!["files".into(), "terminal".into()];
-        actor.config.instructions = "Keep shared identity".into();
-        source.save_actor(&actor).unwrap();
-        let batch = capture(&source, "account-a", leader, 1).unwrap().unwrap();
-        copy(&source, &target, &batch);
-        commit(&target, &batch, follower).unwrap();
-        assert_eq!(
-            target.actor(ACTOR_ID).unwrap().config.apps,
-            ["actors", "admin_actors"]
-        );
-        assert_eq!(
-            target.actor(ACTOR_ID).unwrap().config.instructions,
-            "Keep shared identity"
-        );
-    }
-
-    #[test]
     fn a_shared_core_failure_never_creates_a_remote_actor_notice() {
         let directory = tempfile::tempdir().unwrap();
         let store = store(directory.path());

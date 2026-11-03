@@ -34,7 +34,7 @@ impl Configuration {
         config.name = self.name.clone();
         config.instructions = self.instructions.clone();
         config.model = self.model.clone();
-        config.apps = vec!["actors".into(), "admin_actors".into()];
+        config.apps = crate::builtin_apps::core_app_names();
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
