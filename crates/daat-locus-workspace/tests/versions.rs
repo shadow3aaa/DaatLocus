@@ -16,6 +16,43 @@ fn directory(path: &std::path::Path) -> Directory {
 }
 
 #[test]
+fn text_merges_combine_disjoint_lines_and_preserve_overlapping_conflicts() {
+    for (base, left, right, expected) in [
+        ("a\nb\n", "A\nb\n", "a\nB\n", Some("A\nB\n")),
+        ("a\nb\n", "A\nb\n", "X\nb\n", None),
+        ("a\n", "x\na\n", "A\n", Some("x\nA\n")),
+        ("a\n", "x\na\n", "y\na\n", None),
+        ("a\nb\n", "A\nb\n", "a\nb\nx\n", Some("A\nb\nx\n")),
+        ("a\nb\n", "b\n", "a\nB\n", Some("B\n")),
+    ] {
+        let (_temp, path, store) = fixture();
+        fs::write(path.join("code"), base).unwrap();
+        let first = store.branch(directory(&path), "left", "default").unwrap();
+        let second = first.fork("right").unwrap();
+        for (branch, text) in [(&first, left), (&second, right)] {
+            branch.truncate("code", 0).unwrap();
+            branch.write("code", 0, text.as_bytes()).unwrap();
+        }
+        let outcome = store
+            .merge(&path, "left", "right", "merged", "Combine", &[])
+            .unwrap();
+        if let Some(expected) = expected {
+            assert!(outcome.conflicts.is_empty(), "{outcome:?}");
+            assert_eq!(
+                store
+                    .open_recorded_branch(&path, "merged")
+                    .unwrap()
+                    .read("code", 0, 100)
+                    .unwrap(),
+                expected.as_bytes()
+            );
+        } else {
+            assert_eq!(outcome.conflicts, ["code"]);
+        }
+    }
+}
+
+#[test]
 fn merged_versions_preserve_sources_and_ancestry_across_later_publications() {
     let (_temp, path, store) = fixture();
     let a = store.branch(directory(&path), "a", "default").unwrap();
@@ -46,6 +83,7 @@ fn merged_versions_preserve_sources_and_ancestry_across_later_publications() {
     assert!(next.conflicts.is_empty(), "{next:?}");
     let next = store.open_recorded_branch(&path, "next").unwrap();
     fs::write(path.join("user-only"), b"native work").unwrap();
+    fs::write(path.join("code"), b"one\ntwo\nthree\nFOUR\nfive\n").unwrap();
     let published = next.publish(&directory(&path)).unwrap();
     assert!(
         published.error.is_none() && published.conflicts.is_empty(),
@@ -53,7 +91,7 @@ fn merged_versions_preserve_sources_and_ancestry_across_later_publications() {
     );
     assert_eq!(
         fs::read(path.join("code")).unwrap(),
-        b"ONE\nTWO\nthree\nfour\nFIVE\n"
+        b"ONE\nTWO\nthree\nFOUR\nFIVE\n"
     );
     assert_eq!(fs::read(path.join("user-only")).unwrap(), b"native work");
     assert!(next.entry("user-only").is_err());
@@ -209,6 +247,12 @@ fn fixed_conflict_versions_accept_custom_content_without_editing_both_inputs() {
 #[test]
 fn history_paging_and_saved_content_survive_compaction_and_reopen() {
     let (temp, path, store) = fixture();
+    assert!(
+        store
+            .history(&path, "default", None, 10)
+            .unwrap()
+            .is_empty()
+    );
     let branch = store.branch(directory(&path), "work", "default").unwrap();
     let initial = branch.commit("Initial").unwrap();
     branch.write("code", 0, b"ONE").unwrap();

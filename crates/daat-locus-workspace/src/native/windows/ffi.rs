@@ -10,6 +10,7 @@ pub type Buffer = *mut c_void;
 pub struct FileSystem {
     pub version: u16,
     pub user_context: Context,
+    pub volume_name: [u16; 256],
 }
 #[repr(C)]
 pub struct VolumeParams {

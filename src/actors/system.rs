@@ -456,7 +456,7 @@ impl ActorSystem {
             if actor.id == crate::stage::shared::ACTOR_ID {
                 actor.config.apps = crate::builtin_apps::core_app_names();
             } else {
-                actor.config = system.hosted_config(actor.config)?;
+                actor.config.apps = system.device_app_names()?;
             }
             if actor.config != previous {
                 system.store().save_actor(&actor)?;
@@ -2174,7 +2174,7 @@ impl ActorSystem {
     }
     fn build_app_context(
         &self,
-        actor: ActorRecord,
+        mut actor: ActorRecord,
         message_id: &str,
         turn_epoch: u64,
         device_policy: Option<ActorConfig>,
@@ -2199,9 +2199,16 @@ impl ActorSystem {
                     "The selected Workspace branch requires a compatible native filesystem backend; its files and selection have been preserved",
                 ));
             }
-            workspaces
+            let restored = workspaces
                 .restore(&actor.config.workspace)
                 .into_diagnostic()?;
+            if restored.directory != actor.config.workspace {
+                actor = self.store().restore_actor_workspace(
+                    &actor.id,
+                    &actor.config.workspace,
+                    &restored.directory,
+                )?;
+            }
         }
         let config = self.config();
         let tool_output_max_tokens = config

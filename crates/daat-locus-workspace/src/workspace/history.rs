@@ -155,7 +155,11 @@ pub(crate) fn migrate_versions(connection: &mut Connection) -> Result<()> {
 }
 
 fn project_at(connection: &Connection, path: &Path) -> Result<i64> {
-    connection
+    project_at_optional(connection, path)?.ok_or_else(|| missing("workspace project"))
+}
+
+fn project_at_optional(connection: &Connection, path: &Path) -> Result<Option<i64>> {
+    Ok(connection
         .query_row(
             "SELECT id FROM projects WHERE path=?1",
             [path
@@ -163,8 +167,7 @@ fn project_at(connection: &Connection, path: &Path) -> Result<i64> {
                 .ok_or_else(|| Error::Invalid("project path must be Unicode".into()))?],
             |r| r.get(0),
         )
-        .optional()?
-        .ok_or_else(|| missing("workspace project"))
+        .optional()?)
 }
 
 fn tip_optional(connection: &Connection, project: i64, name: &str) -> Result<Option<String>> {
@@ -374,12 +377,21 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<Version>> {
         let connection = self.connection.lock();
-        let project = project_at(&connection, path)?;
+        let Some(project) = project_at_optional(&connection, path)? else {
+            return if reference == DEFAULT_BRANCH {
+                Ok(vec![])
+            } else {
+                Err(missing("workspace reference"))
+            };
+        };
         let id = if is_version_id(reference) {
             reference.to_owned()
         } else {
-            tip_optional(&connection, project, reference)?
-                .ok_or_else(|| missing("workspace reference"))?
+            match tip_optional(&connection, project, reference)? {
+                Some(id) => id,
+                None if reference == DEFAULT_BRANCH => return Ok(vec![]),
+                None => return Err(missing("workspace reference")),
+            }
         };
         load_version(&connection, project, &id)?;
         let mut query = connection.prepare(

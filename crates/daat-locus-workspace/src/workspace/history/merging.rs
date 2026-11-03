@@ -244,3 +244,95 @@ fn distinct_inodes(
         Ok(root.clone())
     }
 }
+
+fn merge_text(
+    connection: &Connection,
+    base: &Node,
+    ours: &Node,
+    theirs: &Node,
+) -> Result<Option<Node>> {
+    if [base, ours, theirs]
+        .iter()
+        .any(|node| node.entry.kind != EntryKind::File)
+    {
+        return Ok(None);
+    }
+    if ours.entry.mode != base.entry.mode
+        && theirs.entry.mode != base.entry.mode
+        && ours.entry.mode != theirs.entry.mode
+    {
+        return Ok(None);
+    }
+    let texts = [base, ours, theirs].map(|node| read_node(connection, node, 0, usize::MAX));
+    let [base_bytes, our_bytes, their_bytes] = texts;
+    let (base_bytes, our_bytes, their_bytes) = (base_bytes?, our_bytes?, their_bytes?);
+    if [&base_bytes, &our_bytes, &their_bytes]
+        .iter()
+        .any(|bytes| bytes.contains(&0))
+    {
+        return Ok(None);
+    }
+    let (Ok(base_text), Ok(our_text), Ok(their_text)) = (
+        std::str::from_utf8(&base_bytes),
+        std::str::from_utf8(&our_bytes),
+        std::str::from_utf8(&their_bytes),
+    ) else {
+        return Ok(None);
+    };
+    let Some(merged) = diffy::merge(base_text, our_text, their_text)
+        .ok()
+        .or_else(|| merge_disjoint_lines(base_text, our_text, their_text))
+    else {
+        return Ok(None);
+    };
+    let mut node = ours.clone();
+    if ours.entry.mode == base.entry.mode {
+        node.entry.mode = theirs.entry.mode;
+    }
+    node.entry.size = merged.len() as u64;
+    node.blocks = merged
+        .as_bytes()
+        .chunks(BLOCK)
+        .map(|bytes| put(connection, 0, bytes))
+        .collect::<Result<_>>()?;
+    Ok(Some(node))
+}
+
+fn merge_disjoint_lines(base: &str, left: &str, right: &str) -> Option<String> {
+    let mut options = diffy::DiffOptions::new();
+    options.set_context_len(0);
+    let mut edits = Vec::new();
+    for text in [left, right] {
+        let patch = options.create_patch(base, text);
+        for hunk in patch.hunks() {
+            let old = hunk.old_range();
+            let start = old.start() - usize::from(!old.is_empty());
+            let inserted: String = hunk
+                .lines()
+                .iter()
+                .filter_map(|line| match line {
+                    diffy::Line::Insert(text) => Some(*text),
+                    _ => None,
+                })
+                .collect();
+            edits.push((start..start + old.len(), inserted));
+        }
+    }
+    edits.sort_by_key(|(range, _)| (range.start, range.end));
+    edits.dedup();
+    let lines: Vec<_> = base.split_inclusive('\n').collect();
+    let mut result = String::new();
+    let mut cursor = 0;
+    let mut insertion = None;
+    for (range, text) in edits {
+        if range.start < cursor || (range.is_empty() && insertion == Some(range.start)) {
+            return None;
+        }
+        result.extend(lines.get(cursor..range.start)?.iter().copied());
+        result.push_str(&text);
+        cursor = range.end;
+        insertion = range.is_empty().then_some(range.start);
+    }
+    result.extend(lines.get(cursor..)?.iter().copied());
+    Some(result)
+}

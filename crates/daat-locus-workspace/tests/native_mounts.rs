@@ -29,6 +29,15 @@ fn native_shared_branches_isolate_host_files_and_restore_after_unmount() {
     );
     #[cfg(windows)]
     {
+        assert_eq!(
+            manager
+                .locate(std::path::Path::new(
+                    &first.directory.to_string_lossy().to_ascii_uppercase(),
+                ))
+                .unwrap()
+                .branch,
+            "shared"
+        );
         assert!(
             native::open_mount_directory(&first.directory)
                 .unwrap()
@@ -98,6 +107,11 @@ fn native_shared_branches_isolate_host_files_and_restore_after_unmount() {
     );
     drop(manager);
     let manager = Workspaces::new(Store::open(&store_path).unwrap(), mount_root);
+    let nested = manager.restore(&first.directory.join("nested")).unwrap();
+    assert_eq!(
+        fs::read(nested.directory.join("renamed.txt")).unwrap(),
+        b"new bytes"
+    );
     let restored = manager.restore(&first.directory).unwrap();
     assert_eq!(restored.branch, "shared");
     assert_eq!(
@@ -402,7 +416,11 @@ fn junction(link: &std::path::Path, target: &std::path::Path) {
         .custom_flags(0x02200000)
         .open(link)
         .unwrap();
-    let target = format!("\\??\\{}", dunce::simplified(target).display()).replace('/', "\\");
+    let target = fs::canonicalize(target).unwrap();
+    let target = format!(
+        r"\??\{}",
+        target.to_str().unwrap().strip_prefix(r"\\?\").unwrap()
+    );
     let target: Vec<u8> = target.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let length = u16::try_from(target.len()).unwrap();
     let mut data = Vec::new();
@@ -635,12 +653,15 @@ fn run_development_command(
             child.wait().unwrap();
             panic!(
                 "development command timed out: {}",
-                fs::read_to_string(log.path()).unwrap()
+                String::from_utf8_lossy(&fs::read(log.path()).unwrap()).into_owned()
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    (status, fs::read_to_string(log.path()).unwrap())
+    (
+        status,
+        String::from_utf8_lossy(&fs::read(log.path()).unwrap()).into_owned(),
+    )
 }
 
 #[cfg(windows)]

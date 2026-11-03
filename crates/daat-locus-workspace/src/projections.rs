@@ -45,7 +45,9 @@ impl Workspaces {
         let connection = self.store.connection.lock();
         let mut statement = connection.prepare("SELECT directory FROM projections")?;
         Ok(statement
-            .query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
+            .query_map([], |row| {
+                Ok(native::directory_path(Path::new(&row.get::<_, String>(0)?)))
+            })?
             .collect::<std::result::Result<_, _>>()?)
     }
 
@@ -119,8 +121,11 @@ impl Workspaces {
             directory: directory.clone(),
         };
         let mut mounts = self.mounts.lock();
-        if mounts.contains_key(&key) {
-            return Ok(location);
+        if let Some(mount) = mounts.get(&key) {
+            return Ok(Location {
+                directory: mount.directory().to_owned(),
+                ..location
+            });
         }
         // The mount container is host-owned infrastructure, never supplied by a
         // model. Reject links and nonempty targets rather than masking user data.
@@ -141,6 +146,10 @@ impl Workspaces {
             "INSERT INTO projections(project,name,directory) VALUES(?1,?2,?3) ON CONFLICT(project,name) DO UPDATE SET directory=excluded.directory",
             params![workspace.project_id(), workspace.name(), directory.to_str().ok_or_else(|| Error::Invalid("mount directory must be Unicode".into()))?],
         )?;
+        let location = Location {
+            directory: mount.directory().to_owned(),
+            ..location
+        };
         mounts.insert(key, mount);
         Ok(location)
     }
@@ -162,11 +171,12 @@ impl Workspaces {
     /// Resolve persisted execution directories even before a service restart has
     /// remounted their parent projection. Ordinary directories need no record.
     pub fn locate(&self, directory: &Path) -> Result<Location> {
+        let lookup = native::logical_path(directory, &self.projection_root()?);
         let connection = self.store.connection.lock();
         // Windows canonicalization adds a trailing separator at a mounted
         // volume's root. Path components compare equally, but SQLite TEXT keys
         // do not; normalize separators before looking up persisted projections.
-        let normalized: PathBuf = directory.components().collect();
+        let normalized: PathBuf = lookup.components().collect();
         for parent in normalized.ancestors() {
             let Some(parent_text) = parent.to_str() else {
                 continue;
@@ -198,11 +208,19 @@ impl Workspaces {
         let workspace = self
             .store
             .open_recorded_branch(&location.path, &location.branch)?;
+        let root: String = self.store.connection.lock().query_row(
+            "SELECT projections.directory FROM projections JOIN projects ON projects.id=projections.project WHERE projects.path=?1 AND projections.name=?2",
+            params![location.path.to_str(), location.branch], |row| row.get(0),
+        )?;
+        let lookup = native::logical_path(directory, &self.projection_root()?);
+        let relative = lookup
+            .strip_prefix(root)
+            .map_err(|_| Error::Conflict("persisted mount location changed".into()))?;
         let mounted = self.mount(workspace)?;
-        if !directory.starts_with(&mounted.directory) {
-            return Err(Error::Conflict("persisted mount location changed".into()));
-        }
-        Ok(location)
+        Ok(Location {
+            directory: mounted.directory.join(relative),
+            ..location
+        })
     }
 
     pub fn close(&self) {

@@ -92,6 +92,7 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
         }
     };
     Ok(Mount {
+        directory: path.to_owned(),
         _session: Session {
             guard: Some(guard),
             unmounter,

@@ -39,7 +39,6 @@ struct Api {
     _library: Library,
     preflight: unsafe extern "C" fn(Name, Name) -> Status,
     create: unsafe extern "C" fn(Name, *const VolumeParams, *const Interface, *mut Fs) -> Status,
-    set_mount: unsafe extern "C" fn(Fs, Name, Buffer) -> Status,
     start: unsafe extern "C" fn(Fs, u32) -> Status,
     stop: unsafe extern "C" fn(Fs),
     delete: unsafe extern "C" fn(Fs),
@@ -116,9 +115,6 @@ fn api() -> Result<Option<Arc<Api>>> {
             create: *library
                 .get(b"FspFileSystemCreate\0")
                 .map_err(symbol_error)?,
-            set_mount: *library
-                .get(b"FspFileSystemSetMountPointEx\0")
-                .map_err(symbol_error)?,
             start: *library
                 .get(b"FspFileSystemStartDispatcher\0")
                 .map_err(symbol_error)?,
@@ -150,7 +146,7 @@ pub(super) fn available() -> Result<bool> {
     let Some(api) = api()? else {
         return Ok(false);
     };
-    Ok(unsafe { (api.preflight)(wide("WinFsp.Disk").as_mut_ptr(), ptr::null_mut()) } >= 0)
+    Ok(unsafe { (api.preflight)(wide("WinFsp.Net").as_mut_ptr(), ptr::null_mut()) } >= 0)
 }
 struct Handler {
     api: Arc<Api>,
@@ -173,7 +169,10 @@ impl Drop for Session {
     fn drop(&mut self) {
         if let Some((path, identity)) = &self.registration {
             let mut mounts = mounted_directories().lock();
-            if mounts.get(path) == Some(identity) {
+            if mounts
+                .get(path)
+                .is_some_and(|target| &target.path == identity)
+            {
                 mounts.remove(path);
             }
         }
@@ -183,8 +182,81 @@ impl Drop for Session {
         }
     }
 }
+fn server(root: &Path) -> String {
+    let mut identity = Sha256::new();
+    for unit in root.as_os_str().encode_wide() {
+        identity.update(unit.to_le_bytes());
+    }
+    format!("DaatLocus-{}", hex::encode(&identity.finalize()[..20]))
+}
+
+pub(super) fn directory_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!(
+        r"\\{}\{}",
+        server(path.parent().unwrap_or(path)),
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+pub(super) fn logical_path(path: &Path, root: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else {
+        return path.to_owned();
+    };
+    let (host, share) = match prefix.kind() {
+        Prefix::UNC(host, share) | Prefix::VerbatimUNC(host, share) => (host, share),
+        _ => return path.to_owned(),
+    };
+    let share = share.to_string_lossy();
+    if !host.to_string_lossy().eq_ignore_ascii_case(&server(root))
+        || share.len() != 64
+        || !share.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return path.to_owned();
+    }
+    let mut result = root.join(share.to_ascii_lowercase());
+    for part in parts {
+        match part {
+            Component::RootDir => {}
+            Component::Normal(name) => result.push(name),
+            _ => return path.to_owned(),
+        }
+    }
+    result
+}
+
+pub(super) fn is_mount_path(path: &Path) -> bool {
+    unc_root(path).is_some_and(|root| mounted_directories().lock().contains_key(&root))
+}
+
+fn unc_root(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    let (server, share) = match prefix.kind() {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => (server, share),
+        _ => return None,
+    };
+    Some(PathBuf::from(
+        format!(
+            r"\\{}\{}",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        )
+        .to_ascii_lowercase(),
+    ))
+}
+
+pub(super) fn mounted_roots() -> Vec<PathBuf> {
+    mounted_directories().lock().keys().cloned().collect()
+}
+
 pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
     let api = api()?.ok_or_else(|| Error::Unsupported("WinFsp is not installed".into()))?;
+    let directory = directory_path(path);
+    let path = directory.as_path();
     let mut identity = Sha256::new();
     for unit in workspace.backing_path().as_os_str().encode_wide() {
         identity.update(unit.to_le_bytes());
@@ -206,6 +278,10 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
     params.serial = serial;
     // Case-sensitive names, owner ACLs, reparse points, per-open contexts.
     // The kernel enforces sharing, byte locks and reparse write access.
+    let prefix = format!("\\{}", path.to_string_lossy().trim_start_matches('\\'));
+    for (output, unit) in params.prefix.iter_mut().zip(prefix.encode_utf16()) {
+        *output = unit;
+    }
     params.flags = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | (1 << 16);
     for (output, unit) in params.name.iter_mut().zip("DaatWorkspace".encode_utf16()) {
         *output = unit;
@@ -237,7 +313,7 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
     check(
         unsafe {
             (api.create)(
-                wide("WinFsp.Disk").as_mut_ptr(),
+                wide("WinFsp.Net").as_mut_ptr(),
                 &params,
                 &*operations,
                 &mut fs,
@@ -256,30 +332,31 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
         registration: None,
     };
     check(unsafe { (session.api.start)(fs, 0) }, "start dispatcher")?;
-    // WinFsp owns and deletes its directory mount point. Workspaces has verified
-    // this infrastructure directory is empty before handing it to this backend.
-    std::fs::remove_dir(path)?;
-    // Preserve the canonical \\?\ prefix: WinFsp uses it to register a directory
-    // with Mount Manager, which makes normal Win32 canonicalization work.
-    let mut point: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
-    check(
-        unsafe {
-            (session.api.set_mount)(
-                fs,
-                point.as_mut_ptr(),
-                session._handler.security.as_ptr().cast_mut().cast(),
-            )
-        },
-        "mount directory",
-    )?;
     let directory = wait_ready(path, serial)?;
     let identity = device_path(&directory)?;
-    let path = dunce::simplified(path).to_owned();
-    mounted_directories()
-        .lock()
-        .insert(path.clone(), identity.clone());
-    session.registration = Some((path, identity));
-    Ok(Mount { _session: session })
+    let path =
+        unc_root(path).ok_or_else(|| Error::Invalid("invalid native projection path".into()))?;
+    let kernel = unsafe { &(*fs).volume_name };
+    let length = kernel
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(|| Error::Corrupt("unterminated WinFsp volume name".into()))?;
+    let mut kernel = kernel[..length].to_vec();
+    if kernel.last() != Some(&(b'\\' as u16)) {
+        kernel.push(b'\\' as u16);
+    }
+    mounted_directories().lock().insert(
+        path.clone(),
+        MountedVolume {
+            identity,
+            path: kernel.clone(),
+        },
+    );
+    session.registration = Some((path, kernel));
+    Ok(Mount {
+        directory: session._handler.directory.clone(),
+        _session: session,
+    })
 }
 fn check(status: Status, operation: &str) -> Result<()> {
     if status >= 0 {
@@ -873,7 +950,14 @@ extern "C" fn get_reparse_by_name(
         if buffer.is_null() {
             return Ok(STATUS_SUCCESS);
         }
-        let point = point.relocate(&handler.origin, &handler.directory)?;
+        let mut point = point.relocate(&handler.origin, &handler.directory)?;
+        // Junction traversal needs a local volume target. Resolve internal UNC
+        // targets as directory symlinks while preserving the stored link type.
+        if point.tag()? == crate::reparse::JUNCTION
+            && let Some(target) = point.target()?.strip_prefix(r"\??\UNC\")
+        {
+            point = ReparsePoint::symlink(&format!(r"\\{target}"), true)?;
+        }
         copy_buffer(&point.data, buffer, size, STATUS_BUFFER_TOO_SMALL)
     })
 }
@@ -945,8 +1029,13 @@ extern "C" fn delete_reparse_point(
     })
 }
 
-fn mounted_directories() -> &'static Mutex<HashMap<PathBuf, Vec<u16>>> {
-    static MOUNTS: OnceLock<Mutex<HashMap<PathBuf, Vec<u16>>>> = OnceLock::new();
+#[derive(Clone)]
+struct MountedVolume {
+    identity: Vec<u16>,
+    path: Vec<u16>,
+}
+fn mounted_directories() -> &'static Mutex<HashMap<PathBuf, MountedVolume>> {
+    static MOUNTS: OnceLock<Mutex<HashMap<PathBuf, MountedVolume>>> = OnceLock::new();
     MOUNTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -973,14 +1062,19 @@ fn device_path(file: &std::fs::File) -> io::Result<Vec<u16>> {
     Ok(path)
 }
 
-/// Return a pinned volume root and a stable kernel path, independently of the
-/// NTFS mount point that WinFsp holds open with delete-on-close access.
+/// Return a pinned volume root and its unique native volume path.
 pub(super) fn open_mount_directory(path: &Path) -> io::Result<Option<super::MountedDirectory>> {
-    let Some(expected) = mounted_directories()
-        .lock()
-        .get(dunce::simplified(path))
-        .cloned()
-    else {
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Ok(None);
+    }
+    let Some(root) = unc_root(path) else {
+        return Ok(None);
+    };
+    let mounts = mounted_directories().lock();
+    let Some(volume) = mounts.get(&root) else {
         return Ok(None);
     };
     let file = std::fs::OpenOptions::new()
@@ -988,14 +1082,14 @@ pub(super) fn open_mount_directory(path: &Path) -> io::Result<Option<super::Moun
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    if device_path(&file)? != expected {
+    if device_path(&file)? != volume.identity {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "workspace mount target was replaced",
         ));
     }
     let mut native_path: Vec<u16> = r"\\?\GLOBALROOT".encode_utf16().collect();
-    native_path.extend(expected);
+    native_path.extend(&volume.path);
     Ok(Some(super::MountedDirectory {
         directory: file,
         path: PathBuf::from(std::ffi::OsString::from_wide(&native_path)),

@@ -978,56 +978,6 @@ fn changed_paths(first: &BTreeMap<String, Node>, second: &BTreeMap<String, Node>
         .collect()
 }
 
-fn merge_text(
-    connection: &Connection,
-    base: &Node,
-    ours: &Node,
-    theirs: &Node,
-) -> Result<Option<Node>> {
-    if [base, ours, theirs]
-        .iter()
-        .any(|node| node.entry.kind != EntryKind::File)
-    {
-        return Ok(None);
-    }
-    if ours.entry.mode != base.entry.mode
-        && theirs.entry.mode != base.entry.mode
-        && ours.entry.mode != theirs.entry.mode
-    {
-        return Ok(None);
-    }
-    let texts = [base, ours, theirs].map(|node| read_node(connection, node, 0, usize::MAX));
-    let [base_bytes, our_bytes, their_bytes] = texts;
-    let (base_bytes, our_bytes, their_bytes) = (base_bytes?, our_bytes?, their_bytes?);
-    if [&base_bytes, &our_bytes, &their_bytes]
-        .iter()
-        .any(|bytes| bytes.contains(&0))
-    {
-        return Ok(None);
-    }
-    let (Ok(base_text), Ok(our_text), Ok(their_text)) = (
-        std::str::from_utf8(&base_bytes),
-        std::str::from_utf8(&our_bytes),
-        std::str::from_utf8(&their_bytes),
-    ) else {
-        return Ok(None);
-    };
-    let Ok(merged) = diffy::merge(base_text, our_text, their_text) else {
-        return Ok(None);
-    };
-    let mut node = ours.clone();
-    if ours.entry.mode == base.entry.mode {
-        node.entry.mode = theirs.entry.mode;
-    }
-    node.entry.size = merged.len() as u64;
-    node.blocks = merged
-        .as_bytes()
-        .chunks(BLOCK)
-        .map(|bytes| put(connection, 0, bytes))
-        .collect::<Result<_>>()?;
-    Ok(Some(node))
-}
-
 fn apply(
     connection: &Connection,
     origin: &Directory,

@@ -13,6 +13,33 @@ use crate::Error;
 use crate::{Result, Workspace};
 use std::path::Path;
 
+pub(crate) fn directory_path(path: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    return windows::directory_path(path);
+    #[cfg(not(windows))]
+    path.to_owned()
+}
+
+pub(crate) fn logical_path(path: &Path, root: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    return windows::logical_path(path, root);
+    #[cfg(not(windows))]
+    {
+        let _ = root;
+        path.to_owned()
+    }
+}
+
+#[cfg(windows)]
+pub fn is_mount_path(path: &Path) -> bool {
+    windows::is_mount_path(path)
+}
+
+#[cfg(windows)]
+pub fn mounted_roots() -> Vec<std::path::PathBuf> {
+    windows::mounted_roots()
+}
+
 /// A verified host-owned volume root and its kernel path. Use the held handle
 /// or this path for I/O so changing the visible mount point cannot redirect it.
 #[cfg(windows)]
@@ -99,7 +126,9 @@ pub fn probe(directory: &Path) -> Result<bool> {
             ));
         }
         std::fs::remove_file(branch.directory.join("renamed.txt"))?;
+        std::fs::remove_dir_all(branch.directory.join("nested"))?;
         if source.join("created.txt").exists()
+            || !source.join("nested/child.txt").exists()
             || std::fs::read(source.join("source.txt"))? != b"original\n"
         {
             return Err(crate::Error::Corrupt(
@@ -115,6 +144,7 @@ pub fn probe(directory: &Path) -> Result<bool> {
 }
 
 pub struct Mount {
+    directory: std::path::PathBuf,
     #[cfg(target_os = "linux")]
     _session: linux::Session,
     #[cfg(windows)]
@@ -122,6 +152,10 @@ pub struct Mount {
 }
 
 impl Mount {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     pub fn open(workspace: Workspace, path: &Path) -> Result<Self> {
         #[cfg(target_os = "linux")]
         return linux::mount(workspace, path);

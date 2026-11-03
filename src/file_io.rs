@@ -1386,6 +1386,180 @@ pub(crate) fn view_image_bytes(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires installed WinFsp and native Windows process isolation"]
+    async fn workspace_files_and_sandboxed_terminal_share_the_mounted_branch() {
+        use daat_locus_workspace::{Directory, Store, Workspaces, native};
+        use std::ffi::OsStr;
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+        assert!(native::available().unwrap());
+        if !crate::sandbox::test_support::native_sandbox_available() {
+            return;
+        }
+        let temporary = crate::sandbox::test_support::scoped_directory();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("original.txt"), b"native\n").unwrap();
+        fs::create_dir(source.join("denied")).unwrap();
+        fs::write(source.join("denied/secret.txt"), b"secret").unwrap();
+        let manager = Workspaces::new(
+            Store::open(&temporary.path().join("store.sqlite3")).unwrap(),
+            temporary.path().join("mounts"),
+        );
+        let location = manager
+            .select(
+                Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap(),
+                "work",
+                "default",
+            )
+            .unwrap();
+        let root = &location.directory;
+        let mut policy = RuntimeSandboxPolicy::disabled();
+        policy.strong_filesystem = crate::sandbox::StrongFilesystemSandboxMode::Required;
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.full_disk_write = false;
+        policy.filesystem.writable_roots = vec![crate::sandbox::WritableRoot {
+            root: root.clone(),
+            read_only_subpaths: vec![],
+        }];
+        policy.filesystem.deny_read_paths.push(root.join("denied"));
+        for content in ["created\n", "overwritten\n"] {
+            write_file(
+                root,
+                &policy,
+                &WriteFileArgs {
+                    path: "new.txt".into(),
+                    content: content.into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), content);
+        }
+        let directory = guarded_directory::GuardedDirectory::open(root, false).unwrap();
+        fs::write(root.join("racer.txt"), b"keep").unwrap();
+        assert!(
+            directory
+                .publish_new(OsStr::new("new.txt"), OsStr::new("racer.txt"))
+                .is_err()
+        );
+        assert_eq!(fs::read(root.join("racer.txt")).unwrap(), b"keep");
+        drop(directory);
+        let shell = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap()
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             if ((Get-Location).ProviderPath.TrimEnd('\\') -ine '{}') {{ exit 69 }}; \
+             [IO.File]::WriteAllText('terminal.txt', [IO.File]::ReadAllText('new.txt')); \
+             & $env:ComSpec /D /C 'type new.txt > cmd.txt'; if ($LASTEXITCODE -ne 0) {{ exit 70 }}; \
+             try {{ [IO.File]::ReadAllText('denied/secret.txt'); exit 71 }} catch {{}}; \
+             try {{ [IO.File]::WriteAllText('denied/future.txt','escape'); exit 72 }} catch {{}}; \
+             try {{ [IO.File]::WriteAllText('{}','escape'); exit 73 }} catch {{}}; exit 0",
+            root.display().to_string().replace('\'', "''"),
+            source
+                .join("escape.txt")
+                .display()
+                .to_string()
+                .replace('\'', "''")
+        );
+        let mut child = crate::sandbox::SandboxAsyncChild::spawn_shell(
+            &policy,
+            shell.to_str().unwrap(),
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            crate::sandbox::SandboxProcessOptions {
+                current_dir: Some(root.clone()),
+                stdin: crate::sandbox::SandboxStdio::Null,
+                stdout: crate::sandbox::SandboxStdio::Piped,
+                stderr: crate::sandbox::SandboxStdio::Piped,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut stdout = child.take_stdout().unwrap();
+        let mut stderr = child.take_stderr().unwrap();
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let (out, err, status) = tokio::join!(
+                stdout.read_to_end(&mut output),
+                stderr.read_to_end(&mut errors),
+                async {
+                    loop {
+                        if let Some(status) = child.try_wait().unwrap() {
+                            break status;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            );
+            out.unwrap();
+            err.unwrap();
+            status
+        })
+        .await
+        .unwrap();
+        assert!(
+            status.success(),
+            "{status}: {} {}",
+            String::from_utf8_lossy(&output),
+            String::from_utf8_lossy(&errors)
+        );
+        assert_eq!(
+            fs::read(root.join("terminal.txt")).unwrap(),
+            b"overwritten\n"
+        );
+        assert!(!source.join("new.txt").exists());
+        assert!(!source.join("terminal.txt").exists());
+        assert!(!source.join("escape.txt").exists());
+        assert!(!root.join("denied/future.txt").exists());
+        assert!(
+            fs::read_to_string(root.join("cmd.txt"))
+                .unwrap()
+                .contains("overwritten")
+        );
+        drop(child);
+        let mut terminal = daat_locus_bash::process::TerminalProcess::spawn(
+            "cat new.txt > bash.txt; cmd.exe /d /c 'type new.txt > bash-cmd.txt'",
+            root.to_str(),
+            &policy,
+        )
+        .unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(status) = terminal.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            terminal
+                .wait_for_output_drained(std::time::Duration::from_secs(2))
+                .await
+        );
+        assert!(status.success(), "{}", terminal.output_since(0).text);
+        for name in ["bash.txt", "bash-cmd.txt"] {
+            assert!(
+                fs::read_to_string(root.join(name))
+                    .unwrap()
+                    .contains("overwritten")
+            );
+            assert!(!source.join(name).exists());
+        }
+        drop(terminal);
+        manager.close();
+    }
+
     use crate::sandbox::test_support::scoped_directory;
     use serde_json::json;
     #[cfg(any(unix, windows))]

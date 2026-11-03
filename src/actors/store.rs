@@ -691,6 +691,29 @@ impl ActorStore {
             self.commit(tx)
         })
     }
+    pub(crate) fn restore_actor_workspace(
+        &self,
+        actor_id: &str,
+        expected: &Path,
+        directory: &Path,
+    ) -> Result<ActorRecord> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let mut actor = actor_tx(&tx, actor_id)?;
+            if actor.config.workspace != expected {
+                return Err(ActorError::Conflict(
+                    "Workspace selection changed during restoration".into(),
+                )
+                .into());
+            }
+            actor.config.workspace = directory.to_owned();
+            actor.updated_at_ms = now();
+            save_actor(&tx, &actor)?;
+            self.commit(tx)?;
+            Ok(actor)
+        })
+    }
     pub(crate) fn select_actor_workspace(
         &self,
         actor_id: &str,

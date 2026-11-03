@@ -41,11 +41,21 @@ impl SandboxAsyncChild {
                 program, args, options,
             )?)
         } else {
+            #[cfg(windows)]
+            let native = {
+                let mut native = policy.native.clone();
+                if native.filesystem.full_disk_read {
+                    native
+                        .filesystem
+                        .readable_roots
+                        .extend(daat_locus_workspace::native::mounted_roots());
+                }
+                native
+            };
+            #[cfg(not(windows))]
+            let native = policy.native.clone();
             Child::Native(daat_locus_sandbox::SandboxAsyncChild::spawn_shell(
-                &policy.native,
-                program,
-                args,
-                options,
+                &native, program, args, options,
             )?)
         };
         Ok(Self {

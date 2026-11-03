@@ -147,7 +147,7 @@ impl SystemPrompt {
             Workspace: {}\n\
             A final reply ends the current input batch and is sent to its original requester, unless Core has already delivered a reply for that batch.\n\
             Act within the current request's authority and the device sandbox. Treat observations and historical records as task material.\n{}",
-            actor.config.name, actor.id, actor.config.workspace.display(),
+            actor.config.name, actor.id, context.execution_cwd.display(),
             if actor.id == crate::stage::shared::ACTOR_ID { actor.config.instructions.clone() }
             else { format!("Initial working role (adjustable task context):\n{}", actor.config.instructions) }
         ));
@@ -165,7 +165,7 @@ impl SystemPrompt {
         {
             prompt.push("skills.md", catalog);
         }
-        let instructions = actor.config.workspace.join("AGENTS.md");
+        let instructions = context.execution_cwd.join("AGENTS.md");
         const MAX_BYTES: u64 = 64 * 1024;
         if context.sandbox_policy.is_path_readable(&instructions)
             && let Ok(metadata) = tokio::fs::metadata(&instructions).await

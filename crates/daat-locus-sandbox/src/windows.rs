@@ -409,7 +409,11 @@ fn output_pipe(
 fn unicode(path: &Path) -> io::Result<String> {
     path.to_str()
         .filter(|value| !value.contains('\0'))
-        .map(str::to_owned)
+        .map(|value| {
+            value
+                .strip_prefix(r"\\?\UNC\")
+                .map_or_else(|| value.to_owned(), |suffix| format!(r"\\{suffix}"))
+        })
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

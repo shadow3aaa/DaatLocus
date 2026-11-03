@@ -50,15 +50,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = Join-Path $env:RUNNER_TEMP 'winfsp-2.1.25156.msi'
-          Invoke-WebRequest 'https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi' -OutFile $installer -TimeoutSec 120
-          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne '073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A') {
+          $installer = Join-Path $env:RUNNER_TEMP 'winfsp-2.2.26286.msi'
+          Invoke-WebRequest 'https://github.com/winfsp/winfsp/releases/download/v2.2B5/winfsp-2.2.26286.msi' -OutFile $installer -TimeoutSec 120
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne '293FFB9BCC0B625C85079FE85FA77F8FE98170ABA51A02AC9C83D58F6C3B0E2F') {
             throw 'WinFsp installer checksum mismatch'
           }
           if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'Valid') { throw 'WinFsp installer signature is invalid' }
           $install = Start-Process msiexec.exe -ArgumentList @('/i', ('"' + $installer + '"'), '/qn', '/norestart') -Wait -PassThru -WindowStyle Hidden
           if ($install.ExitCode -notin @(0, 3010)) { throw "WinFsp installation failed: $($install.ExitCode)" }
-          New-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\WinFsp' -Name 'MountUseMountmgrFromFSD' -PropertyType DWord -Value 1 -Force | Out-Null
+          foreach ($view in @('Registry64', 'Registry32')) {
+            $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $view)
+            $key = $registry.CreateSubKey('SOFTWARE\Microsoft\Command Processor')
+            $key.SetValue('DisableUNCCheck', 1, 'DWord')
+            $key.Dispose()
+            $registry.Dispose()
+          }
       - uses: pnpm/action-setup@v4
         if: runner.os == 'Windows'
         with:
@@ -76,6 +82,9 @@ jobs:
         timeout-minutes: 15
         if: runner.os == 'Linux' || runner.os == 'Windows'
         run: cargo test --locked -p daat-locus --lib workspace_native_ -- --ignored --test-threads=1
+      - name: Verify workspace Files and sandboxed Terminal
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p daat-locus --lib workspace_files_and_sandboxed_terminal_share_the_mounted_branch -- --ignored --test-threads=1
       - name: Check Bash and portable command libraries
         run: cargo test --locked -p daat-locus-bash -p daat-locus-uutils -- --test-threads=4
       - name: Check Bash reexec and external PATH commands

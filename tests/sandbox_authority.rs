@@ -57,6 +57,7 @@ async fn actors_with_different_workspaces_execute_files_against_the_same_device_
             remote_authority: None,
             content: "Read the shared device file".into(),
             attachments: vec![],
+            skills: vec![],
             status: MessageStatus::Queued,
             cancel_requested: false,
             started_at_ms: None,

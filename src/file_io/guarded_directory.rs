@@ -32,8 +32,8 @@ fn single_name(name: &OsStr) -> io::Result<()> {
     }
 }
 
-/// This broker supports local volumes only. UNC and device namespaces can
-/// connect to pipes or remote servers before handle validation can run.
+/// Accept local volumes and live host-owned projections. Other UNC and device
+/// namespaces can connect to remote endpoints before handle validation runs.
 pub(crate) fn local_path(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     if let Some(Component::Prefix(prefix)) = path.components().next()
@@ -41,6 +41,7 @@ pub(crate) fn local_path(path: &Path) -> io::Result<()> {
             prefix.kind(),
             std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
         )
+        && !daat_locus_workspace::native::is_mount_path(path)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -401,6 +402,32 @@ impl GuardedDirectory {
     }
 
     pub(crate) fn publish_new(&self, source: &OsStr, target: &OsStr) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+            single_name(source)?;
+            single_name(target)?;
+            let source: Vec<_> = self
+                .path
+                .join(source)
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            let target: Vec<_> = self
+                .path
+                .join(target)
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
         #[cfg(target_os = "android")]
         {
             use std::os::fd::AsRawFd;
@@ -421,21 +448,17 @@ impl GuardedDirectory {
                 )
             } as libc::c_int)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", windows)))]
         {
             self.link(source, target)?;
             self.remove(source)
         }
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", windows)))]
     fn link(&self, source: &OsStr, target: &OsStr) -> io::Result<()> {
         single_name(source)?;
         single_name(target)?;
-        #[cfg(windows)]
-        {
-            fs::hard_link(self.path.join(source), self.path.join(target))
-        }
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -957,115 +980,42 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires the installed WinFsp driver and configured directory mounts"]
-    fn workspace_native_mount_retargeting_cannot_redirect_guarded_io() {
-        use std::{
-            io::Write,
-            os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
-            sync::Arc,
-        };
-        use windows_sys::Win32::System::IO::DeviceIoControl;
+    #[ignore = "requires the installed WinFsp driver"]
+    fn workspace_native_remount_does_not_retarget_pinned_io() {
+        use daat_locus_workspace::{Directory, Store, Workspaces};
+        use std::{io::Write, sync::Arc};
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
-        let outside = temp.path().join("outside");
         fs::create_dir(&source).unwrap();
-        fs::create_dir(&outside).unwrap();
-        let origin =
-            daat_locus_workspace::Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap();
-        let manager = daat_locus_workspace::Workspaces::new(
-            daat_locus_workspace::Store::open(&temp.path().join("store.sqlite3")).unwrap(),
+        let manager = Workspaces::new(
+            Store::open(&temp.path().join("store.sqlite3")).unwrap(),
             temp.path().join("mounts"),
         );
         let location = manager
-            .select(origin.clone(), "feature", "default")
+            .select(
+                Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap(),
+                "feature",
+                "default",
+            )
             .unwrap();
         let guard = GuardedDirectory::open(&location.directory, false).unwrap();
-        let point = fs::OpenOptions::new()
-            .access_mode(0x180)
-            .share_mode(7)
-            .custom_flags(0x0220_0000)
-            .open(&location.directory)
-            .unwrap();
-        let mut original = vec![0u8; 16 * 1024];
-        let mut count = 0;
-        assert_ne!(
-            unsafe {
-                DeviceIoControl(
-                    point.as_raw_handle().cast(),
-                    0x900a8,
-                    std::ptr::null(),
-                    0,
-                    original.as_mut_ptr().cast(),
-                    original.len() as u32,
-                    &mut count,
-                    std::ptr::null_mut(),
-                )
-            },
-            0,
-            "{}",
-            io::Error::last_os_error()
-        );
-        original.truncate(count as usize);
-        let target = format!("\\??\\{}", outside.display()).replace('/', "\\");
-        let target: Vec<u8> = target.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let length = u16::try_from(target.len()).unwrap();
-        let mut replacement = Vec::new();
-        replacement.extend(0xa0000003u32.to_le_bytes());
-        replacement.extend((12 + 2 * length).to_le_bytes());
-        replacement.extend(0u16.to_le_bytes());
-        for field in [0, length, length + 2, length] {
-            replacement.extend(field.to_le_bytes());
-        }
-        replacement.extend(&target);
-        replacement.extend(0u16.to_le_bytes());
-        replacement.extend(target);
-        replacement.extend(0u16.to_le_bytes());
-        let set = |data: &[u8]| {
-            let mut count = 0;
-            assert_ne!(
-                unsafe {
-                    DeviceIoControl(
-                        point.as_raw_handle().cast(),
-                        0x900a4,
-                        data.as_ptr().cast(),
-                        data.len() as u32,
-                        std::ptr::null_mut(),
-                        0,
-                        &mut count,
-                        std::ptr::null_mut(),
-                    )
-                },
-                0,
-                "{}",
-                io::Error::last_os_error()
-            );
-        };
-        set(&replacement);
-        guard
-            .create_new(OsStr::new("branch-only.txt"))
+        manager.close();
+        let restored = manager.restore(&location.directory).unwrap();
+        assert_eq!(restored.directory, location.directory);
+        assert!(guard.create_new(OsStr::new("stale.txt")).is_err());
+        assert!(!restored.directory.join("stale.txt").exists());
+        let current = GuardedDirectory::open(&restored.directory, false).unwrap();
+        current
+            .create_new(OsStr::new("current.txt"))
             .unwrap()
-            .write_all(b"branch bytes")
+            .write_all(b"new volume")
             .unwrap();
-        let child = guard.create_child(OsStr::new("child")).unwrap();
-        child
-            .create_new(OsStr::new("nested.txt"))
-            .unwrap()
-            .write_all(b"nested bytes")
-            .unwrap();
-        assert!(!outside.join("branch-only.txt").exists());
-        assert!(!outside.join("child").exists());
-        assert!(GuardedDirectory::open(&location.directory, false).is_err());
-        let branch = manager.store().open_branch(origin, "feature").unwrap();
         assert_eq!(
-            branch.read("branch-only.txt", 0, 80).unwrap(),
-            b"branch bytes"
+            fs::read(restored.directory.join("current.txt")).unwrap(),
+            b"new volume"
         );
-        assert_eq!(
-            branch.read("child/nested.txt", 0, 80).unwrap(),
-            b"nested bytes"
-        );
-        set(&original);
-        drop((point, child, guard));
+        assert!(!source.join("current.txt").exists());
+        drop((current, guard));
         manager.close();
     }
     #[cfg(windows)]
