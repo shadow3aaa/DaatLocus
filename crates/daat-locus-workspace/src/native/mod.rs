@@ -13,12 +13,18 @@ use crate::Error;
 use crate::{Result, Workspace};
 use std::path::Path;
 
-/// Resolve only a live directory mount owned by this host, checking its kernel
-/// device identity. The caller must pin its non-reparse ancestors and hold a
-/// no-follow mount-point handle that denies writes and deletion. This does not
-/// authorize access; the host must still validate the opened directory's scope.
+/// A verified host-owned volume root and its kernel path. Use the held handle
+/// or this path for I/O so changing the visible mount point cannot redirect it.
 #[cfg(windows)]
-pub fn open_mount_directory(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+pub struct MountedDirectory {
+    pub directory: std::fs::File,
+    pub path: std::path::PathBuf,
+}
+
+/// Resolve only a live host-owned mount. The caller must pin its non-reparse
+/// ancestors and independently authorize the visible path before using it.
+#[cfg(windows)]
+pub fn open_mount_directory(path: &Path) -> std::io::Result<Option<MountedDirectory>> {
     windows::open_mount_directory(path)
 }
 

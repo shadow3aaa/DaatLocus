@@ -87,6 +87,7 @@ impl GuardedDirectory {
                 FILE_SHARE_READ, FILE_SHARE_WRITE,
             };
             let mut ancestors = Vec::new();
+            let mut projection: Option<(PathBuf, PathBuf)> = None;
             // Windows canonical paths may have a final, non-absolute drive
             // prefix ancestor (\\?\C:). It is not an openable directory.
             for ancestor in path
@@ -96,11 +97,26 @@ impl GuardedDirectory {
                 .into_iter()
                 .rev()
             {
+                let visible_ancestor = ancestor;
+                let effective = if let Some((visible, native)) = &projection {
+                    native.join(ancestor.strip_prefix(visible).map_err(io::Error::other)?)
+                } else {
+                    ancestor.to_owned()
+                };
+                if projection.is_none()
+                    && let Some(mount) =
+                        daat_locus_workspace::native::open_mount_directory(ancestor)?
+                {
+                    projection = Some((ancestor.to_owned(), mount.path));
+                    ancestors.push(mount.directory);
+                    continue;
+                }
+                let ancestor = effective.as_path();
                 if create {
                     match fs::symlink_metadata(ancestor) {
                         Ok(_) => {}
                         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                            check_create(ancestor)?;
+                            check_create(visible_ancestor)?;
                             match fs::create_dir(ancestor) {
                                 Ok(()) => {}
                                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
@@ -126,30 +142,19 @@ impl GuardedDirectory {
                     ));
                 }
                 if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                    // Only our live native workspace mounts may cross a
-                    // reparse point. Pin the point without SHARE_WRITE or
-                    // SHARE_DELETE so its target cannot change, then compare
-                    // the followed handle's kernel device path with the host's
-                    // mount record. Ordinary junctions/symlinks remain denied.
-                    let point = fs::OpenOptions::new()
-                        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
-                        .share_mode(FILE_SHARE_READ)
-                        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                        .open(ancestor)?;
-                    let directory = daat_locus_workspace::native::open_mount_directory(ancestor)?
-                        .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "directory reparse point is forbidden",
-                        )
-                    })?;
-                    ancestors.extend([point, directory]);
-                    continue;
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "directory reparse point is forbidden",
+                    ));
                 }
                 ancestors.push(handle);
             }
             Ok(Self {
-                path: path.to_path_buf(),
+                path: if let Some((visible, native)) = projection {
+                    native.join(path.strip_prefix(visible).map_err(io::Error::other)?)
+                } else {
+                    path.to_path_buf()
+                },
                 _ancestors: ancestors,
             })
         }
@@ -528,6 +533,12 @@ impl GuardedDirectory {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
             let path = self.path.join(name);
             if create {
                 match fs::create_dir(&path) {
@@ -536,8 +547,30 @@ impl GuardedDirectory {
                     Err(error) => return Err(error),
                 }
             }
-            // The parent guard pins every ancestor while this opens its child.
-            Self::open(&path, false)
+            let child = fs::OpenOptions::new()
+                .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)?;
+            let attributes = child.metadata()?.file_attributes();
+            if attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "child is not an ordinary directory",
+                ));
+            }
+            let mut ancestors = self
+                ._ancestors
+                .iter()
+                .map(File::try_clone)
+                .collect::<io::Result<Vec<_>>>()?;
+            ancestors.push(child);
+            Ok(Self {
+                path,
+                _ancestors: ancestors,
+            })
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -922,6 +955,119 @@ fn syscall_result(result: libc::c_int) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed WinFsp driver and configured directory mounts"]
+    fn workspace_native_mount_retargeting_cannot_redirect_guarded_io() {
+        use std::{
+            io::Write,
+            os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+            sync::Arc,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let origin =
+            daat_locus_workspace::Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap();
+        let manager = daat_locus_workspace::Workspaces::new(
+            daat_locus_workspace::Store::open(&temp.path().join("store.sqlite3")).unwrap(),
+            temp.path().join("mounts"),
+        );
+        let location = manager
+            .select(origin.clone(), "feature", "default")
+            .unwrap();
+        let guard = GuardedDirectory::open(&location.directory, false).unwrap();
+        let point = fs::OpenOptions::new()
+            .access_mode(0x180)
+            .share_mode(7)
+            .custom_flags(0x0220_0000)
+            .open(&location.directory)
+            .unwrap();
+        let mut original = vec![0u8; 16 * 1024];
+        let mut count = 0;
+        assert_ne!(
+            unsafe {
+                DeviceIoControl(
+                    point.as_raw_handle().cast(),
+                    0x900a8,
+                    std::ptr::null(),
+                    0,
+                    original.as_mut_ptr().cast(),
+                    original.len() as u32,
+                    &mut count,
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        original.truncate(count as usize);
+        let target = format!("\\??\\{}", outside.display()).replace('/', "\\");
+        let target: Vec<u8> = target.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let length = u16::try_from(target.len()).unwrap();
+        let mut replacement = Vec::new();
+        replacement.extend(0xa0000003u32.to_le_bytes());
+        replacement.extend((12 + 2 * length).to_le_bytes());
+        replacement.extend(0u16.to_le_bytes());
+        for field in [0, length, length + 2, length] {
+            replacement.extend(field.to_le_bytes());
+        }
+        replacement.extend(&target);
+        replacement.extend(0u16.to_le_bytes());
+        replacement.extend(target);
+        replacement.extend(0u16.to_le_bytes());
+        let set = |data: &[u8]| {
+            let mut count = 0;
+            assert_ne!(
+                unsafe {
+                    DeviceIoControl(
+                        point.as_raw_handle().cast(),
+                        0x900a4,
+                        data.as_ptr().cast(),
+                        data.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut count,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+        };
+        set(&replacement);
+        guard
+            .create_new(OsStr::new("branch-only.txt"))
+            .unwrap()
+            .write_all(b"branch bytes")
+            .unwrap();
+        let child = guard.create_child(OsStr::new("child")).unwrap();
+        child
+            .create_new(OsStr::new("nested.txt"))
+            .unwrap()
+            .write_all(b"nested bytes")
+            .unwrap();
+        assert!(!outside.join("branch-only.txt").exists());
+        assert!(!outside.join("child").exists());
+        assert!(GuardedDirectory::open(&location.directory, false).is_err());
+        let branch = manager.store().open_branch(origin, "feature").unwrap();
+        assert_eq!(
+            branch.read("branch-only.txt", 0, 80).unwrap(),
+            b"branch bytes"
+        );
+        assert_eq!(
+            branch.read("child/nested.txt", 0, 80).unwrap(),
+            b"nested bytes"
+        );
+        set(&original);
+        drop((point, child, guard));
+        manager.close();
+    }
     #[cfg(windows)]
     #[test]
     fn guarded_parent_cannot_be_renamed_while_mutating() {

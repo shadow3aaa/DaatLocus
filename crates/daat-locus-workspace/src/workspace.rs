@@ -37,6 +37,9 @@ struct Node {
     children: BTreeMap<String, ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    #[cfg(windows)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reparse: Option<crate::reparse::ReparsePoint>,
 }
 
 impl Node {
@@ -47,6 +50,14 @@ impl Node {
         Ok(serde_json::from_slice(&get(connection, 1, id)?)?)
     }
     fn same_contents(&self, other: &Self) -> bool {
+        #[cfg(windows)]
+        if match (&self.reparse, &other.reparse) {
+            (Some(left), Some(right)) => !left.same_target(right),
+            (None, None) => false,
+            _ => true,
+        } {
+            return false;
+        }
         self.entry.kind == other.entry.kind
             && self.entry.mode == other.entry.mode
             && self.entry.size == other.entry.size
@@ -390,6 +401,8 @@ impl Workspace {
                 blocks: vec![],
                 children: BTreeMap::new(),
                 target: None,
+                #[cfg(windows)]
+                reparse: None,
             };
             Ok((
                 replace(connection, root, path, Some(node.save(connection)?))?,
@@ -410,12 +423,20 @@ impl Workspace {
                     inode: next_inode(connection)?,
                     kind: EntryKind::Symlink,
                     size: target.len() as u64,
-                    mode: 0o777,
+                    mode: if cfg!(windows) { 0o644 } else { 0o777 },
                     modified_ns: now_ns(),
                 },
                 blocks: vec![],
                 children: BTreeMap::new(),
                 target: Some(target.into()),
+                #[cfg(windows)]
+                reparse: Some(crate::reparse::ReparsePoint::symlink(
+                    target,
+                    lookup_optional(connection, root, target)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|node| node.entry.kind == EntryKind::Directory),
+                )?),
             };
             Ok((
                 replace(connection, root, path, Some(node.save(connection)?))?,
@@ -423,6 +444,87 @@ impl Workspace {
             ))
         })
     }
+    #[cfg(windows)]
+    pub(crate) fn reparse_point(&self, path: &str) -> Result<Option<crate::reparse::ReparsePoint>> {
+        let connection = self.store.connection.lock();
+        let (_, root) = roots(&connection, self.project, &self.name)?;
+        let node = lookup(&connection, &root, path)?;
+        if node.entry.kind != EntryKind::Symlink {
+            return Ok(None);
+        }
+        let point = match node.reparse {
+            Some(point) => point,
+            None => crate::reparse::ReparsePoint::symlink(
+                node.target
+                    .as_deref()
+                    .ok_or_else(|| Error::Corrupt("missing link target".into()))?,
+                false,
+            )?,
+        };
+        point.target()?;
+        Ok(Some(point))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_reparse_point(
+        &self,
+        path: &str,
+        point: Option<crate::reparse::ReparsePoint>,
+    ) -> Result<()> {
+        self.mutate(|connection, root| {
+            let mut node = lookup(connection, root, path)?;
+            if !node.children.is_empty() {
+                return Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty).into());
+            }
+            match point {
+                Some(point) => {
+                    if node.entry.kind == EntryKind::File && node.entry.size != 0 {
+                        return Err(Error::Invalid("a link requires an empty file".into()));
+                    }
+                    if let Some(previous) = &node.reparse
+                        && previous.tag()? != point.tag()?
+                    {
+                        return Err(Error::Invalid("cannot change a link's reparse tag".into()));
+                    }
+                    if node.entry.kind != EntryKind::Symlink
+                        && (node.entry.kind == EntryKind::Directory) != point.directory
+                    {
+                        return Err(Error::Invalid("link directory attribute mismatch".into()));
+                    }
+                    let target = point.target()?;
+                    node.entry.kind = EntryKind::Symlink;
+                    node.entry.mode = if node.entry.mode & 0o222 == 0 {
+                        0o444
+                    } else {
+                        0o644
+                    };
+                    node.entry.size = target.len() as u64;
+                    node.target = Some(target);
+                    node.reparse = Some(point);
+                }
+                None => {
+                    let point = node
+                        .reparse
+                        .take()
+                        .ok_or_else(|| Error::Invalid("not a reparse point".into()))?;
+                    node.entry.kind = if point.directory {
+                        EntryKind::Directory
+                    } else {
+                        EntryKind::File
+                    };
+                    node.entry.size = 0;
+                    node.target = None;
+                }
+            }
+            node.blocks.clear();
+            node.entry.modified_ns = now_ns();
+            Ok((
+                replace(connection, root, path, Some(node.save(connection)?))?,
+                (),
+            ))
+        })
+    }
+
     pub fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
         if bytes.is_empty() {
             return Ok(0);
@@ -692,6 +794,10 @@ pub(crate) struct DetachedFile {
 
 #[cfg(any(windows, target_os = "linux"))]
 impl DetachedFile {
+    #[cfg(windows)]
+    pub(crate) fn reparse_point(&self) -> Option<crate::reparse::ReparsePoint> {
+        self.node.reparse.clone()
+    }
     pub(crate) fn entry(&self) -> Entry {
         self.node.entry.clone()
     }
@@ -857,6 +963,8 @@ fn snapshot(
         blocks: vec![],
         children: BTreeMap::new(),
         target: None,
+        #[cfg(windows)]
+        reparse: None,
     };
     match kind {
         EntryKind::Directory => {
@@ -877,7 +985,15 @@ fn snapshot(
             })?;
         }
         EntryKind::Symlink => {
+            #[cfg(not(windows))]
             let target = origin.read_link(path)?;
+            #[cfg(windows)]
+            let target = {
+                let point = origin.read_reparse(path)?;
+                let target = point.target()?;
+                node.reparse = Some(point);
+                target
+            };
             node.entry.size = target.len() as u64;
             node.target = Some(target);
         }
@@ -1120,7 +1236,19 @@ fn apply(
                 EntryKind::Directory => origin.set_mode(path, node.entry.mode),
                 EntryKind::Symlink => {
                     if expected.is_some_and(|node| node.entry.kind == EntryKind::Symlink) {
+                        #[cfg(not(windows))]
                         origin.remove(path, false)?;
+                        #[cfg(windows)]
+                        origin.remove(
+                            path,
+                            expected
+                                .and_then(|node| node.reparse.as_ref())
+                                .is_some_and(|point| point.directory),
+                        )?;
+                    }
+                    #[cfg(windows)]
+                    if let Some(point) = &node.reparse {
+                        return origin.write_reparse(path, point);
                     }
                     origin.symlink(
                         path,

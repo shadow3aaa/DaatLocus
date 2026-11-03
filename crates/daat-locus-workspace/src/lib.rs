@@ -6,6 +6,8 @@
 mod directory;
 pub mod native;
 mod projections;
+#[cfg(windows)]
+mod reparse;
 mod store;
 mod workspace;
 

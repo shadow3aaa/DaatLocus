@@ -705,6 +705,8 @@
     "open_sidebar": "Open sidebar"
   },
   "settings_page": {
+    "third_party_notices": "Third-party notices",
+    "winfsp_notice": "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos",
     "general": "General",
     "search_settings": "Search settings",
     "personal": "Personal",

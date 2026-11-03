@@ -17,11 +17,15 @@
 
 服务的原生挂载探测通过后，非 Core Actor 会安装可选的 Workspace App。`default` 直接使用原目录；命名分支在设备配置目录中共享不可变内容，在显式合并前保持隔离。多个 Actor 选择相同原目录和分支名，即共享同一工作区。创建另一个 Actor 时，可将返回的执行目录作为它的 workspace。选择工作区不会授予文件权限。
 
-- Windows 目前不提供 Workspace App：Dokan 2 适配层无法跟随符号链接，即使已安装签名驱动，也不能通过必需的兼容性探测。普通执行目录继续可用。显式启用的原生测试保留适配层验证，并确认不会向 Actor 注册该 App。这些测试需要与架构匹配的 Dokan 2 上游发行版（2.0.6 或更新的 2.x 版本），通过管理员授权安装；服务仍以普通 OS 用户身份运行。Daat Locus 不导入文件系统驱动证书，也不启用测试签名。
+- Windows 使用与服务架构匹配的 WinFsp 2.1 或更新的 2.x 版本。通过管理员授权安装官方签名驱动，服务仍以普通 OS 用户身份运行。文件符号链接、目录符号链接和 junction 会持久化保留类型及目标；指向项目内部的绝对路径链接在挂载时重定位到分支内，发布时再指回 default。项目外部链接保持原生目标语义，并继续受设备沙箱约束。发布符号链接到原生 NTFS 时，需要 OS 用户通常的符号链接创建权限或开发者模式。目前不支持硬链接和备用数据流。Daat Locus 不导入文件系统驱动证书，也不启用测试签名。[WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp)。
+  启动服务前，在管理员 PowerShell 中一次性启用 WinFsp 的驱动侧 Mount Manager 模式，使普通用户服务能够使用目录挂载和 Win32 规范路径：
+  ```powershell
+  reg.exe add HKLM\SOFTWARE\WinFsp /v MountUseMountmgrFromFSD /t REG_DWORD /d 1 /f /reg:32
+  ```
 - Linux 需要可访问的 `/dev/fuse`、可用的 `fusermount3` 或 `fusermount`，以及挂载到 `/sys/fs/fuse/connections` 的 fusectl，并允许挂载用户访问自己连接的 abort 控制。通过发行版常规管理员流程安装 FUSE 软件包。Workspace 挂载不请求 `allow_other`。
 - macOS 和 Android 暂无 Workspace 投影后端，不暴露 Workspace App；普通执行目录继续可用。
 
-修改原生文件系统依赖后重启服务。引擎测试运行 `cargo test -p daat-locus-workspace --locked`。在具备依赖的机器上显式运行 `cargo test -p daat-locus-workspace --locked --test native_mounts -- --ignored`，缺少挂载条件会使这些测试失败。Actor/App 契约测试使用 `cargo test --lib workspace_tests`，并遵循常规后端构建设置。引擎或 App 测试通过不能证明原生挂载可用。
+修改原生文件系统依赖后重启服务。引擎测试运行 `cargo test -p daat-locus-workspace --locked`。在具备依赖的机器上显式运行 `cargo test -p daat-locus-workspace --locked --test native_mounts -- --ignored`，缺少挂载条件会使这些测试失败。Windows 原生测试还需要 Node.js、pnpm 10 和 Rust，并验证离线本地依赖安装、带 junction 路径依赖的 Cargo 构建、内存映射、锁和目录删除。Actor/App 契约测试使用 `cargo test --lib workspace_tests`，并遵循常规后端构建设置；显式启用的 `workspace_native_` 测试还验证真实挂载和挂载点被替换后的拒绝行为。引擎或 App 测试通过不能证明原生挂载可用。
 
 ## 构建与运行
 

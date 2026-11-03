@@ -1,6 +1,6 @@
 # License and attribution
 
-Daat Locus is licensed under [Apache-2.0](../LICENSE). Preserve [NOTICE](../NOTICE) when redistributing the adapted OpenAI Codex Seatbelt policy resources or Dokan ABI declarations.
+Daat Locus is licensed under [Apache-2.0](../LICENSE). Preserve [NOTICE](../NOTICE) when redistributing the adapted OpenAI Codex Seatbelt policy resources and the optional WinFsp integration.
 
 ## Vendored code
 
@@ -9,7 +9,7 @@ Daat Locus is licensed under [Apache-2.0](../LICENSE). Preserve [NOTICE](../NOTI
 | Wry native WebView fork | Based on Wry 0.57.0; [upstream README](../vendor/wry/README.md), [Apache license](../vendor/wry/LICENSE-APACHE), [MIT license](../vendor/wry/LICENSE-MIT) |
 | Embedded ripgrep CLI | Based on ripgrep 15.2.0; [source and adaptation notes](../crates/daat-locus-uutils/vendor/ripgrep/README.md), with COPYING, LICENSE-MIT and UNLICENSE in that directory |
 | Windows driver dependencies | Preserve `LICENSE.microsoft` with the driver package built by xtask |
-| Dokan 2 ABI declarations | Adapted from dokan-sys 0.3.1+dokan206; preserve the [MIT license](../crates/daat-locus-workspace/third-party/dokan-rust-LICENSE) |
+| Optional Windows filesystem dependency | [WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp); GPLv3 with its [FLOSS linking and installer distribution exception](../crates/daat-locus-workspace/third-party/WinFsp-LICENSE). Preserve its attribution in the UI and user-facing documentation. |
 
 The Wry fork includes Daat Locus's Windows `native-composition` support. Keep its upstream license files with the fork when updating or distributing it.
 

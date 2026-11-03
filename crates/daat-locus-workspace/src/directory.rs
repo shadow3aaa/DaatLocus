@@ -179,6 +179,7 @@ impl Directory {
         Ok(length)
     }
 
+    #[cfg(not(windows))]
     pub(crate) fn read_link(&self, path: &str) -> Result<String> {
         self.access(path, Access::Read)?;
         let (directory, name) = self.parent(path)?;
@@ -187,6 +188,92 @@ impl Directory {
             .into_os_string()
             .into_string()
             .map_err(|_| Error::Invalid("workspace symlink targets must be Unicode".into()))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn read_reparse(&self, path: &str) -> Result<crate::reparse::ReparsePoint> {
+        use cap_std::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::io::AsRawHandle;
+        self.access(path, Access::Read)?;
+        let (directory, name) = self.parent(path)?;
+        let mut options = OpenOptions::new();
+        options
+            .access_mode(0x80)
+            .share_mode(1)
+            .custom_flags(0x0220_0000)
+            .follow(FollowSymlinks::No);
+        let file = directory.open_with(name, &options)?;
+        let mut data = vec![0u8; 16 * 1024];
+        let mut count = 0;
+        if unsafe {
+            winapi::um::ioapiset::DeviceIoControl(
+                file.as_raw_handle().cast(),
+                0x900a8,
+                std::ptr::null_mut(),
+                0,
+                data.as_mut_ptr().cast(),
+                data.len() as u32,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        data.truncate(count as usize);
+        crate::reparse::ReparsePoint::from_bytes(
+            file.metadata()?.file_attributes() & 0x10 != 0,
+            data,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn write_reparse(
+        &self,
+        path: &str,
+        point: &crate::reparse::ReparsePoint,
+    ) -> Result<()> {
+        use cap_std::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        self.access(path, Access::Write)?;
+        let (directory, name) = self.parent(path)?;
+        let target = point.target()?;
+        if point.tag()? == crate::reparse::SYMLINK {
+            let target = target
+                .strip_prefix("\\??\\")
+                .map_or_else(|| target.clone(), |suffix| format!("\\\\?\\{suffix}"));
+            if point.directory {
+                directory.symlink_dir(target, name)?;
+            } else {
+                directory.symlink_file(target, name)?;
+            }
+        } else {
+            directory.create_dir(&name)?;
+            let mut options = OpenOptions::new();
+            options
+                .access_mode(0x4000_0000)
+                .share_mode(1)
+                .custom_flags(0x0220_0000)
+                .follow(FollowSymlinks::No);
+            let file = directory.open_with(name, &options)?;
+            let mut count = 0;
+            if unsafe {
+                winapi::um::ioapiset::DeviceIoControl(
+                    file.as_raw_handle().cast(),
+                    0x900a4,
+                    point.data.as_ptr().cast_mut().cast(),
+                    point.data.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut count,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+        Ok(())
     }
 
     /// Use a held directory capability for all actual I/O. Checking a canonical
@@ -307,6 +394,11 @@ impl Directory {
     pub(crate) fn remove(&self, path: &str, directory: bool) -> Result<()> {
         self.access(path, Access::Write)?;
         let (parent, name) = self.parent(path)?;
+        #[cfg(windows)]
+        let directory = {
+            use cap_std::fs::MetadataExt;
+            directory || parent.symlink_metadata(&name)?.file_attributes() & 0x10 != 0
+        };
         if directory {
             parent.remove_dir(name)?;
         } else {

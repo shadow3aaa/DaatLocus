@@ -1,12 +1,10 @@
-//! Uses the installed, upstream-signed Dokan 2 driver. No driver installation,
-//! certificate import or privilege escalation happens in this runtime path.
+//! WinFsp's upstream-signed driver supplies Windows filesystem semantics.
 mod ffi;
-
 use super::{
     Mount,
-    view::{DELETE, READ, View, WRITE},
+    view::{DELETE, READ, SHARE_ALL, View, WRITE},
 };
-use crate::{Entry, EntryKind, Error, Result, Workspace};
+use crate::{Entry, EntryKind, Error, Result, Workspace, reparse::ReparsePoint};
 use ffi::*;
 use libloading::os::windows::Library;
 use parking_lot::Mutex;
@@ -26,110 +24,925 @@ use std::{
     time::{Duration, Instant},
 };
 use winapi::{
-    shared::ntstatus::*,
-    shared::{
-        minwindef::{BOOL, DWORD, FILETIME, LPDWORD},
-        ntdef::{LONGLONG, LPCWSTR, LPWSTR, NTSTATUS},
-    },
+    shared::{minwindef::DWORD, ntstatus::*},
     um::{
         fileapi::{
             BY_HANDLE_FILE_INFORMATION, GetDiskFreeSpaceExW, GetFileInformationByHandle,
             GetFinalPathNameByHandleW,
         },
-        minwinbase::WIN32_FIND_DATAW,
-        sysinfoapi::GetSystemDirectoryW,
         winbase::FILE_FLAG_BACKUP_SEMANTICS,
         winnt::*,
+        winreg::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6432KEY, RegGetValueW},
     },
 };
-
-type Create = unsafe extern "system" fn(
-    *mut DOKAN_OPTIONS,
-    *mut DOKAN_OPERATIONS,
-    *mut *mut std::ffi::c_void,
-) -> i32;
-type Close = unsafe extern "system" fn(*mut std::ffi::c_void);
-type Version = unsafe extern "system" fn() -> u32;
-
 struct Api {
     _library: Library,
-    create: Create,
-    close: Close,
-    library_version: Version,
-    driver_version: Version,
+    preflight: unsafe extern "C" fn(Name, Name) -> Status,
+    create: unsafe extern "C" fn(Name, *const VolumeParams, *const Interface, *mut Fs) -> Status,
+    set_mount: unsafe extern "C" fn(Fs, Name, Buffer) -> Status,
+    start: unsafe extern "C" fn(Fs, u32) -> Status,
+    stop: unsafe extern "C" fn(Fs),
+    delete: unsafe extern "C" fn(Fs),
+    add_directory: unsafe extern "C" fn(*const DirInfo, Buffer, u32, *mut u32) -> u8,
+    find_reparse: unsafe extern "C" fn(Fs, GetReparseByName, Context, Name, *mut u32) -> u8,
+    resolve_reparse: unsafe extern "C" fn(
+        Fs,
+        GetReparseByName,
+        Context,
+        Name,
+        u32,
+        u8,
+        Buffer,
+        Buffer,
+        *mut usize,
+    ) -> Status,
 }
-
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain([0]).collect()
+}
 fn api() -> Result<Option<Arc<Api>>> {
-    // Dokan's process initialization is shared by every mount. Keep its DLL
-    // resident until process exit so no dispatcher can outlive the function table.
     static API: OnceLock<Mutex<Option<Arc<Api>>>> = OnceLock::new();
     let mut cached = API.get_or_init(|| Mutex::new(None)).lock();
-    if let Some(api) = cached.as_ref() {
+    if let Some(api) = &*cached {
         return Ok(Some(api.clone()));
     }
-    let mut system = vec![0u16; 32_768];
-    let length = unsafe { GetSystemDirectoryW(system.as_mut_ptr(), system.len() as u32) } as usize;
-    if length == 0 || length >= system.len() {
-        return Err(io::Error::last_os_error().into());
+    let key = wide(r"SOFTWARE\WinFsp");
+    let value = wide("InstallDir");
+    let mut path = vec![0u16; 32_768];
+    let mut length = (path.len() * 2) as u32;
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY,
+            ptr::null_mut(),
+            path.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result == 2 || result == 3 {
+        return Ok(None);
     }
-    let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&system[..length]))
-        .join("dokan2.dll");
-    match std::fs::metadata(&path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    if result != 0 {
+        return Err(io::Error::from_raw_os_error(result).into());
     }
-    let library = unsafe { Library::load_with_flags(&path, 0x800) }.map_err(|error| {
-        Error::Unsupported(format!("cannot load installed Dokan library: {error}"))
+    let count = (length as usize / 2).min(path.len());
+    let count = path[..count]
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(count);
+    let root = PathBuf::from(std::ffi::OsString::from_wide(&path[..count]));
+    if !root.is_absolute() {
+        return Err(Error::Unsupported(
+            "WinFsp installation path is not absolute".into(),
+        ));
+    }
+    #[cfg(target_arch = "x86_64")]
+    let name = "winfsp-x64.dll";
+    #[cfg(target_arch = "aarch64")]
+    let name = "winfsp-a64.dll";
+    #[cfg(target_arch = "x86")]
+    let name = "winfsp-x86.dll";
+    let library = unsafe { Library::load_with_flags(root.join("bin").join(name), 0x100 | 0x800) }
+        .map_err(|error| {
+        Error::Unsupported(format!("cannot load installed WinFsp library: {error}"))
     })?;
-    unsafe {
-        let init = *library
-            .get::<unsafe extern "system" fn()>(b"DokanInit\0")
-            .map_err(symbol_error)?;
-        let api = Arc::new(Api {
-            create: *library
-                .get(b"DokanCreateFileSystem\0")
+    let api = unsafe {
+        Arc::new(Api {
+            preflight: *library
+                .get(b"FspFileSystemPreflight\0")
                 .map_err(symbol_error)?,
-            close: *library.get(b"DokanCloseHandle\0").map_err(symbol_error)?,
-            library_version: *library.get(b"DokanVersion\0").map_err(symbol_error)?,
-            driver_version: *library.get(b"DokanDriverVersion\0").map_err(symbol_error)?,
+            create: *library
+                .get(b"FspFileSystemCreate\0")
+                .map_err(symbol_error)?,
+            set_mount: *library
+                .get(b"FspFileSystemSetMountPointEx\0")
+                .map_err(symbol_error)?,
+            start: *library
+                .get(b"FspFileSystemStartDispatcher\0")
+                .map_err(symbol_error)?,
+            stop: *library
+                .get(b"FspFileSystemStopDispatcher\0")
+                .map_err(symbol_error)?,
+            delete: *library
+                .get(b"FspFileSystemDelete\0")
+                .map_err(symbol_error)?,
+            add_directory: *library
+                .get(b"FspFileSystemAddDirInfo\0")
+                .map_err(symbol_error)?,
+            find_reparse: *library
+                .get(b"FspFileSystemFindReparsePoint\0")
+                .map_err(symbol_error)?,
+            resolve_reparse: *library
+                .get(b"FspFileSystemResolveReparsePoints\0")
+                .map_err(symbol_error)?,
             _library: library,
-        });
-        init();
-        *cached = Some(api.clone());
-        Ok(Some(api))
-    }
+        })
+    };
+    *cached = Some(api.clone());
+    Ok(Some(api))
 }
-
 fn symbol_error(error: libloading::Error) -> Error {
-    Error::Unsupported(format!("Dokan 2 API: {error}"))
+    Error::Unsupported(format!("WinFsp API: {error}"))
 }
-
 pub(super) fn available() -> Result<bool> {
     let Some(api) = api()? else {
         return Ok(false);
     };
-    let version = unsafe { (api.library_version)() };
-    // The DLL's public ABI (e.g. 231) and kernel protocol (e.g. 0x190)
-    // have different version schemes. The mount handshake verifies that the
-    // installed DLL and driver agree; the runtime probe verifies actual I/O.
-    Ok((206..300).contains(&version) && unsafe { (api.driver_version)() } != 0)
+    Ok(unsafe { (api.preflight)(wide("WinFsp.Disk").as_mut_ptr(), ptr::null_mut()) } >= 0)
 }
-
 struct Handler {
+    api: Arc<Api>,
     view: View,
     security: Vec<u8>,
-    serial: u32,
+    origin: PathBuf,
+    directory: PathBuf,
 }
-
 pub(super) struct Session {
     api: Arc<Api>,
-    handle: usize,
-    _point: Vec<u16>,
-    _options: Box<DOKAN_OPTIONS>,
-    _operations: Box<DOKAN_OPERATIONS>,
+    fs: usize,
+    _operations: Box<Interface>,
     _handler: Box<Handler>,
     registration: Option<(PathBuf, Vec<u16>)>,
+}
+// Dispatcher callbacks finish before their stable handler and function table drop.
+unsafe impl Send for Session {}
+unsafe impl Sync for Session {}
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some((path, identity)) = &self.registration {
+            let mut mounts = mounted_directories().lock();
+            if mounts.get(path) == Some(identity) {
+                mounts.remove(path);
+            }
+        }
+        unsafe {
+            (self.api.stop)(self.fs as Fs);
+            (self.api.delete)(self.fs as Fs);
+        }
+    }
+}
+pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
+    let api = api()?.ok_or_else(|| Error::Unsupported("WinFsp is not installed".into()))?;
+    let mut identity = Sha256::new();
+    for unit in workspace.backing_path().as_os_str().encode_wide() {
+        identity.update(unit.to_le_bytes());
+    }
+    identity.update(workspace.key().as_bytes());
+    let serial = u32::from_le_bytes(identity.finalize()[..4].try_into().expect("SHA256 prefix"));
+    let origin = workspace.origin().to_owned();
+    let handler = Box::new(Handler {
+        api: api.clone(),
+        view: View::new(workspace)?,
+        security: owner_security()?,
+        origin,
+        directory: path.to_owned(),
+    });
+    let mut params: VolumeParams = unsafe { mem::zeroed() };
+    params.sector_size = 512;
+    params.sectors_per_allocation_unit = 8;
+    params.max_component_length = 255;
+    params.serial = serial;
+    // Case-sensitive names, owner ACLs, reparse points, per-open contexts.
+    // The kernel enforces sharing, byte locks and reparse write access.
+    params.flags = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | (1 << 16);
+    for (output, unit) in params.name.iter_mut().zip("DaatWorkspace".encode_utf16()) {
+        *output = unit;
+    }
+    let mut operations: Box<Interface> = Box::new(unsafe { mem::zeroed() });
+    operations.get_volume_info = Some(get_volume_info);
+    operations.get_security_by_name = Some(get_security_by_name);
+    operations.create = Some(create);
+    operations.open = Some(open);
+    operations.overwrite = Some(overwrite);
+    operations.cleanup = Some(cleanup);
+    operations.close = Some(close);
+    operations.read = Some(read);
+    operations.write = Some(write);
+    operations.flush = Some(flush);
+    operations.get_file_info = Some(get_file_info);
+    operations.set_basic_info = Some(set_basic_info);
+    operations.set_file_size = Some(set_file_size);
+    operations.can_delete = Some(can_delete);
+    operations.rename = Some(rename);
+    operations.get_security = Some(get_security);
+    operations.set_security = Some(set_security);
+    operations.read_directory = Some(read_directory);
+    operations.resolve_reparse_points = Some(resolve_reparse_points);
+    operations.get_reparse_point = Some(get_reparse_point);
+    operations.set_reparse_point = Some(set_reparse_point);
+    operations.delete_reparse_point = Some(delete_reparse_point);
+    let mut fs = ptr::null_mut();
+    check(
+        unsafe {
+            (api.create)(
+                wide("WinFsp.Disk").as_mut_ptr(),
+                &params,
+                &*operations,
+                &mut fs,
+            )
+        },
+        "create filesystem",
+    )?;
+    unsafe {
+        (*fs).user_context = (&*handler as *const Handler).cast_mut().cast();
+    }
+    let mut session = Session {
+        api,
+        fs: fs as usize,
+        _operations: operations,
+        _handler: handler,
+        registration: None,
+    };
+    check(unsafe { (session.api.start)(fs, 0) }, "start dispatcher")?;
+    // WinFsp owns and deletes its directory mount point. Workspaces has verified
+    // this infrastructure directory is empty before handing it to this backend.
+    std::fs::remove_dir(path)?;
+    // Preserve the canonical \\?\ prefix: WinFsp uses it to register a directory
+    // with Mount Manager, which makes normal Win32 canonicalization work.
+    let mut point: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+    check(
+        unsafe {
+            (session.api.set_mount)(
+                fs,
+                point.as_mut_ptr(),
+                session._handler.security.as_ptr().cast_mut().cast(),
+            )
+        },
+        "mount directory",
+    )?;
+    let directory = wait_ready(path, serial)?;
+    let identity = device_path(&directory)?;
+    let path = dunce::simplified(path).to_owned();
+    mounted_directories()
+        .lock()
+        .insert(path.clone(), identity.clone());
+    session.registration = Some((path, identity));
+    Ok(Mount { _session: session })
+}
+fn check(status: Status, operation: &str) -> Result<()> {
+    if status >= 0 {
+        Ok(())
+    } else {
+        Err(Error::Unsupported(format!(
+            "WinFsp {operation} failed ({status:#010x})"
+        )))
+    }
+}
+fn status(error: Error) -> Status {
+    match error {
+        Error::Io(error) => match error.kind() {
+            io::ErrorKind::NotFound => STATUS_OBJECT_NAME_NOT_FOUND,
+            io::ErrorKind::AlreadyExists => STATUS_OBJECT_NAME_COLLISION,
+            io::ErrorKind::PermissionDenied => STATUS_ACCESS_DENIED,
+            io::ErrorKind::WouldBlock => STATUS_SHARING_VIOLATION,
+            io::ErrorKind::NotADirectory => STATUS_NOT_A_DIRECTORY,
+            io::ErrorKind::DirectoryNotEmpty => STATUS_DIRECTORY_NOT_EMPTY,
+            _ => STATUS_IO_DEVICE_ERROR,
+        },
+        Error::Invalid(_) => winapi::shared::ntstatus::STATUS_INVALID_PARAMETER,
+        Error::Authorization(_) => STATUS_ACCESS_DENIED,
+        Error::Conflict(_) => STATUS_FILE_LOCK_CONFLICT,
+        Error::Unsupported(_) => STATUS_NOT_SUPPORTED,
+        _ => STATUS_FILE_CORRUPT_ERROR,
+    }
+}
+fn call(fs: Fs, operation: impl FnOnce(&Handler) -> Result<Status>) -> Status {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let handler = unsafe {
+            fs.as_ref()
+                .and_then(|fs| fs.user_context.cast::<Handler>().as_ref())
+        }
+        .ok_or_else(|| Error::Invalid("missing native handler".into()))?;
+        operation(handler)
+    })) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => status(error),
+        Err(_) => STATUS_INTERNAL_ERROR,
+    }
+}
+fn text(pointer: Name) -> Result<String> {
+    if pointer.is_null() {
+        return Err(Error::Invalid("null native string".into()));
+    }
+    let mut length = 0;
+    while length < 32_768 && unsafe { *pointer.add(length) } != 0 {
+        length += 1;
+    }
+    if length == 32_768 {
+        return Err(Error::Invalid("unterminated native string".into()));
+    }
+    String::from_utf16(unsafe { std::slice::from_raw_parts(pointer, length) })
+        .map_err(|_| Error::Invalid("native path is not Unicode".into()))
+}
+fn path(pointer: Name) -> Result<String> {
+    let path = text(pointer)?.trim_start_matches('\\').replace('\\', "/");
+    if path.contains(':') {
+        return Err(Error::Unsupported("alternate data streams".into()));
+    }
+    crate::directory::relative_path(&path)?;
+    Ok(path)
+}
+fn handle(context: Context) -> u64 {
+    context as usize as u64
+}
+fn attributes(handler: &Handler, entry: &Entry) -> Result<(u32, u32)> {
+    let mut attributes = if entry.mode & 0o222 == 0 {
+        FILE_ATTRIBUTE_READONLY
+    } else {
+        0
+    };
+    let mut tag = 0;
+    if entry.kind == EntryKind::Directory {
+        attributes |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+    if let Some(point) = handler.view.reparse_point(entry.inode)? {
+        attributes |= FILE_ATTRIBUTE_REPARSE_POINT;
+        if point.directory {
+            attributes |= FILE_ATTRIBUTE_DIRECTORY;
+        }
+        tag = point.tag()?;
+    }
+    Ok((
+        if attributes == 0 {
+            FILE_ATTRIBUTE_NORMAL
+        } else {
+            attributes
+        },
+        tag,
+    ))
+}
+fn file_info(handler: &Handler, inode: u64, output: *mut FileInfo) -> Result<()> {
+    if output.is_null() {
+        return Err(Error::Invalid("missing file information".into()));
+    }
+    let entry = handler.view.entry(inode)?;
+    let (attributes, tag) = if entry.kind == EntryKind::Symlink {
+        attributes(handler, &entry)?
+    } else {
+        (
+            if entry.kind == EntryKind::Directory {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else if entry.mode & 0o222 == 0 {
+                FILE_ATTRIBUTE_READONLY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            },
+            0,
+        )
+    };
+    let time = (116_444_736_000_000_000i128 + i128::from(entry.modified_ns) / 100).max(0) as u64;
+    let size = if entry.kind == EntryKind::File {
+        entry.size
+    } else {
+        0
+    };
+    unsafe {
+        *output = FileInfo {
+            attributes,
+            reparse_tag: tag,
+            size,
+            allocation_size: size.saturating_add(4095) / 4096 * 4096,
+            creation_time: time,
+            access_time: time,
+            write_time: time,
+            change_time: time,
+            inode,
+            ..FileInfo::default()
+        };
+    }
+    Ok(())
+}
+fn copy_buffer(bytes: &[u8], output: Buffer, length: *mut usize, short: Status) -> Result<Status> {
+    let size =
+        unsafe { length.as_mut() }.ok_or_else(|| Error::Invalid("missing buffer size".into()))?;
+    let available = *size;
+    *size = bytes.len();
+    if available < bytes.len() {
+        return Ok(short);
+    }
+    if !output.is_null() {
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), output.cast(), bytes.len());
+        }
+    }
+    Ok(STATUS_SUCCESS)
+}
+extern "C" fn get_volume_info(fs: Fs, output: *mut VolumeInfo) -> Status {
+    call(fs, |handler| {
+        let output = unsafe { output.as_mut() }
+            .ok_or_else(|| Error::Invalid("missing volume information".into()))?;
+        let mut available: ULARGE_INTEGER = unsafe { mem::zeroed() };
+        let mut total: ULARGE_INTEGER = unsafe { mem::zeroed() };
+        let mut free: ULARGE_INTEGER = unsafe { mem::zeroed() };
+        let source: Vec<_> = handler
+            .view
+            .backing_path()
+            .parent()
+            .unwrap_or(Path::new("."))
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect();
+        if unsafe { GetDiskFreeSpaceExW(source.as_ptr(), &mut available, &mut total, &mut free) }
+            == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        output.total_size = unsafe { *total.QuadPart() };
+        output.free_size = unsafe { *available.QuadPart() };
+        let label: Vec<_> = "Workspace".encode_utf16().collect();
+        output.label_length = (label.len() * 2) as u16;
+        output.label[..label.len()].copy_from_slice(&label);
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn get_security_by_name(
+    fs: Fs,
+    name: Name,
+    attrs: *mut u32,
+    output: Buffer,
+    length: *mut usize,
+) -> Status {
+    call(fs, |handler| {
+        let path = path(name)?;
+        let entry = match handler.view.lookup(&path) {
+            Ok(entry) => entry,
+            Err(error) => {
+                if unsafe {
+                    (handler.api.find_reparse)(
+                        fs,
+                        get_reparse_by_name,
+                        ptr::null_mut(),
+                        name,
+                        attrs,
+                    )
+                } != 0
+                {
+                    return Ok(STATUS_REPARSE);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(attrs) = unsafe { attrs.as_mut() } {
+            *attrs = attributes(handler, &entry)?.0;
+        }
+        if length.is_null() {
+            Ok(STATUS_SUCCESS)
+        } else {
+            copy_buffer(&handler.security, output, length, STATUS_BUFFER_OVERFLOW)
+        }
+    })
+}
+fn open_file(
+    handler: &Handler,
+    path: &str,
+    access: u32,
+    context: *mut Context,
+    info: *mut FileInfo,
+) -> Result<Status> {
+    if context.is_null() {
+        return Err(Error::Invalid("missing file context".into()));
+    }
+    let mut rights = 0;
+    if access & (GENERIC_READ | GENERIC_ALL | FILE_READ_DATA) != 0 {
+        rights |= READ;
+    }
+    if access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA) != 0 {
+        rights |= WRITE;
+    }
+    if access & (GENERIC_ALL | winapi::um::winnt::DELETE) != 0 {
+        rights |= DELETE;
+    }
+    let id = handler.view.open(
+        path,
+        rights,
+        SHARE_ALL,
+        access & FILE_APPEND_DATA != 0 && access & FILE_WRITE_DATA == 0,
+    )?;
+    if let Err(error) = file_info(handler, handler.view.handle_inode(id)?, info) {
+        handler.view.close(id);
+        return Err(error);
+    }
+    unsafe {
+        *context = id as usize as Context;
+    }
+    Ok(STATUS_SUCCESS)
+}
+extern "C" fn create(
+    fs: Fs,
+    name: Name,
+    options: u32,
+    access: u32,
+    attrs: u32,
+    _: Buffer,
+    _: u64,
+    context: *mut Context,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        let path = path(name)?;
+        let directory = options & 1 != 0;
+        handler.view.create(
+            &path,
+            directory,
+            if attrs & FILE_ATTRIBUTE_READONLY != 0 {
+                0o444
+            } else if directory {
+                0o755
+            } else {
+                0o644
+            },
+        )?;
+        open_file(handler, &path, access, context, info)
+    })
+}
+extern "C" fn open(
+    fs: Fs,
+    name: Name,
+    _: u32,
+    access: u32,
+    context: *mut Context,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        open_file(handler, &path(name)?, access, context, info)
+    })
+}
+extern "C" fn overwrite(
+    fs: Fs,
+    context: Context,
+    attrs: u32,
+    replace: u8,
+    _: u64,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        let inode = handler.view.handle_inode(handle(context))?;
+        handler.view.truncate(inode, 0)?;
+        if replace != 0 {
+            handler.view.set_metadata(
+                inode,
+                Some(if attrs & FILE_ATTRIBUTE_READONLY != 0 {
+                    0o444
+                } else {
+                    0o644
+                }),
+                None,
+            )?;
+        }
+        file_info(handler, inode, info)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn cleanup(fs: Fs, context: Context, _: Name, flags: u32) {
+    call(fs, |handler| {
+        if flags & 1 != 0 {
+            let id = handle(context);
+            let path = handler.view.handle_path(id)?;
+            let entry = handler.view.entry(handler.view.handle_inode(id)?)?;
+            // Delete disposition belongs to the kernel file object. Its final
+            // cleanup may use an open context without the original DELETE bit.
+            handler
+                .view
+                .remove(&path, entry.kind == EntryKind::Directory, None)?;
+        }
+        Ok(STATUS_SUCCESS)
+    });
+}
+extern "C" fn close(fs: Fs, context: Context) {
+    call(fs, |handler| {
+        handler.view.close(handle(context));
+        Ok(STATUS_SUCCESS)
+    });
+}
+extern "C" fn read(
+    fs: Fs,
+    context: Context,
+    buffer: Buffer,
+    offset: u64,
+    length: u32,
+    transferred: *mut u32,
+) -> Status {
+    call(fs, |handler| {
+        if transferred.is_null() || (length > 0 && buffer.is_null()) {
+            return Err(Error::Invalid("missing read buffer".into()));
+        }
+        let bytes = handler
+            .view
+            .read(handle(context), offset, length as usize)?;
+        unsafe {
+            if !bytes.is_empty() {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len());
+            }
+            *transferred = bytes.len() as u32;
+        }
+        Ok(if bytes.is_empty() && length > 0 {
+            STATUS_END_OF_FILE
+        } else {
+            STATUS_SUCCESS
+        })
+    })
+}
+extern "C" fn write(
+    fs: Fs,
+    context: Context,
+    buffer: Buffer,
+    offset: u64,
+    length: u32,
+    append: u8,
+    constrained: u8,
+    transferred: *mut u32,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        if transferred.is_null() || (length > 0 && buffer.is_null()) {
+            return Err(Error::Invalid("missing write buffer".into()));
+        }
+        let bytes = if length == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), length as usize) }
+        };
+        let id = handle(context);
+        let count = if constrained != 0 {
+            handler.view.write_paging(id, offset, bytes)?
+        } else {
+            handler.view.write(id, offset, bytes, append != 0)?
+        };
+        unsafe {
+            *transferred = count as u32;
+        }
+        file_info(handler, handler.view.handle_inode(id)?, info)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn flush(fs: Fs, context: Context, info: *mut FileInfo) -> Status {
+    call(fs, |handler| {
+        if !context.is_null() {
+            file_info(handler, handler.view.handle_inode(handle(context))?, info)?;
+        }
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn get_file_info(fs: Fs, context: Context, info: *mut FileInfo) -> Status {
+    call(fs, |handler| {
+        file_info(handler, handler.view.handle_inode(handle(context))?, info)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn set_basic_info(
+    fs: Fs,
+    context: Context,
+    attrs: u32,
+    _: u64,
+    _: u64,
+    written: u64,
+    _: u64,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        let inode = handler.view.handle_inode(handle(context))?;
+        let entry = handler.view.entry(inode)?;
+        let mode = (attrs != u32::MAX).then_some({
+            if attrs & FILE_ATTRIBUTE_READONLY != 0 {
+                entry.mode & !0o222
+            } else {
+                entry.mode | 0o200
+            }
+        });
+        let time = (written != 0).then(|| {
+            ((i128::from(written) - 116_444_736_000_000_000) * 100)
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+        });
+        handler.view.set_metadata(inode, mode, time)?;
+        file_info(handler, inode, info)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn set_file_size(
+    fs: Fs,
+    context: Context,
+    size: u64,
+    allocation: u8,
+    info: *mut FileInfo,
+) -> Status {
+    call(fs, |handler| {
+        let inode = handler.view.handle_inode(handle(context))?;
+        if allocation == 0 || size < handler.view.entry(inode)?.size {
+            handler.view.truncate(inode, size)?;
+        }
+        file_info(handler, inode, info)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn can_delete(fs: Fs, context: Context, _: Name) -> Status {
+    call(fs, |handler| {
+        let id = handle(context);
+        let path = handler.view.handle_path(id)?;
+        let entry = handler.view.entry(handler.view.handle_inode(id)?)?;
+        handler
+            .view
+            .can_remove(&path, entry.kind == EntryKind::Directory, None)?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn rename(fs: Fs, context: Context, _: Name, target: Name, replace: u8) -> Status {
+    call(fs, |handler| {
+        let id = handle(context);
+        handler.view.rename(
+            &handler.view.handle_path(id)?,
+            &path(target)?,
+            replace != 0,
+            None,
+        )?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn get_security(fs: Fs, _: Context, buffer: Buffer, size: *mut usize) -> Status {
+    call(fs, |handler| {
+        copy_buffer(&handler.security, buffer, size, STATUS_BUFFER_OVERFLOW)
+    })
+}
+extern "C" fn set_security(_: Fs, _: Context, _: u32, _: Buffer) -> Status {
+    STATUS_ACCESS_DENIED
+}
+extern "C" fn read_directory(
+    fs: Fs,
+    context: Context,
+    _: Name,
+    marker: Name,
+    buffer: Buffer,
+    length: u32,
+    transferred: *mut u32,
+) -> Status {
+    call(fs, |handler| {
+        if transferred.is_null() || (length > 0 && buffer.is_null()) {
+            return Err(Error::Invalid("missing directory buffer".into()));
+        }
+        unsafe {
+            *transferred = 0;
+        }
+        let inode = handler.view.handle_inode(handle(context))?;
+        let mut entries = handler.view.read_dir(inode)?;
+        let path = handler.view.handle_path(handle(context))?;
+        if !path.is_empty() {
+            let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+            entries.push((".".into(), handler.view.entry(inode)?));
+            entries.push(("..".into(), handler.view.lookup(parent)?));
+        }
+        let marker = if marker.is_null() {
+            None
+        } else {
+            Some(text(marker)?.encode_utf16().collect::<Vec<_>>())
+        };
+        entries.sort_by_cached_key(|(name, _)| name.encode_utf16().collect::<Vec<_>>());
+        for (name, entry) in entries {
+            let name: Vec<_> = name.encode_utf16().collect();
+            if marker.as_ref().is_some_and(|marker| name <= *marker) {
+                continue;
+            }
+            let size = mem::size_of::<DirInfo>() + name.len() * 2;
+            let mut aligned = vec![0u64; size.div_ceil(8)];
+            let item = aligned.as_mut_ptr().cast::<DirInfo>();
+            unsafe {
+                (*item).size = u16::try_from(size)
+                    .map_err(|_| Error::Invalid("directory entry too long".into()))?;
+            }
+            file_info(handler, entry.inode, unsafe { &mut (*item).file })?;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    name.as_ptr(),
+                    aligned
+                        .as_mut_ptr()
+                        .cast::<u8>()
+                        .add(mem::size_of::<DirInfo>())
+                        .cast::<u16>(),
+                    name.len(),
+                );
+            }
+            if unsafe { (handler.api.add_directory)(item, buffer, length, transferred) } == 0 {
+                return Ok(STATUS_SUCCESS);
+            }
+        }
+        unsafe {
+            (handler.api.add_directory)(ptr::null(), buffer, length, transferred);
+        }
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn resolve_reparse_points(
+    fs: Fs,
+    name: Name,
+    index: u32,
+    last: u8,
+    io: Buffer,
+    buffer: Buffer,
+    size: *mut usize,
+) -> Status {
+    call(fs, |handler| {
+        Ok(unsafe {
+            (handler.api.resolve_reparse)(
+                fs,
+                get_reparse_by_name,
+                ptr::null_mut(),
+                name,
+                index,
+                last,
+                io,
+                buffer,
+                size,
+            )
+        })
+    })
+}
+extern "C" fn get_reparse_by_name(
+    fs: Fs,
+    _: Context,
+    name: Name,
+    _: u8,
+    buffer: Buffer,
+    size: *mut usize,
+) -> Status {
+    call(fs, |handler| {
+        let entry = handler.view.lookup(&path(name)?)?;
+        let Some(point) = handler.view.reparse_point(entry.inode)? else {
+            return Ok(STATUS_NOT_A_REPARSE_POINT);
+        };
+        if buffer.is_null() {
+            return Ok(STATUS_SUCCESS);
+        }
+        let point = point.relocate(&handler.origin, &handler.directory)?;
+        copy_buffer(&point.data, buffer, size, STATUS_BUFFER_TOO_SMALL)
+    })
+}
+extern "C" fn get_reparse_point(
+    fs: Fs,
+    context: Context,
+    _: Name,
+    buffer: Buffer,
+    size: *mut usize,
+) -> Status {
+    call(fs, |handler| {
+        let Some(point) = handler
+            .view
+            .reparse_point(handler.view.handle_inode(handle(context))?)?
+        else {
+            return Ok(STATUS_NOT_A_REPARSE_POINT);
+        };
+        let point = point.relocate(&handler.origin, &handler.directory)?;
+        copy_buffer(&point.data, buffer, size, STATUS_BUFFER_TOO_SMALL)
+    })
+}
+extern "C" fn set_reparse_point(
+    fs: Fs,
+    context: Context,
+    _: Name,
+    buffer: Buffer,
+    size: usize,
+) -> Status {
+    call(fs, |handler| {
+        if buffer.is_null() || size > 16 * 1024 {
+            return Err(Error::Invalid("invalid reparse buffer".into()));
+        }
+        let inode = handler.view.handle_inode(handle(context))?;
+        let entry = handler.view.entry(inode)?;
+        let directory = handler
+            .view
+            .reparse_point(inode)?
+            .map_or(entry.kind == EntryKind::Directory, |point| point.directory);
+        let point = ReparsePoint::from_bytes(
+            directory,
+            unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), size) }.to_vec(),
+        )?;
+        let point = point.relocate(&handler.directory, &handler.origin)?;
+        handler.view.set_reparse_point(inode, Some(point))?;
+        Ok(STATUS_SUCCESS)
+    })
+}
+extern "C" fn delete_reparse_point(
+    fs: Fs,
+    context: Context,
+    _: Name,
+    buffer: Buffer,
+    size: usize,
+) -> Status {
+    call(fs, |handler| {
+        if buffer.is_null() || size < 8 {
+            return Err(Error::Invalid("invalid reparse deletion buffer".into()));
+        }
+        let tag = unsafe { ptr::read_unaligned(buffer.cast::<u32>()) };
+        let inode = handler.view.handle_inode(handle(context))?;
+        let Some(point) = handler.view.reparse_point(inode)? else {
+            return Ok(STATUS_NOT_A_REPARSE_POINT);
+        };
+        if point.tag()? != tag {
+            return Ok(STATUS_IO_REPARSE_TAG_MISMATCH);
+        }
+        handler.view.set_reparse_point(inode, None)?;
+        Ok(STATUS_SUCCESS)
+    })
 }
 
 fn mounted_directories() -> &'static Mutex<HashMap<PathBuf, Vec<u16>>> {
@@ -160,9 +973,9 @@ fn device_path(file: &std::fs::File) -> io::Result<Vec<u16>> {
     Ok(path)
 }
 
-/// This is an identity check, never a filesystem permission grant. The host
-/// broker pins the reparse point against writes/deletion before calling it.
-pub(super) fn open_mount_directory(path: &Path) -> io::Result<Option<std::fs::File>> {
+/// Return a pinned volume root and a stable kernel path, independently of the
+/// NTFS mount point that WinFsp holds open with delete-on-close access.
+pub(super) fn open_mount_directory(path: &Path) -> io::Result<Option<super::MountedDirectory>> {
     let Some(expected) = mounted_directories()
         .lock()
         .get(dunce::simplified(path))
@@ -181,120 +994,12 @@ pub(super) fn open_mount_directory(path: &Path) -> io::Result<Option<std::fs::Fi
             "workspace mount target was replaced",
         ));
     }
-    Ok(Some(file))
-}
-
-// Dokan dispatches callbacks concurrently and its lifetime functions are
-// thread-safe. The stable boxes remain alive until CloseHandle has joined them.
-unsafe impl Send for Session {}
-unsafe impl Sync for Session {}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        if let Some((path, identity)) = &self.registration {
-            let mut mounts = mounted_directories().lock();
-            if mounts.get(path) == Some(identity) {
-                mounts.remove(path);
-            }
-        }
-        unsafe {
-            (self.api.close)(self.handle as *mut _);
-        }
-    }
-}
-
-pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
-    let api = api()?.ok_or_else(|| Error::Unsupported("Dokan 2 is not installed".into()))?;
-    if !available()? {
-        return Err(Error::Unsupported("Dokan 2 driver is unavailable".into()));
-    }
-    let security = owner_security()?;
-    let mut identity = Sha256::new();
-    for unit in workspace.backing_path().as_os_str().encode_wide() {
-        identity.update(unit.to_le_bytes());
-    }
-    identity.update(workspace.key().as_bytes());
-    let serial = u32::from_le_bytes(identity.finalize()[..4].try_into().expect("SHA256 prefix"));
-    let handler = Box::new(Handler {
-        view: View::new(workspace)?,
-        security,
-        serial,
-    });
-    // The Win32 Dokan API expects DOS/UNC spelling, while service profile paths
-    // and stored authorization bindings use std::fs::canonicalize's prefix.
-    let point: Vec<_> = dunce::simplified(path)
-        .as_os_str()
-        .encode_wide()
-        .chain([0])
-        .collect();
-    let mut options: Box<DOKAN_OPTIONS> = Box::new(unsafe { mem::zeroed() });
-    options.Version = 206;
-    options.Options =
-        DOKAN_OPTION_CURRENT_SESSION | DOKAN_OPTION_CASE_SENSITIVE | DOKAN_OPTION_MOUNT_MANAGER;
-    options.GlobalContext = (&*handler as *const Handler) as u64;
-    options.MountPoint = point.as_ptr();
-    options.Timeout = 60_000;
-    options.AllocationUnitSize = 4096;
-    options.SectorSize = 512;
-    if handler.security.len() > options.VolumeSecurityDescriptor.len() {
-        return Err(Error::Invalid(
-            "owner security descriptor is too large".into(),
-        ));
-    }
-    options.VolumeSecurityDescriptorLength = handler.security.len() as u32;
-    unsafe {
-        ptr::copy_nonoverlapping(
-            handler.security.as_ptr(),
-            options.VolumeSecurityDescriptor.as_mut_ptr().cast(),
-            handler.security.len(),
-        );
-    }
-    let mut operations: Box<DOKAN_OPERATIONS> = Box::new(unsafe { mem::zeroed() });
-    operations.ZwCreateFile = Some(create);
-    operations.Cleanup = Some(cleanup);
-    operations.CloseFile = Some(close_file);
-    operations.ReadFile = Some(read);
-    operations.WriteFile = Some(write);
-    operations.FlushFileBuffers = Some(flush);
-    operations.GetFileInformation = Some(file_information);
-    operations.FindFiles = Some(find_files);
-    operations.SetFileAttributes = Some(set_attributes);
-    operations.SetFileTime = Some(set_time);
-    operations.DeleteFile = Some(delete_file);
-    operations.DeleteDirectory = Some(delete_directory);
-    operations.MoveFile = Some(rename);
-    operations.SetEndOfFile = Some(truncate);
-    operations.SetAllocationSize = Some(allocate);
-    operations.GetDiskFreeSpace = Some(disk_space);
-    operations.GetVolumeInformation = Some(volume_information);
-    operations.GetFileSecurity = Some(get_security);
-    operations.SetFileSecurity = Some(set_security);
-    let mut handle = ptr::null_mut();
-    let result = unsafe { (api.create)(&mut *options, &mut *operations, &mut handle) };
-    if result != 0 {
-        return Err(Error::Unsupported(format!("Dokan mount failed ({result})")));
-    }
-    let mut session = Session {
-        api,
-        handle: handle as usize,
-        _point: point,
-        _options: options,
-        _operations: operations,
-        _handler: handler,
-        registration: None,
-    };
-    // DokanCreateFileSystem may return before Windows has finished attaching
-    // the volume behind a directory reparse point. Check the mounted volume's
-    // identity, rather than exposing its empty backing directory or relying on
-    // a fixed delay. Only read-only readiness observations are retried.
-    let directory = wait_ready(path, serial)?;
-    let identity = device_path(&directory)?;
-    let path = dunce::simplified(path).to_owned();
-    mounted_directories()
-        .lock()
-        .insert(path.clone(), identity.clone());
-    session.registration = Some((path, identity));
-    Ok(Mount { _session: session })
+    let mut native_path: Vec<u16> = r"\\?\GLOBALROOT".encode_utf16().collect();
+    native_path.extend(expected);
+    Ok(Some(super::MountedDirectory {
+        directory: file,
+        path: PathBuf::from(std::ffi::OsString::from_wide(&native_path)),
+    }))
 }
 
 fn wait_ready(path: &Path, serial: u32) -> Result<std::fs::File> {
@@ -323,534 +1028,11 @@ fn wait_ready(path: &Path, serial: u32) -> Result<std::fs::File> {
         }
         if Instant::now() >= deadline {
             return Err(Error::Unsupported(
-                "Dokan directory mount did not become ready".into(),
+                "WinFsp directory mount did not become ready".into(),
             ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn status(error: Error) -> NTSTATUS {
-    match error {
-        Error::Io(error) => match error.kind() {
-            io::ErrorKind::NotFound => STATUS_OBJECT_NAME_NOT_FOUND,
-            io::ErrorKind::AlreadyExists => STATUS_OBJECT_NAME_COLLISION,
-            io::ErrorKind::PermissionDenied => STATUS_ACCESS_DENIED,
-            io::ErrorKind::WouldBlock => STATUS_SHARING_VIOLATION,
-            io::ErrorKind::NotADirectory => STATUS_NOT_A_DIRECTORY,
-            io::ErrorKind::DirectoryNotEmpty => STATUS_DIRECTORY_NOT_EMPTY,
-            _ => STATUS_IO_DEVICE_ERROR,
-        },
-        Error::Invalid(_) => winapi::shared::ntstatus::STATUS_INVALID_PARAMETER,
-        Error::Authorization(_) => STATUS_ACCESS_DENIED,
-        Error::Conflict(_) => STATUS_FILE_LOCK_CONFLICT,
-        Error::Unsupported(_) => STATUS_NOT_SUPPORTED,
-        _ => STATUS_FILE_CORRUPT_ERROR,
-    }
-}
-
-fn call(
-    info: PDOKAN_FILE_INFO,
-    operation: impl FnOnce(&Handler, &mut DOKAN_FILE_INFO) -> Result<()>,
-) -> NTSTATUS {
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
-        let info = info
-            .as_mut()
-            .ok_or_else(|| Error::Invalid("missing native request".into()))?;
-        let options = info
-            .DokanOptions
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("missing native options".into()))?;
-        let handler = (options.GlobalContext as *const Handler)
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("missing native handler".into()))?;
-        operation(handler, info)
-    })) {
-        Ok(Ok(())) => STATUS_SUCCESS,
-        Ok(Err(error)) => status(error),
-        Err(_) => STATUS_INTERNAL_ERROR,
-    }
-}
-
-fn path(pointer: LPCWSTR) -> Result<String> {
-    if pointer.is_null() {
-        return Err(Error::Invalid("null path".into()));
-    }
-    let mut length = 0;
-    while length < 32_768 && unsafe { *pointer.add(length) } != 0 {
-        length += 1;
-    }
-    if length == 32_768 {
-        return Err(Error::Invalid("native path is not terminated".into()));
-    }
-    let path = String::from_utf16(unsafe { std::slice::from_raw_parts(pointer, length) })
-        .map_err(|_| Error::Invalid("native path is not Unicode".into()))?;
-    let path = path.trim_start_matches('\\').replace('\\', "/");
-    if path.contains(':') {
-        return Err(Error::Unsupported("alternate data streams".into()));
-    }
-    crate::directory::relative_path(&path)?;
-    Ok(path)
-}
-
-extern "system" fn create(
-    name: LPCWSTR,
-    _: PDOKAN_IO_SECURITY_CONTEXT,
-    access: u32,
-    _: u32,
-    share: u32,
-    disposition: u32,
-    options: u32,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, info| {
-        let path = path(name)?;
-        let existing = match handler.view.lookup(&path) {
-            Ok(entry) => Some(entry),
-            Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        if existing.is_none() && matches!(disposition, 1 | 4) {
-            return Err(crate::missing(path));
-        }
-        if existing.is_some() && disposition == 2 {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
-        }
-        if disposition > 5 {
-            return Err(Error::Invalid("file create disposition".into()));
-        }
-        let entry = match existing {
-            Some(entry) => entry,
-            None => handler.view.create(
-                &path,
-                options & 1 != 0,
-                if options & 1 != 0 { 0o755 } else { 0o644 },
-            )?,
-        };
-        if entry.kind == EntryKind::Symlink {
-            return Err(Error::Unsupported("Windows reparse points".into()));
-        }
-        if options & 1 != 0 && entry.kind != EntryKind::Directory {
-            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
-        }
-        if options & 0x40 != 0 && entry.kind == EntryKind::Directory {
-            return Err(Error::Invalid("file is a directory".into()));
-        }
-        let mut rights = 0;
-        if access & (GENERIC_READ | GENERIC_ALL | FILE_READ_DATA) != 0 {
-            rights |= READ;
-        }
-        if access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA) != 0 {
-            rights |= WRITE;
-        }
-        if access & (GENERIC_ALL | winapi::um::winnt::DELETE) != 0 {
-            rights |= DELETE;
-        }
-        let mut sharing = 0;
-        if share & FILE_SHARE_READ != 0 {
-            sharing |= READ;
-        }
-        if share & FILE_SHARE_WRITE != 0 {
-            sharing |= WRITE;
-        }
-        if share & FILE_SHARE_DELETE != 0 {
-            sharing |= DELETE;
-        }
-        let handle = handler.view.open(
-            &path,
-            rights,
-            sharing,
-            access & FILE_APPEND_DATA != 0 && access & FILE_WRITE_DATA == 0,
-        )?;
-        if entry.kind == EntryKind::File && matches!(disposition, 0 | 4 | 5) && rights & WRITE == 0
-        {
-            handler.view.close(handle);
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
-        }
-        if entry.kind == EntryKind::File
-            && matches!(disposition, 0 | 4 | 5)
-            && let Err(error) = handler.view.truncate(entry.inode, 0)
-        {
-            handler.view.close(handle);
-            return Err(error);
-        }
-        info.Context = handle;
-        info.IsDirectory = u8::from(entry.kind == EntryKind::Directory);
-        Ok(())
-    })
-}
-
-extern "system" fn cleanup(_: LPCWSTR, info: PDOKAN_FILE_INFO) {
-    call(info, |handler, info| {
-        if info.DeleteOnClose != 0 && info.Context != 0 {
-            let path = handler.view.handle_path(info.Context)?;
-            handler
-                .view
-                .remove(&path, info.IsDirectory != 0, Some(info.Context))?;
-        }
-        Ok(())
-    });
-}
-extern "system" fn close_file(_: LPCWSTR, info: PDOKAN_FILE_INFO) {
-    call(info, |handler, info| {
-        handler.view.close(info.Context);
-        info.Context = 0;
-        Ok(())
-    });
-}
-extern "system" fn read(
-    _: LPCWSTR,
-    buffer: *mut std::ffi::c_void,
-    length: u32,
-    read: LPDWORD,
-    offset: i64,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, info| {
-        if offset < 0 || read.is_null() || (length > 0 && buffer.is_null()) {
-            return Err(Error::Invalid("invalid read buffer or offset".into()));
-        }
-        let bytes = handler
-            .view
-            .read(info.Context, offset as u64, length as usize)?;
-        unsafe {
-            if !bytes.is_empty() {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len());
-            }
-            *read = bytes.len() as u32;
-        }
-        Ok(())
-    })
-}
-extern "system" fn write(
-    _: LPCWSTR,
-    buffer: *const std::ffi::c_void,
-    length: u32,
-    written: LPDWORD,
-    offset: i64,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, info| {
-        if written.is_null()
-            || (length > 0 && buffer.is_null())
-            || (offset < 0 && info.WriteToEndOfFile == 0)
-        {
-            return Err(Error::Invalid("invalid write buffer or offset".into()));
-        }
-        let bytes = if length == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(buffer.cast(), length as usize) }
-        };
-        let length = if info.PagingIo != 0 {
-            handler
-                .view
-                .write_paging(info.Context, offset.max(0) as u64, bytes)?
-        } else {
-            handler.view.write(
-                info.Context,
-                offset.max(0) as u64,
-                bytes,
-                info.WriteToEndOfFile != 0,
-            )?
-        };
-        unsafe {
-            *written = length as u32;
-        }
-        Ok(())
-    })
-}
-extern "system" fn flush(_: LPCWSTR, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |_, _| Ok(()))
-}
-
-fn attributes(entry: &Entry) -> DWORD {
-    let mut flags = if entry.kind == EntryKind::Directory {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        0
-    };
-    if entry.mode & 0o222 == 0 {
-        flags |= FILE_ATTRIBUTE_READONLY;
-    }
-    if flags == 0 {
-        FILE_ATTRIBUTE_NORMAL
-    } else {
-        flags
-    }
-}
-fn file_time(entry: &Entry) -> FILETIME {
-    let ticks = (entry.modified_ns.max(0) as u64 / 100) + 116_444_736_000_000_000;
-    FILETIME {
-        dwLowDateTime: ticks as u32,
-        dwHighDateTime: (ticks >> 32) as u32,
-    }
-}
-extern "system" fn file_information(
-    name: LPCWSTR,
-    buffer: *mut BY_HANDLE_FILE_INFORMATION,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, info| {
-        let entry = if info.Context == 0 {
-            handler.view.lookup(&path(name)?)?
-        } else {
-            handler
-                .view
-                .entry(handler.view.handle_inode(info.Context)?)?
-        };
-        let buffer = unsafe { buffer.as_mut() }
-            .ok_or_else(|| Error::Invalid("missing file information buffer".into()))?;
-        *buffer = BY_HANDLE_FILE_INFORMATION {
-            dwFileAttributes: attributes(&entry),
-            ftCreationTime: file_time(&entry),
-            ftLastAccessTime: file_time(&entry),
-            ftLastWriteTime: file_time(&entry),
-            dwVolumeSerialNumber: handler.serial,
-            nFileSizeHigh: (entry.size >> 32) as u32,
-            nFileSizeLow: entry.size as u32,
-            nNumberOfLinks: 1,
-            nFileIndexHigh: (entry.inode >> 32) as u32,
-            nFileIndexLow: entry.inode as u32,
-        };
-        Ok(())
-    })
-}
-extern "system" fn find_files(
-    name: LPCWSTR,
-    fill: PFillFindData,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, _| {
-        let entry = handler.view.lookup(&path(name)?)?;
-        for (name, entry) in handler.view.read_dir(entry.inode)? {
-            let name: Vec<_> = name.encode_utf16().collect();
-            if name.len() >= 260 {
-                return Err(Error::Invalid("directory entry name is too long".into()));
-            }
-            let mut data: WIN32_FIND_DATAW = unsafe { mem::zeroed() };
-            data.dwFileAttributes = attributes(&entry);
-            data.ftCreationTime = file_time(&entry);
-            data.ftLastAccessTime = file_time(&entry);
-            data.ftLastWriteTime = file_time(&entry);
-            data.nFileSizeHigh = (entry.size >> 32) as u32;
-            data.nFileSizeLow = entry.size as u32;
-            data.cFileName[..name.len()].copy_from_slice(&name);
-            if unsafe { fill(&mut data, info) } != 0 {
-                break;
-            }
-        }
-        Ok(())
-    })
-}
-extern "system" fn set_attributes(name: LPCWSTR, flags: u32, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |handler, _| {
-        let entry = handler.view.lookup(&path(name)?)?;
-        handler.view.set_metadata(
-            entry.inode,
-            Some(if flags & FILE_ATTRIBUTE_READONLY != 0 {
-                entry.mode & !0o222
-            } else {
-                entry.mode | 0o200
-            }),
-            None,
-        )
-    })
-}
-extern "system" fn set_time(
-    name: LPCWSTR,
-    _: *const FILETIME,
-    _: *const FILETIME,
-    modified: *const FILETIME,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, _| {
-        if let Some(time) = unsafe { modified.as_ref() } {
-            let ticks = ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
-            if ticks != 0 && ticks != u64::MAX {
-                let ns = ticks
-                    .saturating_sub(116_444_736_000_000_000)
-                    .saturating_mul(100)
-                    .min(i64::MAX as u64) as i64;
-                handler.view.set_metadata(
-                    handler.view.lookup(&path(name)?)?.inode,
-                    None,
-                    Some(ns),
-                )?;
-            }
-        }
-        Ok(())
-    })
-}
-extern "system" fn delete_file(name: LPCWSTR, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |handler, info| {
-        handler
-            .view
-            .can_remove(
-                &path(name)?,
-                false,
-                (info.Context != 0).then_some(info.Context),
-            )
-            .map(|_| ())
-    })
-}
-extern "system" fn delete_directory(name: LPCWSTR, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |handler, info| {
-        handler
-            .view
-            .can_remove(
-                &path(name)?,
-                true,
-                (info.Context != 0).then_some(info.Context),
-            )
-            .map(|_| ())
-    })
-}
-extern "system" fn rename(
-    name: LPCWSTR,
-    target: LPCWSTR,
-    replace: BOOL,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, info| {
-        handler.view.rename(
-            &path(name)?,
-            &path(target)?,
-            replace != 0,
-            (info.Context != 0).then_some(info.Context),
-        )
-    })
-}
-extern "system" fn truncate(name: LPCWSTR, length: LONGLONG, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |handler, info| {
-        if length < 0 {
-            return Err(Error::Invalid("negative file size".into()));
-        }
-        let inode = if info.Context == 0 {
-            handler.view.lookup(&path(name)?)?.inode
-        } else {
-            handler.view.handle_inode(info.Context)?
-        };
-        handler.view.truncate(inode, length as u64)
-    })
-}
-extern "system" fn allocate(name: LPCWSTR, length: LONGLONG, info: PDOKAN_FILE_INFO) -> NTSTATUS {
-    call(info, |handler, _| {
-        let entry = handler.view.lookup(&path(name)?)?;
-        if length < 0 {
-            return Err(Error::Invalid("negative allocation size".into()));
-        }
-        if (length as u64) < entry.size {
-            handler.view.truncate(entry.inode, length as u64)?;
-        }
-        Ok(())
-    })
-}
-extern "system" fn disk_space(
-    available: *mut u64,
-    total: *mut u64,
-    free: *mut u64,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, _| {
-        let path = handler
-            .view
-            .backing_path()
-            .parent()
-            .ok_or_else(|| Error::Invalid("missing storage directory".into()))?;
-        let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
-        if unsafe {
-            GetDiskFreeSpaceExW(path.as_ptr(), available.cast(), total.cast(), free.cast())
-        } == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
-        Ok(())
-    })
-}
-extern "system" fn volume_information(
-    label: LPWSTR,
-    label_length: DWORD,
-    serial: LPDWORD,
-    max_component: LPDWORD,
-    flags: LPDWORD,
-    fs_name: LPWSTR,
-    fs_length: DWORD,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    call(info, |handler, _| {
-        fn copy(text: &str, target: LPWSTR, length: u32) -> Result<()> {
-            let text: Vec<_> = text.encode_utf16().chain([0]).collect();
-            if target.is_null() || text.len() > length as usize {
-                return Err(Error::Invalid(
-                    "volume information buffer is too small".into(),
-                ));
-            }
-            unsafe {
-                ptr::copy_nonoverlapping(text.as_ptr(), target, text.len());
-            }
-            Ok(())
-        }
-        copy("DL Workspace", label, label_length)?;
-        copy("DaatLocus", fs_name, fs_length)?;
-        unsafe {
-            if !serial.is_null() {
-                *serial = handler.serial;
-            }
-            if !max_component.is_null() {
-                *max_component = 255;
-            }
-            if !flags.is_null() {
-                *flags =
-                    FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK;
-            }
-        }
-        Ok(())
-    })
-}
-extern "system" fn get_security(
-    _: LPCWSTR,
-    _: *mut u32,
-    buffer: *mut std::ffi::c_void,
-    length: u32,
-    needed: *mut u32,
-    info: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    let mut short = false;
-    let result = call(info, |handler, _| {
-        if needed.is_null() {
-            return Err(Error::Invalid("missing security buffer length".into()));
-        }
-        unsafe {
-            *needed = handler.security.len() as u32;
-        }
-        if buffer.is_null() || (length as usize) < handler.security.len() {
-            short = true;
-            return Ok(());
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(
-                handler.security.as_ptr(),
-                buffer.cast(),
-                handler.security.len(),
-            );
-        }
-        Ok(())
-    });
-    if short {
-        STATUS_BUFFER_OVERFLOW
-    } else {
-        result
-    }
-}
-extern "system" fn set_security(
-    _: LPCWSTR,
-    _: *mut u32,
-    _: *mut std::ffi::c_void,
-    _: u32,
-    _: PDOKAN_FILE_INFO,
-) -> NTSTATUS {
-    STATUS_ACCESS_DENIED
 }
 
 fn owner_security() -> Result<Vec<u8>> {

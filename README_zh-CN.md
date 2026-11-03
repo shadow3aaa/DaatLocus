@@ -63,3 +63,5 @@ bunx wrangler deploy
 ## 许可证
 
 本项目使用 [Apache-2.0](LICENSE)。所使用的部分开源项目的许可证说明见[第三方归属](docs/license-attribution.md)和 [NOTICE](NOTICE)。
+
+可选的 Windows 工作区文件系统使用 [WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp)。

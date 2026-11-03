@@ -153,7 +153,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         {error && !loading && (tab === "models" && !config) && <Button variant="outline" onClick={() => { setError(null); setRetry(value => value + 1); }}>{t("app.retry")}</Button>}
         <div hidden={tab !== "general"}><SettingsGroup>
           <Picker id="dl-client-language" label={t("common.language")} description={t("settings_page.interface_language")} value={preferences.language} options={[{value: "system", label: t("settings_page.detect_language")}, {value: "zh-CN", label: t("common.chinese")}, {value: "en-US", label: t("common.english")}]} onChange={value=>onPreferencesChanged({...preferences,language:value as Preferences["language"]})} />
-        </SettingsGroup></div>
+        </SettingsGroup><details className="mt-6 text-xs text-muted-foreground"><summary>{t("settings_page.third_party_notices")}</summary><p className="mt-2"><a href="https://github.com/winfsp/winfsp" target="_blank" rel="noreferrer">{t("settings_page.winfsp_notice")}</a></p></details></div>
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
         {canManage && tab === "context" && <ContextSettings />}
         {canManage && browserSupported() && tab==="browser" && <BrowserSettings/>}

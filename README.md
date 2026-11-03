@@ -63,3 +63,5 @@ On each device, choose relay mode in account settings, enter the same public WSS
 ## License
 
 This project uses [Apache-2.0](LICENSE). License information for bundled open-source projects is listed in [third-party attribution](docs/license-attribution.md) and [NOTICE](NOTICE).
+
+Optional Windows workspace filesystems use [WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos](https://github.com/winfsp/winfsp).

@@ -705,6 +705,8 @@
     "open_sidebar": "展开侧栏"
   },
   "settings_page": {
+    "third_party_notices": "第三方许可",
+    "winfsp_notice": "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos",
     "general": "常规",
     "search_settings": "搜索设置",
     "personal": "个人",

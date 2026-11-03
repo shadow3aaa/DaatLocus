@@ -5,7 +5,6 @@ use std::{collections::HashMap, io};
 pub(super) const READ: u8 = 1;
 pub(super) const WRITE: u8 = 2;
 pub(super) const DELETE: u8 = 4;
-#[cfg(any(target_os = "linux", test))]
 pub(super) const SHARE_ALL: u8 = READ | WRITE | DELETE;
 
 struct Open {
@@ -412,6 +411,26 @@ impl View {
     pub(super) fn read_link(&self, inode: u64) -> Result<String> {
         let state = self.state.lock();
         self.workspace.read_link(Self::path(&state, inode)?)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn reparse_point(&self, inode: u64) -> Result<Option<crate::reparse::ReparsePoint>> {
+        let state = self.state.lock();
+        if let Some(file) = state.unlinked.get(&inode) {
+            return Ok(file.reparse_point());
+        }
+        self.workspace.reparse_point(Self::path(&state, inode)?)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn set_reparse_point(
+        &self,
+        inode: u64,
+        point: Option<crate::reparse::ReparsePoint>,
+    ) -> Result<()> {
+        let state = self.state.lock();
+        self.workspace
+            .set_reparse_point(Self::path(&state, inode)?, point)
     }
 
     #[cfg(target_os = "linux")]

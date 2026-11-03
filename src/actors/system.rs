@@ -600,7 +600,7 @@ impl ActorSystem {
             .unwrap_or(false);
         let mut policy = crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, read_only);
         // Validate native-source policy before entering a CAS transaction. A
-        // scope on our projections can issue FUSE/Dokan callbacks during
+        // scope on our projections can issue FUSE/WinFsp callbacks during
         // canonicalization, which would re-enter the locked store. Such scopes
         // cannot authorize the original native directory in any case.
         let manager = self.inner.workspaces.lock().clone();
