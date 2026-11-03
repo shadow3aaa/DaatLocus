@@ -2313,7 +2313,12 @@ async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_co
         completed.error
     );
     tokio::time::timeout(Duration::from_secs(10), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap() {
+        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
+            || !b
+                .store()
+                .message(&first.id)
+                .is_ok_and(|message| message.status == MessageStatus::Completed)
+        {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })

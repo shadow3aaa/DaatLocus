@@ -122,25 +122,24 @@ impl ReparsePoint {
                 component => normalized.push(component.as_os_str()),
             }
         }
+        let from: PathBuf = dunce::simplified(from).components().collect();
         let mut parts = normalized.components();
-        for expected in dunce::simplified(from).components() {
-            let Some(actual) = parts.next() else {
-                return Ok(self.clone());
-            };
-            let actual: Vec<_> = actual.as_os_str().encode_wide().collect();
-            let expected: Vec<_> = expected.as_os_str().encode_wide().collect();
-            if unsafe {
-                winapi::um::stringapiset::CompareStringOrdinal(
-                    actual.as_ptr(),
-                    actual.len() as i32,
-                    expected.as_ptr(),
-                    expected.len() as i32,
-                    1,
-                )
-            } != 2
-            {
-                return Ok(self.clone());
-            }
+        let prefix: PathBuf = parts.by_ref().take(from.components().count()).collect();
+        let actual: Vec<_> = prefix.as_os_str().encode_wide().collect();
+        let expected: Vec<_> = from.as_os_str().encode_wide().collect();
+        let same_spelling = unsafe {
+            winapi::um::stringapiset::CompareStringOrdinal(
+                actual.as_ptr(),
+                actual.len() as i32,
+                expected.as_ptr(),
+                expected.len() as i32,
+                1,
+            )
+        } == 2;
+        // DOS short names and directory aliases can spell the same project root.
+        // Resolve only that existing prefix, retaining nonexistent target descendants.
+        if !same_spelling && !same_file::is_same_file(&prefix, &from).unwrap_or(false) {
+            return Ok(self.clone());
         }
         let target = dunce::simplified(to).join(parts.collect::<PathBuf>());
         let target = target.to_str().ok_or_else(invalid)?;
@@ -239,6 +238,19 @@ mod tests {
         fs::write(source.join("other/file.txt"), b"other bytes").unwrap();
         fs::write(source.join("target/file.txt"), b"target bytes").unwrap();
         let origin = Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap();
+        Directory::open(temp.path(), Arc::new(|_, _| Ok(())))
+            .unwrap()
+            .write_reparse("alias", &junction(&source))
+            .unwrap();
+        let aliased = junction(&temp.path().join("alias/target/future.txt"));
+        assert_eq!(
+            aliased
+                .relocate(origin.path(), Path::new(r"D:\Workspace\feature"))
+                .unwrap()
+                .target()
+                .unwrap(),
+            r"\??\D:\Workspace\feature\target\future.txt"
+        );
         origin
             .write_reparse("original-link", &junction(&source.join("target")))
             .unwrap();

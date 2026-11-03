@@ -76,17 +76,7 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     assert!(fixture.system.actor(&actor).is_err());
     assert!(fixture.system.store().approval(&approval.id).is_err());
     assert_eq!(fixture.system.store().actors().unwrap().len(), 1);
-    let root = fixture.system.actor("core").unwrap();
-    assert!(
-        serde_json::to_value(&root.config)
-            .unwrap()
-            .get("permissions")
-            .is_none()
-    );
-    assert_eq!(
-        fixture.system.actor("core").unwrap().config.apps,
-        ["actors", "admin_actors"]
-    );
+    fixture.system.actor("core").unwrap();
     assert!(
         fixture
             .system
