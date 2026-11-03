@@ -1,10 +1,8 @@
-Keep routine work in default when Actors should edit the same files. default is the original native directory, also accessible to the user.
-Use a named Workspace branch for independent concurrent edits, experiments that must stay isolated, or development branches that should share storage. Do not create a fresh branch for every Actor or task.
-Inspect the current workspace and existing branches before creating or selecting one. The same original directory and branch name identify one shared workspace on this device; selecting an existing branch preserves its contents.
-Use separate branches for independent changes. To collaborate on the same files, select the same branch or pass its returned execution directory when creating another Actor.
-Workspace selection changes your cwd for subsequent Files and Terminal calls. Existing processes and terminal sessions keep their working directories; check them before continuing work after a switch.
-Read the applicable AGENTS.md and relevant Skills in the selected workspace before editing. Changing workspaces grants no filesystem permissions; follow the device's ordinary authorization flow.
-Before completing branch changes you own, inspect the diff, validate the result and explicitly merge into default unless the request calls for leaving the work isolated. Coordinate before merging a shared branch so you do not publish another Actor's unfinished changes.
-Resolve merge conflicts or report the original directory, branch and remaining work. After an interrupted merge, inspect the recorded applied, uncertain and error results and the actual files before deciding how to continue; never blindly repeat uncertain effects.
-A successful merge keeps the branch isolated and does not import other changes from default. Create a new branch from default when you need a fresh view of the native directory.
-Use compact when obsolete workspace content needs reclaiming; it preserves live branches and open-file contents.
+Use default for shared work in the original directory. Use a named Workspace branch for isolated edits and experiments.
+Inspect existing branches and select the same branch when Actors should collaborate. Share its execution directory when creating another Actor.
+Read the selected project's instructions and relevant Skills. Check existing processes after switching your execution directory.
+Save meaningful versions before risky changes and at useful milestones. Compare versions and fork an earlier version when you need to recover or explore another approach.
+Merge independent work into a fresh branch and validate the combined result. Resolve conflicts using the reported base and source versions and an edited working fork.
+Coordinate with collaborators, then publish validated work to the original directory unless the task calls for keeping it isolated.
+After an interrupted publication, inspect its recorded progress and actual files before deciding how to continue. Report the project, branch and remaining work when publication is unfinished.
+Follow the device's filesystem authorization flow for each workspace and publication target.

@@ -11,6 +11,10 @@ use std::{
 
 const BLOCK: usize = 64 * 1024;
 
+mod history;
+pub(crate) use history::migrate_versions;
+pub use history::{FileVersion, MergeOutcome, PublishOutcome, Resolution, Version};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
@@ -81,15 +85,6 @@ pub struct Change {
     pub entry: Option<Entry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MergeOutcome {
-    pub id: String,
-    pub applied: Vec<String>,
-    pub conflicts: Vec<String>,
-    pub uncertain: Option<String>,
-    pub error: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct Workspace {
     store: Store,
@@ -107,7 +102,7 @@ impl Store {
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut pending: Vec<ObjectId> = transaction.prepare(
-            "SELECT base FROM branches UNION SELECT head FROM branches UNION SELECT root FROM checkpoints UNION SELECT head FROM merges WHERE state IN ('prepared','applying','interrupted') UNION SELECT root FROM native_files"
+            "SELECT base FROM branches UNION SELECT head FROM branches UNION SELECT root FROM versions UNION SELECT head FROM merges WHERE state IN ('prepared','applying','interrupted') UNION SELECT root FROM native_files"
         )?.query_map([], |row| Ok(ObjectId(row.get(0)?)))?.collect::<std::result::Result<_, _>>()?;
         let mut live = BTreeSet::new();
         while let Some(id) = pending.pop() {
@@ -221,16 +216,21 @@ impl Store {
             |row| row.get(0),
         )?;
         if !exists {
-            let (base, head) = if from == DEFAULT_BRANCH {
-                let root = snapshot(&transaction, &origin, project, "")?;
-                (root.clone(), root)
+            let version = if from == DEFAULT_BRANCH {
+                history::capture_default(
+                    &transaction,
+                    &origin,
+                    project,
+                    "Capture native directory",
+                )?
             } else {
-                roots(&transaction, project, from)?
+                history::save_branch(&transaction, project, from, "Fork workspace")?
             };
             transaction.execute(
                 "INSERT INTO branches(project,name,base,head) VALUES(?1,?2,?3,?4)",
-                params![project, name, base.0, head.0],
+                params![project, name, version.root.0, version.root.0],
             )?;
+            history::set_tip(&transaction, project, name, &version.id)?;
         }
         transaction.commit()?;
         Ok(Workspace {
@@ -317,19 +317,7 @@ impl Workspace {
         Ok(roots(&self.store.connection.lock(), self.project, &self.name)?.1)
     }
     pub fn fork(&self, name: &str) -> Result<Self> {
-        validate_branch(name)?;
-        let mut connection = self.store.connection.lock();
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (base, head) = roots(&transaction, self.project, &self.name)?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO branches(project,name,base,head) VALUES(?1,?2,?3,?4)",
-            params![self.project, name, base.0, head.0],
-        )?;
-        transaction.commit()?;
-        let mut workspace = self.clone();
-        workspace.name = name.into();
-        Ok(workspace)
+        self.store.fork_at(&self.origin, name, &self.name)
     }
     pub fn entry(&self, path: &str) -> Result<Entry> {
         let connection = self.store.connection.lock();
@@ -614,21 +602,6 @@ impl Workspace {
             ))
         })
     }
-    pub fn checkpoint(&self, reason: &str) -> Result<ObjectId> {
-        let connection = self.store.connection.lock();
-        let root = roots(&connection, self.project, &self.name)?.1;
-        connection.execute(
-            "INSERT INTO checkpoints(project,name,root,reason,created_ms) VALUES(?1,?2,?3,?4,?5)",
-            params![
-                self.project,
-                self.name,
-                root.0,
-                reason,
-                now_ns() / 1_000_000
-            ],
-        )?;
-        Ok(root)
-    }
     pub fn changes(&self, offset: usize, limit: usize) -> Result<Vec<Change>> {
         let connection = self.store.connection.lock();
         let (base, head) = roots(&connection, self.project, &self.name)?;
@@ -650,136 +623,6 @@ impl Workspace {
                 path,
             })
             .collect())
-    }
-
-    /// Merge is an explicit host effect. Its durable journal records each
-    /// started pathname before I/O, and never replays an unfinished effect.
-    pub fn merge_to_default(&self, origin: &Directory) -> Result<MergeOutcome> {
-        if origin.path() != self.origin || origin.binding() != self.binding {
-            return Err(Error::Conflict(
-                "merge target directory identity changed".into(),
-            ));
-        }
-        let connection = self.store.connection.lock();
-        let (base_root, head_root) = roots(&connection, self.project, &self.name)?;
-        let base = flatten(&connection, &base_root)?;
-        let ours = flatten(&connection, &head_root)?;
-        let target_root = snapshot(&connection, origin, self.project, "")?;
-        let theirs = flatten(&connection, &target_root)?;
-        let mut outcome = MergeOutcome {
-            id: uuid::Uuid::new_v4().to_string(),
-            applied: vec![],
-            conflicts: vec![],
-            uncertain: None,
-            error: None,
-        };
-        let mut desired = BTreeMap::new();
-        for path in changed_paths(&base, &ours) {
-            let before = base.get(&path);
-            let source = ours.get(&path);
-            let target = theirs.get(&path);
-            if equivalent(source, target) {
-                continue;
-            }
-            if equivalent(before, target) {
-                if source.is_none_or(|node| node.entry.kind != EntryKind::Directory)
-                    && before.is_some_and(|node| node.entry.kind == EntryKind::Directory)
-                    && changed_paths(&base, &theirs)
-                        .iter()
-                        .any(|child| child.starts_with(&format!("{path}/")))
-                {
-                    outcome.conflicts.push(path);
-                } else {
-                    desired.insert(path, source.cloned());
-                }
-            } else if let (Some(before), Some(source), Some(target)) = (before, source, target) {
-                if let Some(merged) = merge_text(&connection, before, source, target)? {
-                    desired.insert(path, Some(merged));
-                } else {
-                    outcome.conflicts.push(path);
-                }
-            } else {
-                outcome.conflicts.push(path);
-            }
-        }
-        connection.execute(
-            "INSERT INTO merges VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                outcome.id,
-                self.project,
-                self.name,
-                head_root.0,
-                if outcome.conflicts.is_empty() {
-                    "prepared"
-                } else {
-                    "conflict"
-                },
-                serde_json::to_string(&outcome)?
-            ],
-        )?;
-        if !outcome.conflicts.is_empty() {
-            return Ok(outcome);
-        }
-        // Check the complete write set before changing any user files. The
-        // individual I/O operations repeat these checks; a later revocation or
-        // host failure is retained as a partial/uncertain merge in the journal.
-        let preflight = (|| -> Result<()> {
-            for (path, node) in &desired {
-                origin.access(path, crate::Access::Write)?;
-                if node
-                    .as_ref()
-                    .is_some_and(|node| node.entry.kind == EntryKind::File)
-                {
-                    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-                    origin.access(parent, crate::Access::Write)?;
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = preflight {
-            journal(&connection, &outcome, "refused")?;
-            return Err(error);
-        }
-        let mut paths: Vec<_> = desired.keys().cloned().collect();
-        paths.sort_by_key(|path| {
-            let deleting = desired[path].is_none();
-            (
-                !deleting,
-                if deleting {
-                    usize::MAX - path.matches('/').count()
-                } else {
-                    path.matches('/').count()
-                },
-                path.clone(),
-            )
-        });
-        for path in paths {
-            outcome.uncertain = Some(path.clone());
-            journal(&connection, &outcome, "applying")?;
-            let result = apply(
-                &connection,
-                origin,
-                self.project,
-                &path,
-                theirs.get(&path),
-                desired[&path].as_ref(),
-            );
-            if let Err(error) = result {
-                outcome.error = Some(error.to_string());
-                journal(&connection, &outcome, "interrupted")?;
-                return Ok(outcome);
-            }
-            outcome.applied.push(path);
-            outcome.uncertain = None;
-            journal(&connection, &outcome, "applying")?;
-        }
-        // Publishing a branch does not import concurrent native-directory
-        // changes back into its mounted namespace. Its integrated head becomes
-        // the next merge base, preserving open handles and snapshot isolation.
-        connection.execute("UPDATE branches SET base=?3,revision=revision+1 WHERE project=?1 AND name=?2 AND head=?3",
-            params![self.project, self.name, head_root.0])?;
-        journal(&connection, &outcome, "completed")?;
-        Ok(outcome)
     }
 }
 
@@ -843,7 +686,7 @@ impl Drop for DetachedFile {
     }
 }
 
-fn journal(connection: &Connection, outcome: &MergeOutcome, state: &str) -> Result<()> {
+fn journal(connection: &Connection, outcome: &PublishOutcome, state: &str) -> Result<()> {
     connection.execute(
         "UPDATE merges SET state=?2,report=?3 WHERE id=?1",
         params![outcome.id, state, serde_json::to_string(outcome)?],
@@ -856,6 +699,11 @@ fn validate_branch(name: &str) -> Result<()> {
     if name == DEFAULT_BRANCH {
         return Err(Error::Invalid(
             "default is the original directory, not an isolated branch".into(),
+        ));
+    }
+    if history::is_version_id(name) {
+        return Err(Error::Invalid(
+            "branch name is reserved for immutable version IDs".into(),
         ));
     }
     Ok(())

@@ -15,7 +15,7 @@ async fn workspace_migration_redirects_following_calls_in_the_same_protocol_grou
             AgentToolCall {
                 id: "select-workspace".into(),
                 name: "workspace__select".into(),
-                arguments: json!({"path":selected,"branch":"default","from":null}),
+                arguments: json!({"path":selected,"branch":"default"}),
             },
             AgentToolCall {
                 id: "write-in-new-cwd".into(),

@@ -20,9 +20,19 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     let mut app = crate::workspace_app::WorkspaceApp::new("root".into(), system.clone());
     app.execute_tool(
         &crate::model_protocol::AgentToolCall {
+            id: "create-feature".into(),
+            name: "fork".into(),
+            arguments: serde_json::json!({"branch":"feature"}),
+        },
+        &context,
+    )
+    .await
+    .unwrap();
+    app.execute_tool(
+        &crate::model_protocol::AgentToolCall {
             id: "select-feature".into(),
             name: "select".into(),
-            arguments: serde_json::json!({"path":null,"branch":"feature","from":null}),
+            arguments: serde_json::json!({"path":null,"branch":"feature"}),
         },
         &context,
     )
@@ -52,9 +62,19 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     );
     app.execute_tool(
         &crate::model_protocol::AgentToolCall {
+            id: "create-review".into(),
+            name: "fork".into(),
+            arguments: serde_json::json!({"branch":"review"}),
+        },
+        &context,
+    )
+    .await
+    .unwrap();
+    app.execute_tool(
+        &crate::model_protocol::AgentToolCall {
             id: "fork-review".into(),
             name: "select".into(),
-            arguments: serde_json::json!({"path":original.config.workspace,"branch":"review","from":null}),
+            arguments: serde_json::json!({"path":original.config.workspace,"branch":"review"}),
         },
         &context,
     )
@@ -71,7 +91,7 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
         &crate::model_protocol::AgentToolCall {
             id: "return-to-feature".into(),
             name: "select".into(),
-            arguments: serde_json::json!({"path":null,"branch":"feature","from":null}),
+            arguments: serde_json::json!({"path":null,"branch":"feature"}),
         },
         &system.execution_context(&review, &input).unwrap(),
     )
@@ -111,8 +131,8 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
         .execute_tool(
             &crate::model_protocol::AgentToolCall {
                 id: "merge-feature".into(),
-                name: "merge".into(),
-                arguments: serde_json::json!({"path":null,"branch":null}),
+                name: "publish".into(),
+                arguments: serde_json::json!({"path":null,"reference":null}),
             },
             &context,
         )
@@ -179,7 +199,7 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
 }
 
 #[tokio::test]
-async fn workspace_merge_checks_device_write_scopes_before_any_native_file_change() {
+async fn workspace_versions_and_publication_retain_device_authority() {
     use daat_locus_workspace::Directory;
     let (directory, system) = fixture().await;
     *system.inner.workspace_backend.lock() = Some(true);
@@ -206,12 +226,65 @@ async fn workspace_merge_checks_device_write_scopes_before_any_native_file_chang
         .unwrap();
     branch.write("code.txt", 0, b"modified").unwrap();
     let mut app = crate::workspace_app::WorkspaceApp::new("root".into(), system.clone());
+    let call = |name: &str, arguments| crate::model_protocol::AgentToolCall {
+        id: name.into(),
+        name: name.into(),
+        arguments,
+    };
+    let saved = app
+        .execute_tool(
+            &call(
+                "commit",
+                serde_json::json!({"path":source,"branch":"feature","message":"Save work"}),
+            ),
+            &context,
+        )
+        .await
+        .unwrap();
+    let version = saved.payload["id"].as_str().unwrap();
+    app.execute_tool(
+        &call(
+            "fork",
+            serde_json::json!({"path":source,"branch":"review","from":version}),
+        ),
+        &context,
+    )
+    .await
+    .unwrap();
+    let merged = app.execute_tool(&call("merge", serde_json::json!({"path":source,"left":"feature","right":"review","branch":"integrated"})), &context).await.unwrap();
+    assert!(merged.payload["conflicts"].as_array().unwrap().is_empty());
+    let read = app.execute_tool(&call("read", serde_json::json!({"path":source,"reference":"integrated","file":"code.txt","offset":0,"length":4})), &context).await.unwrap();
+    assert_eq!(read.payload["text"], "modi");
+    assert_eq!(read.payload["next_offset"], 4);
+    let history = app
+        .execute_tool(
+            &call(
+                "history",
+                serde_json::json!({"path":source,"reference":"feature","limit":1}),
+            ),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.payload["versions"][0]["id"], version);
+    assert!(history.payload["next_cursor"].is_number());
+    let differences = app
+        .execute_tool(
+            &call(
+                "diff",
+                serde_json::json!({"path":source,"left":"default","right":version,"limit":10}),
+            ),
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(differences.payload["changes"][0]["path"], "code.txt");
     let error = app
         .execute_tool(
             &crate::model_protocol::AgentToolCall {
                 id: "ungranted-merge".into(),
-                name: "merge".into(),
-                arguments: serde_json::json!({"path":source,"branch":"feature"}),
+                name: "publish".into(),
+                arguments: serde_json::json!({"path":source,"reference":"feature"}),
             },
             &context,
         )
@@ -370,7 +443,7 @@ async fn workspace_tool_schemas_and_default_migration_retain_native_files_and_au
             &crate::model_protocol::AgentToolCall {
                 id: "select-native".into(),
                 name: "select".into(),
-                arguments: serde_json::json!({"path":target,"branch":"default","from":null}),
+                arguments: serde_json::json!({"path":target,"branch":"default"}),
             },
             &context,
         )
@@ -388,10 +461,16 @@ async fn workspace_tool_schemas_and_default_migration_retain_native_files_and_au
     let fresh = system.execution_context(&original, &input).unwrap();
     let mut readonly = fresh.clone();
     readonly.actor_call.as_mut().unwrap().remote_read_only = true;
-    let result = app.execute_tool(&crate::model_protocol::AgentToolCall {
-        id: "readonly-select".into(), name: "select".into(),
-        arguments: serde_json::json!({"path":original.config.workspace,"branch":"default","from":null}),
-    }, &readonly).await;
+    let result = app
+        .execute_tool(
+            &crate::model_protocol::AgentToolCall {
+                id: "readonly-select".into(),
+                name: "select".into(),
+                arguments: serde_json::json!({"path":original.config.workspace,"branch":"default"}),
+            },
+            &readonly,
+        )
+        .await;
     assert!(result.is_err());
     assert_eq!(
         system.actor("root").unwrap().config.workspace,

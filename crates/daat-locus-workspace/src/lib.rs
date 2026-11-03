@@ -1,8 +1,4 @@
-//! Shared workspace identities, immutable content and independently writable branches.
-//!
-//! `default` is the caller's ordinary directory. Named branches pin an immutable
-//! base and share unchanged objects. Native projections are adapters over this
-//! engine; the engine has no Actor, model, sandbox or administrator dependencies.
+//! Shared workspace branches, saved versions and native filesystem projections.
 mod directory;
 pub mod native;
 mod projections;
@@ -14,7 +10,10 @@ mod workspace;
 pub use directory::{Access, Authorize, Directory};
 pub use projections::{Location, Workspaces};
 pub use store::{Collection, ObjectId, Statistics, Store};
-pub use workspace::{Change, ChangeKind, Entry, EntryKind, MergeOutcome, Workspace};
+pub use workspace::{
+    Change, ChangeKind, Entry, EntryKind, FileVersion, MergeOutcome, PublishOutcome, Resolution,
+    Version, Workspace,
+};
 
 use std::io;
 

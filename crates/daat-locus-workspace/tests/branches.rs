@@ -112,7 +112,7 @@ fn merge_preserves_unrelated_user_changes_and_merges_disjoint_text_edits() {
         b"ONE\ntwo\nthree\nfour\nfive\n",
         "host changes must not leak into the pinned base"
     );
-    let outcome = branch.merge_to_default(&directory(&source)).unwrap();
+    let outcome = branch.publish(&directory(&source)).unwrap();
     assert!(outcome.conflicts.is_empty(), "{outcome:?}");
     assert!(outcome.error.is_none(), "{outcome:?}");
     assert_eq!(
@@ -128,7 +128,7 @@ fn merge_preserves_unrelated_user_changes_and_merges_disjoint_text_edits() {
     );
     assert_eq!(branch.read("user.txt", 0, 80).unwrap(), b"before");
     branch.write("code.txt", 4, b"TWO").unwrap();
-    let next = branch.merge_to_default(&directory(&source)).unwrap();
+    let next = branch.publish(&directory(&source)).unwrap();
     assert!(
         next.error.is_none() && next.conflicts.is_empty(),
         "{next:?}"
@@ -154,7 +154,7 @@ fn conflict_is_detected_before_any_source_write() {
     branch.write("a.txt", 0, b"after!").unwrap();
     branch.write("binary", 1, &[3]).unwrap();
     fs::write(source.join("binary"), [0, 4, 2]).unwrap();
-    let outcome = branch.merge_to_default(&directory(&source)).unwrap();
+    let outcome = branch.publish(&directory(&source)).unwrap();
     assert_eq!(outcome.conflicts, ["binary"]);
     assert!(outcome.applied.is_empty());
     assert_eq!(fs::read(source.join("a.txt")).unwrap(), b"before");
@@ -189,7 +189,7 @@ fn interrupted_merge_retains_branch_and_is_not_replayed_when_reopened() {
         }),
     )
     .unwrap();
-    let outcome = branch.merge_to_default(&target).unwrap();
+    let outcome = branch.publish(&target).unwrap();
     assert_eq!(outcome.applied, ["a.txt"]);
     assert_eq!(outcome.uncertain.as_deref(), Some("b.txt"));
     assert!(outcome.error.is_some());
@@ -203,7 +203,7 @@ fn interrupted_merge_retains_branch_and_is_not_replayed_when_reopened() {
         "reopen must not replay a started merge"
     );
     assert_eq!(reopened.read("b.txt", 0, 80).unwrap(), b"b.txt");
-    let outcome = reopened.merge_to_default(&directory(&source)).unwrap();
+    let outcome = reopened.publish(&directory(&source)).unwrap();
     assert_eq!(
         outcome.applied,
         ["b.txt"],
@@ -226,7 +226,7 @@ fn replaced_source_directory_cannot_receive_old_branch_effects() {
     fs::rename(&source, temp.path().join("moved")).unwrap();
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file"), b"replacement").unwrap();
-    assert!(branch.merge_to_default(&directory(&source)).is_err());
+    assert!(branch.publish(&directory(&source)).is_err());
     assert_eq!(
         branch.read("file", 0, 80).unwrap(),
         b"new",
@@ -268,7 +268,7 @@ fn moved_source_paths_keep_independent_branch_identities() {
     let moved = temp.path().join("moved");
     fs::rename(&source, &moved).unwrap();
     let moved_directory = directory(&moved);
-    assert!(original.merge_to_default(&moved_directory).is_err());
+    assert!(original.publish(&moved_directory).is_err());
     let relocated = store
         .branch(moved_directory.clone(), "feature", "default")
         .unwrap();
@@ -276,7 +276,7 @@ fn moved_source_paths_keep_independent_branch_identities() {
     assert_eq!(relocated.read("file", 0, 80).unwrap(), b"original");
     relocated.write("file", 0, b"new edit").unwrap();
     assert_eq!(original.read("file", 0, 80).unwrap(), b"old edit");
-    let outcome = relocated.merge_to_default(&moved_directory).unwrap();
+    let outcome = relocated.publish(&moved_directory).unwrap();
     assert!(outcome.conflicts.is_empty() && outcome.error.is_none());
     assert_eq!(fs::read(moved.join("file")).unwrap(), b"new edit");
 
@@ -346,7 +346,7 @@ fn replacing_a_directory_with_a_file_removes_only_the_known_branch_children() {
     branch.create("folder", EntryKind::File, 0o644).unwrap();
     branch.write("folder", 0, b"replacement").unwrap();
     fs::write(source.join("folder/user-added"), b"user work").unwrap();
-    let conflict = branch.merge_to_default(&directory(&source)).unwrap();
+    let conflict = branch.publish(&directory(&source)).unwrap();
     assert_eq!(conflict.conflicts, ["folder"]);
     assert_eq!(
         fs::read(source.join("folder/user-added")).unwrap(),
@@ -354,7 +354,7 @@ fn replacing_a_directory_with_a_file_removes_only_the_known_branch_children() {
     );
     assert_eq!(fs::read(source.join("folder/child")).unwrap(), b"old");
     fs::remove_file(source.join("folder/user-added")).unwrap();
-    let completed = branch.merge_to_default(&directory(&source)).unwrap();
+    let completed = branch.publish(&directory(&source)).unwrap();
     assert!(completed.error.is_none(), "{completed:?}");
     assert_eq!(fs::read(source.join("folder")).unwrap(), b"replacement");
 }
@@ -463,7 +463,7 @@ fn directory_permission_changes_are_published_without_changing_its_children() {
         .branch(directory(&source), "feature", "default")
         .unwrap();
     branch.set_metadata("folder", Some(0o750), None).unwrap();
-    let outcome = branch.merge_to_default(&directory(&source)).unwrap();
+    let outcome = branch.publish(&directory(&source)).unwrap();
     assert!(
         outcome.error.is_none() && outcome.conflicts.is_empty(),
         "{outcome:?}"
@@ -496,7 +496,7 @@ fn newly_published_readonly_files_keep_their_attribute() {
     branch.create("readonly", EntryKind::File, 0o644).unwrap();
     branch.write("readonly", 0, b"readonly bytes").unwrap();
     branch.set_metadata("readonly", Some(0o444), None).unwrap();
-    let outcome = branch.merge_to_default(&directory(&source)).unwrap();
+    let outcome = branch.publish(&directory(&source)).unwrap();
     assert!(
         outcome.error.is_none() && outcome.conflicts.is_empty(),
         "{outcome:?}"

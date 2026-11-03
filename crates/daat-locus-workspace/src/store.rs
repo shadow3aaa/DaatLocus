@@ -39,7 +39,7 @@ impl Store {
     /// The caller establishes owner-only permissions on the containing directory
     /// before opening storage, just as for its other private persistence.
     pub fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(30))?;
         connection.execute_batch(
             "PRAGMA auto_vacuum=INCREMENTAL;
@@ -65,10 +65,6 @@ impl Store {
              CREATE TABLE IF NOT EXISTS projections(
                 project INTEGER NOT NULL, name TEXT NOT NULL, directory TEXT NOT NULL UNIQUE,
                 PRIMARY KEY(project,name), FOREIGN KEY(project,name) REFERENCES branches(project,name));
-             CREATE TABLE IF NOT EXISTS checkpoints(
-                seq INTEGER PRIMARY KEY, project INTEGER NOT NULL,
-                name TEXT NOT NULL, root TEXT NOT NULL REFERENCES objects(id),
-                reason TEXT NOT NULL, created_ms INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS merges(
                 id TEXT PRIMARY KEY, project INTEGER NOT NULL, branch TEXT NOT NULL,
                 head TEXT NOT NULL, state TEXT NOT NULL, report TEXT NOT NULL);
@@ -86,8 +82,10 @@ impl Store {
                 connection.execute("INSERT INTO workspace_format VALUES(1)", [])?;
             }
             Some(1) => {}
+            Some(2) => {}
             Some(other) => return Err(Error::Unsupported(format!("storage format {other}"))),
         }
+        crate::workspace::migrate_versions(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             path: Arc::new(path.canonicalize()?),

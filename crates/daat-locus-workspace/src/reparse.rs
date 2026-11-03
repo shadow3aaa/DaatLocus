@@ -264,7 +264,7 @@ mod tests {
         let branch = store.open_branch(origin.clone(), "feature").unwrap();
         let peer = store.open_branch(origin.clone(), "peer").unwrap();
         assert!(peer.reparse_point("new-link").unwrap().unwrap().directory);
-        let outcome = branch.merge_to_default(&origin).unwrap();
+        let outcome = branch.publish(&origin).unwrap();
         assert!(
             outcome.conflicts.is_empty() && outcome.error.is_none(),
             "{outcome:?}"
@@ -281,7 +281,7 @@ mod tests {
         branch
             .set_reparse_point("new-link", Some(junction(&source.join("other"))))
             .unwrap();
-        let second = branch.merge_to_default(&origin).unwrap();
+        let second = branch.publish(&origin).unwrap();
         assert!(
             second.conflicts.is_empty() && second.error.is_none(),
             "{second:?}"

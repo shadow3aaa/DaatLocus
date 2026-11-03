@@ -108,7 +108,7 @@ fn native_shared_branches_isolate_host_files_and_restore_after_unmount() {
         .store()
         .open_branch(origin.clone(), "shared")
         .unwrap();
-    let outcome = branch.merge_to_default(&origin).unwrap();
+    let outcome = branch.publish(&origin).unwrap();
     assert!(
         outcome.conflicts.is_empty() && outcome.error.is_none(),
         "{outcome:?}"
@@ -121,6 +121,36 @@ fn native_shared_branches_isolate_host_files_and_restore_after_unmount() {
         fs::read(source.join("nested/renamed.txt")).unwrap(),
         b"new bytes"
     );
+    let left = branch.fork("rename-left").unwrap();
+    let right = branch.fork("rename-right").unwrap();
+    left.rename("source.txt", "left.txt", false).unwrap();
+    right.rename("source.txt", "right.txt", false).unwrap();
+    let merged = manager
+        .store()
+        .merge(
+            &first.path,
+            "rename-left",
+            "rename-right",
+            "renamed",
+            "Keep both renames",
+            &[],
+        )
+        .unwrap();
+    assert!(merged.conflicts.is_empty(), "{merged:?}");
+    let merged = manager
+        .select_recorded(&first.path, "renamed", "renamed")
+        .unwrap()
+        .unwrap();
+    fs::write(merged.directory.join("left.txt"), b"left edit\n").unwrap();
+    assert_eq!(
+        fs::read(merged.directory.join("right.txt")).unwrap(),
+        b"shared edit\n"
+    );
+    assert_eq!(
+        fs::read(merged.directory.join("left.txt")).unwrap(),
+        b"left edit\n"
+    );
+    assert_eq!(left.read("left.txt", 0, 100).unwrap(), b"shared edit\n");
     manager.close();
 }
 
@@ -475,7 +505,7 @@ fn windows_internal_absolute_junctions_relocate_and_merge_without_touching_sourc
         .store()
         .open_branch(origin.clone(), "feature")
         .unwrap();
-    let outcome = branch.merge_to_default(&origin).unwrap();
+    let outcome = branch.publish(&origin).unwrap();
     assert!(
         outcome.conflicts.is_empty() && outcome.error.is_none(),
         "{outcome:?}"
@@ -536,7 +566,7 @@ fn windows_native_symbolic_links_snapshot_and_merge_with_their_directory_type() 
         .store()
         .open_branch(origin.clone(), "feature")
         .unwrap();
-    let result = branch.merge_to_default(&origin).unwrap();
+    let result = branch.publish(&origin).unwrap();
     assert!(
         result.conflicts.is_empty() && result.error.is_none(),
         "{result:?}"
