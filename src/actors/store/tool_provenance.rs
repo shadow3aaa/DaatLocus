@@ -27,6 +27,33 @@ fn authority(input: &MessageRecord) -> Result<String> {
     ))
 }
 
+pub(super) fn permission_source(
+    db: &Connection,
+    actor: &str,
+    current: &str,
+    source: &str,
+) -> Result<MessageRecord> {
+    let current = message_tx(db, current)?;
+    let source = message_tx(db, source)?;
+    let same_authority = current.id == source.id
+        || matches!(
+            (&current.source, &source.source),
+            (MessageSource::User, MessageSource::User)
+                | (MessageSource::Actor { .. }, MessageSource::Actor { .. })
+        );
+    if [&current, &source].iter().any(|input| {
+        input.actor_id != actor || input.status != MessageStatus::Running || input.cancel_requested
+    }) || !same_authority
+        || current.remote_authority != source.remote_authority
+    {
+        return Err(ActorError::Forbidden(
+            "Permission source is outside the active Actor authority".into(),
+        )
+        .into());
+    }
+    Ok(source)
+}
+
 fn binding(result: &ToolResultRecord) -> Result<String> {
     Ok(crate::stage::digest(
         &serde_json::to_vec(&serde_json::json!({
@@ -178,18 +205,9 @@ impl ActorStore {
                     .optional())?
                 .ok_or_else(|| missing("Local tool execution reference"))?,
             )?;
-            let input: MessageRecord = decode(sql(db.query_row(
-                "SELECT record FROM messages WHERE id=?1",
-                [message],
-                |r| r.get(0),
-            ))?)?;
-            if native.actor_id != actor
-                || native.message_id != message
-                || input.actor_id != actor
-                || input.status != MessageStatus::Running
-                || input.cancel_requested
-                || authority(&input)? != native.authority
-            {
+            let input =
+                tool_provenance::permission_source(&db, actor, message, &native.message_id)?;
+            if native.actor_id != actor || authority(&input)? != native.authority {
                 return Err(ActorError::Forbidden(
                     "Tool result reference is outside the active request authority".into(),
                 )
@@ -198,7 +216,7 @@ impl ActorStore {
             if let Some(expected) = &native.effect_digest {
                 let effect: Option<(String,String,Option<Vec<u8>>)> = sql(db.query_row(
                     "SELECT digest,state,result FROM core_app_effects WHERE message=?1 AND call=?2",
-                    params![message,native.call.id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+                    params![native.message_id,native.call.id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
                 ).optional())?;
                 let Some((digest, state, Some(bytes))) = effect else {
                     return Err(

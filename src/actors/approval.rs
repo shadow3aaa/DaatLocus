@@ -183,10 +183,7 @@ pub(crate) async fn submit_application(
     validate_application(&application)?;
     ensure_current(system, actor, message, control)?;
     let record = system.store().approval(id)?;
-    if record.source_actor(system.store())? != actor.id
-        || record.message_id != message.id
-        || !system.store().native_approval(id)?
-    {
+    if record.source_actor(system.store())? != actor.id || !system.store().native_approval(id)? {
         return Err(super::ActorError::Forbidden(
             "Approval reference is outside the active Actor authority".into(),
         )
@@ -374,14 +371,25 @@ async fn automatic_review(
         .as_ref()
         .ok_or_else(|| miette!("Approval application is missing"))?;
     let proposed_call = call;
+    let source = system.store().message(&record.message_id)?;
+    let requests = system.store().input_batch(&source.id)?;
+    let task = system
+        .store()
+        .task_handoff(&actor.id, &source.id)
+        .filter(|handoff| handoff.task_message_id != source.id)
+        .map(|handoff| system.store().message(&handoff.task_message_id))
+        .transpose()?
+        .filter(|task| task.actor_id == actor.id);
     let runtime_reads = match crate::sandbox::runtime_read_scopes() {
         Ok(roots) => roots,
         Err(_) => return Ok(Err(ReviewFailure::Configuration)),
     };
     let input = json!({"actor":{"id":actor.id,
             "installed_apps":actor.config.apps,"workspace":actor.config.workspace,"remote_read_only":actor.remote_read_only},
-            "request":{"content":message.content,"source":message.source,
-                "kind":message.kind,"in_reply_to":message.in_reply_to},
+            "request":{"id":source.id,"content":source.content,"source":source.source,
+                "kind":source.kind,"in_reply_to":source.in_reply_to},
+            "request_inputs":requests.iter().map(|input| json!({"id":input.id,"content":input.content,"source":input.source,"kind":input.kind,"in_reply_to":input.in_reply_to})).collect::<Vec<_>>(),
+            "task_request":task.as_ref().map(|task| json!({"id":task.id,"content":task.content,"source":task.source,"status":task.status,"cancel_requested":task.cancel_requested})),
             "application":application,
             "remembered_permissions":system.store().sandbox_scopes()?,
             "authorized_baseline":{"system_temporary_paths":crate::sandbox::system_temporary_paths()

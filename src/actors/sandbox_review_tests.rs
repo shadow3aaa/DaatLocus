@@ -1,4 +1,5 @@
 use super::*;
+use crate::actors::MessageKind;
 
 use crate::{
     config::{Config, ModelConfig, ProviderConfig},
@@ -444,13 +445,38 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     std::fs::create_dir_all(&outside).unwrap();
     let marker = outside.join("effects.txt");
     std::fs::write(&marker, "one original effect").unwrap();
+    let task = message;
+    let mut result_input = task.clone();
+    result_input.id = Uuid::new_v4().to_string();
+    result_input.kind = MessageKind::Result;
+    result_input.in_reply_to = Some(task.id.clone());
+    result_input.content = "A collaborator finished inspecting another branch".into();
+    result_input.status = MessageStatus::Queued;
+    result_input.started_at_ms = None;
+    system.store().enqueue(result_input, None).unwrap();
+    let message = system
+        .store()
+        .claim_incoming(&actor.id, &task.id)
+        .unwrap()
+        .unwrap();
     let (_, result) = source(&system, &actor, &message, false);
-    let base = system.execution_context(&actor, &message).unwrap();
+    let mut nested = message.clone();
+    nested.id = Uuid::new_v4().to_string();
+    nested.content = "Check another project while the report is suspended".into();
+    nested.status = MessageStatus::Queued;
+    nested.started_at_ms = None;
+    system.store().enqueue(nested, None).unwrap();
+    let nested = system
+        .store()
+        .claim_incoming(&actor.id, &message.id)
+        .unwrap()
+        .unwrap();
+    let base = system.execution_context(&actor, &nested).unwrap();
     assert!(!base.sandbox_policy.is_path_writable(&outside));
     let approved = runtime::submit(
         &system,
         &actor,
-        &message,
+        &nested,
         &ActorControl::default(),
         &base,
         scope_request(&result, &outside, true),
@@ -459,6 +485,7 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     .await
     .unwrap();
     assert_eq!(approved.decision, ApprovalDecision::Approved);
+    assert_eq!(approved.message_id, message.id);
     assert!(approved.appeal.is_none());
     assert!(core_inputs(&system).is_empty());
     assert_eq!(reviewer.requests.lock().len(), 1);
@@ -479,6 +506,12 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     {
         let requests = reviewer.requests.lock();
         assert!(requests[0].history_messages.is_empty());
+        let facts: serde_json::Value =
+            serde_json::from_str(&requests[0].current_user_message).unwrap();
+        assert_eq!(facts["request"]["id"], message.id);
+        assert_eq!(facts["request"]["content"], message.content);
+        assert_eq!(facts["task_request"]["id"], task.id);
+        assert_eq!(facts["task_request"]["content"], task.content);
     }
     system.seed_test_actor("other");
     let other = system.actor("other").unwrap();

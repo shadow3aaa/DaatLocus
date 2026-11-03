@@ -381,9 +381,10 @@ pub(crate) async fn submit(
                     "Original tool authority cannot obtain write access"
                 ));
             }
+            let source = system.store().message(&native.message_id)?;
             create_scope_application(
                 system,
-                message,
+                &source,
                 &native.call,
                 base,
                 SandboxScopeRequest {

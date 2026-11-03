@@ -31,17 +31,7 @@ impl ActorStore {
                     .optional())?
                 .ok_or_else(|| missing("Approval"))?,
             )?;
-            let input = message_tx(&tx, message)?;
-            if record.message_id != message
-                || input.actor_id != actor
-                || input.status != MessageStatus::Running
-                || input.cancel_requested
-            {
-                return Err(ActorError::Forbidden(
-                    "Approval reference is outside the active Actor request".into(),
-                )
-                .into());
-            }
+            tool_provenance::permission_source(&tx, actor, message, &record.message_id)?;
             if let Some(previous) = &record.application {
                 if previous != application {
                     return Err(ActorError::Conflict(
