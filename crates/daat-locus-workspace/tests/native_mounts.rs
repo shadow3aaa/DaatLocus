@@ -125,13 +125,28 @@ fn native_shared_branches_isolate_host_files_and_restore_after_unmount() {
 }
 
 #[test]
-#[ignore = "requires the installed Dokan 2 driver or a working FUSE device and mount helper"]
+#[cfg(target_os = "linux")]
+#[ignore = "requires a working FUSE device and mount helper"]
 fn runtime_mount_probe_uses_the_native_backend() {
     let temp = tempfile::tempdir().unwrap();
     assert!(
         native::probe(temp.path()).unwrap(),
         "native filesystem backend is unavailable"
     );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the installed Dokan 2 driver and permission to mount directories"]
+fn runtime_mount_probe_rejects_dokan_without_symbolic_link_traversal() {
+    assert!(native::available().unwrap(), "Dokan must be installed");
+    let temp = tempfile::tempdir().unwrap();
+    // Ordinary mounted files work, but this backend cannot follow the links
+    // already stored in a branch. It must not make the Workspace App available.
+    assert!(matches!(
+        native::probe(temp.path()),
+        Err(daat_locus_workspace::Error::Unsupported(_))
+    ));
 }
 
 #[cfg(windows)]

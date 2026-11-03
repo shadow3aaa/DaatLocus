@@ -2,6 +2,7 @@ use super::*;
 use crate::app::App;
 
 #[tokio::test]
+#[cfg(target_os = "linux")]
 #[ignore = "requires an installed native workspace backend and permission to mount directories"]
 async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_directory() {
     use crate::file_io::{ReadFileArgs, WriteFileArgs};
@@ -176,6 +177,86 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
         .unwrap();
     assert_eq!(result.content, "branch edit\n");
     reopened.shutdown().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires the installed Dokan 2 driver and permission to mount directories"]
+async fn workspace_native_dokan_without_links_registers_no_app_tools_or_prompt() {
+    assert!(
+        daat_locus_workspace::native::available().unwrap(),
+        "Dokan must be installed to exercise the native compatibility probe"
+    );
+    let (_directory, system) = fixture().await;
+    assert!(!system.workspace_available().unwrap());
+    let worker = system.actor("root").unwrap();
+    let apps = crate::builtin_apps::create_apps(&worker, system.clone(), &system.config()).unwrap();
+    assert!(apps.app_ids().iter().all(|id| id.as_str() != "workspace"));
+    assert!(
+        apps.model_tool_specs()
+            .unwrap()
+            .iter()
+            .all(|tool| !tool.name.starts_with("workspace__"))
+    );
+    assert!(
+        system
+            .device_app_names()
+            .unwrap()
+            .iter()
+            .all(|name| name != "workspace")
+    );
+    let prompt = super::super::super::prompt::SystemPrompt::for_role(&system, false).unwrap();
+    assert!(prompt.files.iter().all(|file| file.name != "workspaces.md"));
+    // An older service may have persisted this backend's branch as cwd. Do not
+    // resume it with incomplete semantics or silently switch away from its edits.
+    let input = system
+        .send_user("root", "Resume the existing branch".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let workspaces = system.workspaces().unwrap();
+    std::fs::write(worker.config.workspace.join("code.txt"), b"original\n").unwrap();
+    let origin =
+        daat_locus_workspace::Directory::open(&worker.config.workspace, Arc::new(|_, _| Ok(())))
+            .unwrap();
+    let location = workspaces
+        .select(origin.clone(), "retained", "default")
+        .unwrap();
+    std::fs::write(location.directory.join("code.txt"), b"branch edit\n").unwrap();
+    system
+        .store()
+        .select_actor_workspace(
+            "root",
+            &input.id,
+            &worker.config.workspace,
+            &location.directory,
+        )
+        .unwrap();
+    workspaces.close();
+    let selected = system.actor("root").unwrap();
+    assert!(system.execution_context(&selected, &input).is_err());
+    assert!(
+        daat_locus_workspace::native::open_mount_directory(&location.directory)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        system.actor("root").unwrap().config.workspace,
+        location.directory
+    );
+    assert_eq!(
+        workspaces
+            .store()
+            .open_branch(origin, "retained")
+            .unwrap()
+            .read("code.txt", 0, 80)
+            .unwrap(),
+        b"branch edit\n"
+    );
+    assert_eq!(
+        std::fs::read(worker.config.workspace.join("code.txt")).unwrap(),
+        b"original\n"
+    );
+    system.shutdown().await;
 }
 
 #[tokio::test]

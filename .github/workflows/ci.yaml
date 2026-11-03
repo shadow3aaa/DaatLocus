@@ -66,10 +66,10 @@ jobs:
         run: cargo test --locked -p daat-locus-workspace --test native_mounts -- --ignored --test-threads=1
       - name: Build service with embedded Bash entry
         run: cargo build --locked -p daat-locus --no-default-features --bin daat-locus
-      - name: Verify Actor workspace sharing and recovery
+      - name: Verify Actor workspace native compatibility
         timeout-minutes: 15
         if: runner.os == 'Linux' || runner.os == 'Windows'
-        run: cargo test --locked -p daat-locus --lib workspace_native_app_shares_actor_branches_and_restores_the_selected_directory -- --ignored --test-threads=1
+        run: cargo test --locked -p daat-locus --lib workspace_native_ -- --ignored --test-threads=1
       - name: Check Bash and portable command libraries
         run: cargo test --locked -p daat-locus-bash -p daat-locus-uutils -- --test-threads=4
       - name: Check Bash reexec and external PATH commands

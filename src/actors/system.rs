@@ -2151,7 +2151,18 @@ impl ActorSystem {
             .join("workspaces/store.sqlite3")
             .exists()
         {
-            self.workspaces()?
+            let workspaces = self.workspaces()?;
+            let location = workspaces
+                .locate(&actor.config.workspace)
+                .into_diagnostic()?;
+            if location.branch != daat_locus_workspace::DEFAULT_BRANCH
+                && !self.workspace_available()?
+            {
+                return Err(invalid(
+                    "The selected Workspace branch requires a compatible native filesystem backend; its files and selection have been preserved",
+                ));
+            }
+            workspaces
                 .restore(&actor.config.workspace)
                 .into_diagnostic()?;
         }

@@ -31,7 +31,7 @@ pub fn available() -> Result<bool> {
     Ok(false)
 }
 
-/// Verify the calling OS user's mount/read/write path using synthetic files.
+/// Verify native file I/O and symbolic-link traversal using synthetic files.
 /// Dependency detection alone cannot establish directory-mount privileges.
 /// The host supplies its private infrastructure directory, never a project.
 pub fn probe(directory: &Path) -> Result<bool> {
@@ -44,14 +44,42 @@ pub fn probe(directory: &Path) -> Result<bool> {
     let source = scratch.path().join("source");
     std::fs::create_dir(&source)?;
     std::fs::write(source.join("source.txt"), b"original\n")?;
+    std::fs::create_dir(source.join("nested"))?;
+    std::fs::write(source.join("nested/child.txt"), b"nested bytes\n")?;
     let origin = crate::Directory::open(&source, std::sync::Arc::new(|_, _| Ok(())))?;
     let store = crate::Store::open(&scratch.path().join("store.sqlite3"))?;
+    // Seed links in the engine so checking traversal does not require the OS
+    // user's privilege to create a native symlink in the source directory.
+    let workspace = store.branch(origin.clone(), "probe", crate::DEFAULT_BRANCH)?;
+    workspace.symlink("file-link", "source.txt")?;
+    workspace.symlink("directory-link", "nested")?;
     let manager = crate::Workspaces::new(store, scratch.path().join("mounts"));
     let branch = manager.select(origin.clone(), "probe", crate::DEFAULT_BRANCH)?;
     let result = (|| -> Result<()> {
         if std::fs::read(branch.directory.join("source.txt"))? != b"original\n" {
             return Err(crate::Error::Corrupt(
                 "native projection returned different contents".into(),
+            ));
+        }
+        for (path, expected) in [
+            ("file-link", b"original\n".as_slice()),
+            ("directory-link/child.txt", b"nested bytes\n".as_slice()),
+        ] {
+            let contents = std::fs::read(branch.directory.join(path)).map_err(|error| {
+                crate::Error::Unsupported(format!(
+                    "native projection cannot follow symbolic links ({path}): {error}"
+                ))
+            })?;
+            if contents != expected {
+                return Err(crate::Error::Corrupt(
+                    "native projection resolved a symbolic link incorrectly".into(),
+                ));
+            }
+        }
+        std::fs::write(branch.directory.join("file-link"), b"linked edit\n")?;
+        if workspace.read("source.txt", 0, 80)? != b"linked edit\n" {
+            return Err(crate::Error::Corrupt(
+                "native projection did not write through its symbolic link".into(),
             ));
         }
         std::fs::write(branch.directory.join("created.txt"), b"branch bytes\n")?;
@@ -75,7 +103,7 @@ pub fn probe(directory: &Path) -> Result<bool> {
         Ok(())
     })();
     manager.close();
-    drop((manager, origin));
+    drop((manager, workspace, origin));
     result?;
     Ok(true)
 }
