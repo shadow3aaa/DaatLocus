@@ -247,7 +247,7 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
 <ExitCode Behavior="error"/>
 </ExePackage>
 <MsiPackage Id="WinFsp" DisplayName="WinFsp 2.2 Beta 5" SourceFile="{}" Permanent="yes" InstallCondition="WinFspVersion &lt; v2.2.26286 OR (WinFspVersion = v2.2.26286 AND WixBundleAction = 8)"/>
-<MsiPackage Id="WorkspaceSupport" DisplayName="Workspace Support" SourceFile="{}" Permanent="yes"/>
+<MsiPackage Id="WorkspaceSupport" DisplayName="Workspace Support" SourceFile="{}" Permanent="yes" InstallCondition="WorkspaceUnc64 &lt;&gt; 1 OR WorkspaceUnc32 &lt;&gt; 1 OR WixBundleAction = 8"/>
 {}
 <MsiPackage Id="DaatLocus" DisplayName="Daat Locus" SourceFile="{}" Compressed="yes"/>
 {}
