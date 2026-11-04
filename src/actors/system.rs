@@ -2212,6 +2212,7 @@ impl ActorSystem {
         turn_epoch: u64,
         device_policy: Option<ActorConfig>,
     ) -> Result<AppToolExecutionContext> {
+        let _metadata = self.workspace_metadata();
         // A persisted projection must be remounted before any App or native
         // process observes cwd. Missing drivers must never expose the empty
         // directory underneath a former mount as an ordinary workspace.
@@ -2221,7 +2222,6 @@ impl ActorSystem {
             .join("workspaces/store.sqlite3")
             .exists()
         {
-            let _metadata = self.workspace_metadata();
             let workspaces = self.workspaces()?;
             let location = workspaces
                 .locate(&actor.config.workspace)
