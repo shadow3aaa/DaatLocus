@@ -6,3 +6,4 @@ Merge independent work into a fresh branch and validate the combined result. Res
 Coordinate with collaborators, then publish validated work to the original directory unless the task calls for keeping it isolated.
 After an interrupted publication, inspect its recorded progress and actual files before deciding how to continue. Report the project, branch and remaining work when publication is unfinished.
 Follow the device's filesystem authorization flow for each workspace and publication target.
+Use rebind after recreating the original directory to retain its branches and history. Move every Actor out of a branch and finish its processes before deleting it. Delete the project to remove its saved history while keeping native files. Use storage to locate its CAS database and inspect shared content bytes.

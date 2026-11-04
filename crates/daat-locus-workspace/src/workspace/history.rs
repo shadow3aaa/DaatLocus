@@ -154,7 +154,7 @@ pub(crate) fn migrate_versions(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn project_at(connection: &Connection, path: &Path) -> Result<i64> {
+pub(super) fn project_at(connection: &Connection, path: &Path) -> Result<i64> {
     project_at_optional(connection, path)?.ok_or_else(|| missing("workspace project"))
 }
 
@@ -312,8 +312,13 @@ fn insert_branch(
         )));
     }
     connection.execute(
-        "INSERT INTO branches(project,name,base,head) VALUES(?1,?2,?3,?3)",
-        params![project, name, version.root.0],
+        "INSERT INTO branches(project,name,base,head,generation) VALUES(?1,?2,?3,?3,?4)",
+        params![
+            project,
+            name,
+            version.root.0,
+            next_inode(connection)? as i64
+        ],
     )?;
     set_tip(connection, project, name, &version.id)
 }
@@ -323,6 +328,7 @@ impl Workspace {
         let mut connection = self.store.connection.lock();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        self.roots(&transaction)?;
         let version = save_branch(&transaction, self.project, &self.name, message)?;
         transaction.commit()?;
         Ok(version)
@@ -334,7 +340,8 @@ impl Workspace {
                 "publish target directory identity changed".into(),
             ));
         }
-        self.store.publish(origin, &self.name, None, &[])
+        self.store
+            .publish_checked(origin, &self.name, None, &[], Some(self))
     }
 }
 
@@ -538,6 +545,17 @@ impl Store {
         expected_target: Option<&str>,
         resolutions: &[Resolution],
     ) -> Result<PublishOutcome> {
+        self.publish_checked(origin, reference, expected_target, resolutions, None)
+    }
+
+    fn publish_checked(
+        &self,
+        origin: &Directory,
+        reference: &str,
+        expected_target: Option<&str>,
+        resolutions: &[Resolution],
+        workspace: Option<&Workspace>,
+    ) -> Result<PublishOutcome> {
         if !resolutions.is_empty() && (expected_target.is_none() || !is_version_id(reference)) {
             return Err(Error::Invalid(
                 "resolve publication conflicts using the fixed source and target version IDs"
@@ -547,6 +565,9 @@ impl Store {
         let mut connection = self.connection.lock();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(workspace) = workspace {
+            workspace.roots(&transaction)?;
+        }
         let project = project(&transaction, origin)?;
         let source = resolve_saved(
             &transaction,

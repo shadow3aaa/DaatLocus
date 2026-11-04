@@ -42,13 +42,39 @@ impl Workspaces {
     /// Infrastructure paths, used by a host to avoid re-entering its own
     /// projection while authorizing I/O against the original native directory.
     pub fn projected_directories(&self) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .projections()?
+            .into_iter()
+            .map(|location| location.directory)
+            .collect())
+    }
+
+    pub fn projections(&self) -> Result<Vec<Location>> {
         let connection = self.store.connection.lock();
-        let mut statement = connection.prepare("SELECT directory FROM projections")?;
+        let mut statement = connection.prepare("SELECT projects.path,projections.name,projections.directory FROM projections JOIN projects ON projects.id=projections.project")?;
         Ok(statement
             .query_map([], |row| {
-                Ok(native::directory_path(Path::new(&row.get::<_, String>(0)?)))
+                Ok(Location {
+                    path: row.get::<_, String>(0)?.into(),
+                    branch: row.get(1)?,
+                    directory: native::directory_path(Path::new(&row.get::<_, String>(2)?)),
+                })
             })?
             .collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn active_projections(&self) -> Result<Vec<Location>> {
+        let directories: Vec<_> = self
+            .mounts
+            .lock()
+            .values()
+            .map(|mount| mount.directory().to_owned())
+            .collect();
+        Ok(self
+            .projections()?
+            .into_iter()
+            .filter(|location| directories.contains(&location.directory))
+            .collect())
     }
 
     /// Default is the original directory. Existing named branches are reopened
@@ -226,5 +252,48 @@ impl Workspaces {
     pub fn close(&self) {
         let mounts = std::mem::take(&mut *self.mounts.lock());
         drop(mounts);
+    }
+
+    fn release(&self, path: &Path, branch: Option<&str>) -> Result<()> {
+        let mut mounts = self.mounts.lock();
+        let names = if let Some(branch) = branch {
+            vec![branch.to_owned()]
+        } else {
+            let mut names = Vec::new();
+            loop {
+                let page = self.store.branches_at(path, names.len(), 200)?;
+                if page.is_empty() {
+                    break;
+                }
+                names.extend(page);
+            }
+            names
+        };
+        for name in names {
+            let key = self.store.open_recorded_branch(path, &name)?.key();
+            if let Some(mount) = mounts.get_mut(&key) {
+                mount.retire()?;
+            }
+            drop(mounts.remove(&key));
+        }
+        Ok(())
+    }
+
+    /// Rebind the native directory while retaining saved branches and versions.
+    pub fn rebind(&self, origin: &Directory) -> Result<()> {
+        self.release(origin.path(), None)?;
+        self.store.rebind(origin)
+    }
+
+    /// Remove an unused branch, or all project history when branch is None.
+    /// The host serializes this with Actor creation and workspace selection.
+    pub fn delete(&self, path: &Path, branch: Option<&str>) -> Result<()> {
+        if branch == Some(DEFAULT_BRANCH) {
+            return Err(Error::Invalid(
+                "delete the project to remove native history".into(),
+            ));
+        }
+        self.release(path, branch)?;
+        self.store.delete(path, branch)
     }
 }

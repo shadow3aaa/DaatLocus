@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -48,10 +48,10 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
             "FUSE device or mount helper is unavailable".into(),
         ));
     }
+    let view = Arc::new(View::new(workspace)?);
     let filesystem = FilesystemAdapter {
-        view: View::new(workspace)?,
+        view: view.clone(),
         directories: Mutex::new(HashMap::new()),
-        next_directory: AtomicU64::new(1),
         uid: unsafe { libc::getuid() },
         gid: unsafe { libc::getgid() },
     };
@@ -97,6 +97,8 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
             guard: Some(guard),
             unmounter,
             abort,
+            view,
+            directory: path.to_owned(),
         },
     })
 }
@@ -105,6 +107,42 @@ pub(super) struct Session {
     guard: Option<std::thread::JoinHandle<io::Result<()>>>,
     unmounter: fuser::SessionUnmounter,
     abort: std::fs::File,
+    view: Arc<View>,
+    directory: std::path::PathBuf,
+}
+
+impl Session {
+    pub(super) fn retire(&mut self) -> Result<()> {
+        self.view.retire()?;
+        let result = (|| -> Result<()> {
+            let helper = [
+                "/usr/bin/fusermount3",
+                "/bin/fusermount3",
+                "/usr/bin/fusermount",
+                "/bin/fusermount",
+            ]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .ok_or_else(|| Error::Unsupported("FUSE unmount helper is unavailable".into()))?;
+            // A normal unmount refuses kernel-held cwd/directory references.
+            // fuser's general shutdown uses lazy unmount and cannot prove idleness.
+            if !std::process::Command::new(helper)
+                .args(["-u", "--"])
+                .arg(&self.directory)
+                .status()?
+                .success()
+            {
+                return Err(Error::Conflict(
+                    "workspace projection is busy or cannot be unmounted".into(),
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.view.resume();
+        }
+        result
+    }
 }
 
 impl Drop for Session {
@@ -121,9 +159,8 @@ impl Drop for Session {
 }
 
 struct FilesystemAdapter {
-    view: View,
+    view: Arc<View>,
     directories: Mutex<HashMap<u64, Vec<(String, Entry)>>>,
-    next_directory: AtomicU64,
     uid: u32,
     gid: u32,
 }
@@ -440,7 +477,7 @@ impl Filesystem for FilesystemAdapter {
             let parent = self.view.lookup(parent_path)?;
             let mut entries = vec![(".".into(), current), ("..".into(), parent)];
             entries.extend(self.view.read_dir(inode)?);
-            let handle = self.next_directory.fetch_add(1, Ordering::Relaxed);
+            let handle = self.view.open(&path, READ, SHARE_ALL, false)?;
             self.directories.lock().insert(handle, entries);
             Ok(FileHandle(handle))
         })();
@@ -483,6 +520,7 @@ impl Filesystem for FilesystemAdapter {
         reply: ReplyEmpty,
     ) {
         self.directories.lock().remove(&handle.0);
+        self.view.close(handle.0);
         reply.ok();
     }
     fn create(

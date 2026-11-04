@@ -74,6 +74,16 @@ impl Store {
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), inode INTEGER NOT NULL);
              INSERT OR IGNORE INTO workspace_sequence VALUES(1,1);",
         )?;
+        let generation: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('branches') WHERE name='generation')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !generation {
+            connection.execute_batch(
+                "ALTER TABLE branches ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         let version: Option<u32> = connection
             .query_row("SELECT version FROM workspace_format", [], |row| row.get(0))
             .optional()?;

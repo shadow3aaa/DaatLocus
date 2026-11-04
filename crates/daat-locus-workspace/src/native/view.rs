@@ -15,6 +15,7 @@ struct Open {
 }
 
 struct State {
+    retiring: bool,
     paths: HashMap<u64, String>,
     handles: HashMap<u64, Open>,
     unlinked: HashMap<u64, DetachedFile>,
@@ -64,6 +65,7 @@ impl View {
             #[cfg(target_os = "linux")]
             root_inode,
             state: Mutex::new(State {
+                retiring: false,
                 paths: HashMap::from([(root_inode, String::new())]),
                 handles: HashMap::new(),
                 unlinked: HashMap::new(),
@@ -118,6 +120,11 @@ impl View {
 
     pub(super) fn open(&self, path: &str, access: u8, share: u8, append: bool) -> Result<u64> {
         let mut state = self.state.lock();
+        if state.retiring {
+            return Err(Error::Conflict(
+                "workspace projection is being removed".into(),
+            ));
+        }
         let entry = self.workspace.entry(path)?;
         if access & WRITE != 0 && entry.mode & 0o222 == 0 {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
@@ -143,6 +150,22 @@ impl View {
             },
         );
         Ok(handle)
+    }
+
+    pub(super) fn retire(&self) -> Result<()> {
+        let mut state = self.state.lock();
+        if !state.handles.is_empty() {
+            return Err(Error::Conflict(
+                "workspace branch has open native handles".into(),
+            ));
+        }
+        state.retiring = true;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn resume(&self) {
+        self.state.lock().retiring = false;
     }
 
     pub(super) fn close(&self, handle: u64) {
@@ -489,7 +512,10 @@ mod tests {
         view.remove("file", false, None).unwrap();
         view.write(second, 0, b"detached", false).unwrap();
         assert_eq!(view.read(second, 0, 20).unwrap(), b"detached");
+        assert!(view.retire().is_err());
         view.close(second);
+        view.retire().unwrap();
+        assert!(view.open("", READ, SHARE_ALL, false).is_err());
     }
 
     #[test]

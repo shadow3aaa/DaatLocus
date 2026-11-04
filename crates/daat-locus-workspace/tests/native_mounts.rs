@@ -808,3 +808,66 @@ fn windows_cargo_builds_and_runs_a_project_with_an_internal_junction_dependency(
     );
     manager.close();
 }
+
+#[test]
+#[ignore = "requires the installed WinFsp driver or a working FUSE device and mount helper"]
+fn native_deletion_refuses_handles_and_recreated_branches_get_new_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"native").unwrap();
+    let origin = Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap();
+    let manager = Workspaces::new(
+        Store::open(&temp.path().join("store.sqlite3")).unwrap(),
+        temp.path().join("mounts"),
+    );
+    let selected = manager.select(origin.clone(), "work", "default").unwrap();
+    let file = fs::File::open(selected.directory.join("file")).unwrap();
+    assert!(manager.delete(origin.path(), Some("work")).is_err());
+    assert_eq!(
+        fs::read(selected.directory.join("file")).unwrap(),
+        b"native"
+    );
+    drop(file);
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        let mut command = std::process::Command::new(std::env::var("ComSpec").unwrap());
+        #[cfg(windows)]
+        command.args(["/D", "/C", "echo ready & set /p line="]);
+        #[cfg(target_os = "linux")]
+        let mut command = std::process::Command::new("/bin/sh");
+        #[cfg(target_os = "linux")]
+        command.args(["-c", "echo ready; read line"]);
+        let mut child = command
+            .current_dir(&selected.directory)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        let blocked = manager.delete(origin.path(), Some("work")).is_err();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(blocked, "a process cwd must prevent branch deletion");
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match manager.delete(origin.path(), Some("work")) {
+            Ok(()) => break,
+            Err(error) => {
+                assert!(std::time::Instant::now() < deadline, "{error}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    let next = manager.select(origin.clone(), "work", "default").unwrap();
+    assert_ne!(next.directory, selected.directory);
+    assert_eq!(fs::read(next.directory.join("file")).unwrap(), b"native");
+    manager.close();
+}

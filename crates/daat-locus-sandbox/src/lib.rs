@@ -21,7 +21,7 @@ mod contract_tests;
 #[cfg(test)]
 mod test_support;
 
-use miette::{Result, miette};
+use miette::{IntoDiagnostic, Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -782,6 +782,64 @@ pub fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
 }
 
 impl FileSystemSandboxPolicy {
+    /// Apply the same scopes and exclusions to another projection of a directory.
+    pub fn project<'a>(
+        &mut self,
+        projections: impl IntoIterator<Item = (&'a Path, &'a Path)>,
+    ) -> Result<()> {
+        self.ensure_root_bindings()?;
+        let source_policy = self.clone();
+        for (source, target) in projections {
+            let target = normalize_path(&std::fs::canonicalize(target).into_diagnostic()?);
+            let map = |path: &Path| {
+                path.strip_prefix(source)
+                    .ok()
+                    .map(|relative| target.join(relative))
+                    .or_else(|| source.starts_with(path).then(|| target.clone()))
+            };
+            let readable = source_policy
+                .readable_roots
+                .iter()
+                .filter_map(|path| map(path))
+                .collect::<Vec<_>>();
+            let writable = source_policy
+                .writable_roots
+                .iter()
+                .filter_map(|root| {
+                    Some(WritableRoot {
+                        root: map(&root.root)?,
+                        read_only_subpaths: root
+                            .read_only_subpaths
+                            .iter()
+                            .filter_map(|path| map(path))
+                            .collect(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let denied_reads = source_policy
+                .deny_read_paths
+                .iter()
+                .filter_map(|path| map(path))
+                .collect::<Vec<_>>();
+            let denied_writes = source_policy
+                .deny_write_paths
+                .iter()
+                .filter_map(|path| map(path))
+                .collect::<Vec<_>>();
+            let bound = source_policy
+                .bound_roots
+                .iter()
+                .filter_map(|path| map(path))
+                .collect::<Vec<_>>();
+            self.readable_roots.extend(readable);
+            self.writable_roots.extend(writable);
+            self.deny_read_paths.extend(denied_reads);
+            self.deny_write_paths.extend(denied_writes);
+            self.bound_roots.extend(bound);
+        }
+        Ok(())
+    }
+
     pub const fn unrestricted() -> Self {
         Self {
             full_disk_read: true,
@@ -1005,6 +1063,55 @@ mod tests {
         FileSystemSandboxPolicy, SandboxAsyncChild, SandboxPolicy, SandboxProcessOptions,
         SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
     };
+
+    #[test]
+    fn directory_projections_preserve_scopes_denials_and_readonly_authority() {
+        let temp = crate::test_support::scoped_directory();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        for path in [&source, &target] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let mut base = FileSystemSandboxPolicy::unrestricted();
+        base.full_disk_write = false;
+        base.full_disk_read = false;
+        base.bound_roots.push(source.clone());
+        base.writable_roots.push(WritableRoot {
+            root: source.clone(),
+            read_only_subpaths: vec![source.join("readonly")],
+        });
+        base.deny_write_paths.push(source.join("denied"));
+        base.deny_read_paths.push(source.join("secret"));
+        for read_only in [false, true] {
+            let mut policy = base.clone();
+            policy.deny_all_writes = read_only;
+            policy
+                .project([(source.as_path(), target.as_path())])
+                .unwrap();
+            assert_eq!(
+                policy.is_path_writable(&target.join("future/file")),
+                !read_only
+            );
+            assert!(!policy.is_path_writable(&target.join("readonly/file")));
+            assert!(!policy.is_path_writable(&target.join("denied/file")));
+            assert!(!policy.is_path_readable(&target.join("secret/file")));
+            assert!(!policy.is_path_writable(&root.join("outside")));
+        }
+        let mut narrow = base.clone();
+        narrow.writable_roots[0].root = source.join("subtree");
+        narrow
+            .project([(source.as_path(), target.as_path())])
+            .unwrap();
+        assert!(narrow.is_path_writable(&target.join("subtree/future")));
+        assert!(!narrow.is_path_writable(&target.join("elsewhere")));
+        let mut revoked = base;
+        revoked.writable_roots.clear();
+        revoked
+            .project([(source.as_path(), target.as_path())])
+            .unwrap();
+        assert!(!revoked.is_path_writable(&target.join("future/file")));
+    }
 
     #[cfg(unix)]
     #[test]

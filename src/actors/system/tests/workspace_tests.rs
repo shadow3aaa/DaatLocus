@@ -16,6 +16,14 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     system.store().claim_next("root").unwrap().unwrap();
     let original = system.actor("root").unwrap();
     std::fs::write(original.config.workspace.join("code.txt"), b"original\n").unwrap();
+    let scope = SandboxScope::filesystem(&original.config.workspace, true).unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            crate::sandbox::scopes::remember(tx, &[scope])
+                .map_err(|_| crate::stage::StageError::Invalid("test workspace grant failed"))
+        })
+        .unwrap();
     let context = system.execution_context(&original, &input).unwrap();
     let mut app = crate::workspace_app::WorkspaceApp::new("root".into(), system.clone());
     app.execute_tool(
@@ -39,15 +47,59 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     .await
     .unwrap();
     let selected = system.actor("root").unwrap();
-    let scope = SandboxScope::filesystem(&selected.config.workspace, true).unwrap();
-    system
-        .store()
-        .stage_transaction(|tx| {
-            crate::sandbox::scopes::remember(tx, &[scope])
-                .map_err(|_| crate::stage::StageError::Invalid("test workspace grant failed"))
-        })
-        .unwrap();
     let context = system.execution_context(&selected, &input).unwrap();
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        let (shell, args): (String, Vec<String>) = (
+            std::env::var("ComSpec").unwrap(),
+            vec![
+                "/D".into(),
+                "/C".into(),
+                "echo terminal>first-terminal.txt".into(),
+            ],
+        );
+        #[cfg(target_os = "linux")]
+        let (shell, args): (String, Vec<String>) = (
+            "/bin/sh".into(),
+            vec!["-c".into(), "printf terminal > first-terminal.txt".into()],
+        );
+        let mut child = crate::sandbox::SandboxAsyncChild::spawn_shell(
+            &context.sandbox_policy,
+            &shell,
+            args,
+            crate::sandbox::SandboxProcessOptions {
+                current_dir: Some(context.execution_cwd.clone()),
+                stdin: crate::sandbox::SandboxStdio::Null,
+                stdout: crate::sandbox::SandboxStdio::Null,
+                stderr: crate::sandbox::SandboxStdio::Null,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            status.success(),
+            "first branch write must use the existing native-directory authority"
+        );
+        assert!(context.execution_cwd.join("first-terminal.txt").is_file());
+        assert!(
+            !original
+                .config
+                .workspace
+                .join("first-terminal.txt")
+                .exists()
+        );
+    }
     context
         .files()
         .write_file(&WriteFileArgs {
@@ -123,6 +175,20 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
         .await
         .unwrap();
     assert_eq!(current.payload["branch"], "feature");
+    assert!(
+        app.execute_tool(
+            &crate::model_protocol::AgentToolCall {
+                id: "delete-shared-feature".into(),
+                name: "delete".into(),
+                arguments: serde_json::json!({"branch":"feature"}),
+            },
+            &context,
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains(peer_id)
+    );
     assert_eq!(
         std::fs::read(peer_context.execution_cwd.join("code.txt")).unwrap(),
         b"branch edit\n"
@@ -475,6 +541,89 @@ async fn workspace_tool_schemas_and_default_migration_retain_native_files_and_au
     assert_eq!(
         system.actor("root").unwrap().config.workspace,
         target.canonicalize().unwrap()
+    );
+    system.shutdown().await;
+}
+
+#[tokio::test]
+async fn project_deletion_waits_for_other_actors_and_keeps_native_files() {
+    let (directory, system) = fixture().await;
+    system.set_workspace_backend_for_test(true);
+    let input = system
+        .send_user("root", "Clean unused projects".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let root = system.actor("root").unwrap();
+    let source = directory.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("keep.txt"), "native bytes").unwrap();
+    let origin = daat_locus_workspace::Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap();
+    system
+        .workspaces()
+        .unwrap()
+        .store()
+        .commit_default(&origin, "Saved")
+        .unwrap();
+    let mut config = root.config.clone();
+    config.name = "Project user".into();
+    config.workspace = source.clone();
+    let peer = system.create_owned("root", config).unwrap();
+    let mut app = crate::workspace_app::WorkspaceApp::new("root".into(), system.clone());
+    let context = system.execution_context(&root, &input).unwrap();
+    let delete = crate::model_protocol::AgentToolCall {
+        id: "delete".into(),
+        name: "delete".into(),
+        arguments: serde_json::json!({"path":source,"branch":null}),
+    };
+    assert!(
+        app.execute_tool(&delete, &context)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(&peer.id)
+    );
+    system.store().set_archived(&peer.id, true).unwrap();
+    assert!(
+        app.execute_tool(&delete, &context)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(&peer.id)
+    );
+    system.store().set_archived(&peer.id, false).unwrap();
+    let peer_input = system
+        .message_from_actor(
+            "root",
+            &input.id,
+            &peer.id,
+            "Move outside the project".into(),
+        )
+        .unwrap();
+    system.store().claim_next(&peer.id).unwrap().unwrap();
+    let mut peer_app = crate::workspace_app::WorkspaceApp::new(peer.id.clone(), system.clone());
+    peer_app
+        .execute_tool(
+            &crate::model_protocol::AgentToolCall {
+                id: "leave".into(),
+                name: "select".into(),
+                arguments: serde_json::json!({"path":root.config.workspace,"branch":"default"}),
+            },
+            &system.execution_context(&peer, &peer_input).unwrap(),
+        )
+        .await
+        .unwrap();
+    app.execute_tool(&delete, &context).await.unwrap();
+    assert!(
+        system
+            .workspaces()
+            .unwrap()
+            .store()
+            .storage(origin.path())
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("keep.txt")).unwrap(),
+        "native bytes"
     );
     system.shutdown().await;
 }

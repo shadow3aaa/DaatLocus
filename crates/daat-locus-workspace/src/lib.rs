@@ -12,7 +12,7 @@ pub use projections::{Location, Workspaces};
 pub use store::{Collection, ObjectId, Statistics, Store};
 pub use workspace::{
     Change, ChangeKind, Entry, EntryKind, FileVersion, MergeOutcome, PublishOutcome, Resolution,
-    Version, Workspace,
+    Storage, Version, Workspace,
 };
 
 use std::io;

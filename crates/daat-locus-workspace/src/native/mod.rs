@@ -152,6 +152,12 @@ pub struct Mount {
 }
 
 impl Mount {
+    pub(crate) fn retire(&mut self) -> Result<()> {
+        #[cfg(any(windows, target_os = "linux"))]
+        return self._session.retire();
+        #[cfg(not(any(windows, target_os = "linux")))]
+        Ok(())
+    }
     pub fn directory(&self) -> &Path {
         &self.directory
     }

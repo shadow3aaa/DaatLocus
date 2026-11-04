@@ -165,6 +165,11 @@ pub(super) struct Session {
 // Dispatcher callbacks finish before their stable handler and function table drop.
 unsafe impl Send for Session {}
 unsafe impl Sync for Session {}
+impl Session {
+    pub(super) fn retire(&mut self) -> Result<()> {
+        self._handler.view.retire()
+    }
+}
 impl Drop for Session {
     fn drop(&mut self) {
         if let Some((path, identity)) = &self.registration {

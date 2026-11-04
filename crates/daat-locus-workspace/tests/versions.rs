@@ -354,3 +354,78 @@ fn upgrading_a_store_preserves_live_branches_and_legacy_checkpoints() {
         b"one\ntwo\nthree\nfour\nfive\n"
     );
 }
+
+#[test]
+fn rebind_retains_versions_and_deletion_fences_recreated_branches() {
+    let (temp, path, store) = fixture();
+    let branch = store.branch(directory(&path), "work", "default").unwrap();
+    let saved = branch.commit("Keep this version").unwrap();
+    let manager = daat_locus_workspace::Workspaces::new(store.clone(), temp.path().join("mounts"));
+    fs::rename(&path, temp.path().join("old-project")).unwrap();
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("code"), b"new native bytes").unwrap();
+    assert!(
+        store
+            .commit_default(&directory(&path), "wrong identity")
+            .is_err()
+    );
+    manager.rebind(&directory(&path)).unwrap();
+    store
+        .commit_default(&directory(&path), "Recreated directory")
+        .unwrap();
+    assert_eq!(
+        store
+            .read_version(&path, &saved.id, "code", 0, 100)
+            .unwrap()
+            .bytes,
+        b"one\ntwo\nthree\nfour\nfive\n"
+    );
+    manager.delete(&path, Some("work")).unwrap();
+    let recreated = store.branch(directory(&path), "work", "default").unwrap();
+    assert_ne!(branch.key(), recreated.key());
+    assert!(branch.write("code", 0, b"stale").is_err());
+    assert!(branch.commit("stale").is_err());
+    assert!(branch.fork("stale-fork").is_err());
+    assert_eq!(recreated.read("code", 0, 100).unwrap(), b"new native bytes");
+    assert_eq!(
+        store
+            .read_version(&path, &saved.id, "code", 0, 3)
+            .unwrap()
+            .bytes,
+        b"one"
+    );
+    let storage = store.storage(&path).unwrap();
+    assert!(storage.stored_bytes > 0);
+    assert_eq!(storage.stored_bytes, storage.exclusive_stored_bytes);
+    manager.delete(&path, None).unwrap();
+    assert!(store.read_version(&path, &saved.id, "code", 0, 3).is_err());
+    store.collect_garbage().unwrap();
+    assert_eq!(store.statistics().unwrap().objects, 0);
+    assert_eq!(fs::read(path.join("code")).unwrap(), b"new native bytes");
+    let next = store.branch(directory(&path), "work", "default").unwrap();
+    assert_ne!(next.key(), recreated.key());
+    assert!(recreated.write("code", 0, b"stale project").is_err());
+}
+
+#[test]
+fn project_storage_counts_shared_blocks_once_and_reclaims_only_unreferenced_content() {
+    let (temp, first, store) = fixture();
+    let second = temp.path().join("second");
+    fs::create_dir(&second).unwrap();
+    fs::copy(first.join("code"), second.join("code")).unwrap();
+    store.commit_default(&directory(&first), "first").unwrap();
+    store.commit_default(&directory(&second), "second").unwrap();
+    let second = second.canonicalize().unwrap();
+    let stats = store.storage(&first).unwrap();
+    assert!(stats.shared_stored_bytes > 0);
+    assert_eq!(
+        stats.stored_bytes,
+        stats.exclusive_stored_bytes + stats.shared_stored_bytes
+    );
+    let manager = daat_locus_workspace::Workspaces::new(store.clone(), temp.path().join("mounts"));
+    manager.delete(&first, None).unwrap();
+    store.collect_garbage().unwrap();
+    let stats = store.storage(&second).unwrap();
+    assert_eq!(stats.shared_stored_bytes, 0);
+    assert_eq!(stats.stored_bytes, stats.exclusive_stored_bytes);
+}

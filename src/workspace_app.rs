@@ -38,6 +38,44 @@ struct SelectArgs {
 #[model_schema]
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ProjectArgs {
+    path: Option<String>,
+}
+
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeleteArgs {
+    path: Option<String>,
+    /// Named branch to remove; null removes the project's branches and history.
+    branch: Option<String>,
+}
+
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
+struct DeleteOutput {
+    path: String,
+    branch: Option<String>,
+}
+
+#[model_schema]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct StorageOutput {
+    store_path: String,
+    database_bytes: u64,
+    wal_bytes: u64,
+    objects: u64,
+    stored_bytes: u64,
+    exclusive_stored_bytes: u64,
+    shared_stored_bytes: u64,
+    versions: u64,
+    branches: u64,
+}
+
+#[model_schema]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ForkArgs {
     path: Option<String>,
     /// Fresh shared branch name.
@@ -309,7 +347,9 @@ impl WorkspaceApp {
     ) -> Result<T> {
         self.pending.retain(|task| !task.is_finished());
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let system = self.system.clone();
         self.pending.push(tokio::task::spawn_blocking(move || {
+            let _metadata = system.workspace_metadata();
             let _ = sender.send(operation());
         }));
         // Keep the JoinHandle in the App when this invocation future is
@@ -406,6 +446,9 @@ impl App for WorkspaceApp {
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
             AppToolSpec { name:"current".into(), description:"Read the current project, shared branch and execution directory.".into(), input_schema:model_schema_for::<EmptyAppArgs>() },
+            AppToolSpec { name:"rebind".into(), description:"Bind a recreated original directory to its existing project, preserving branches and saved versions. Move Actors out of named branches first.".into(), input_schema:model_schema_for::<ProjectArgs>() },
+            AppToolSpec { name:"delete".into(), description:"Delete an unused named branch; branch=null deletes the project's branches and saved history. Native files remain. Move every Actor out of the affected workspace first; open native handles also prevent deletion. Branch deletion retains saved versions until project deletion.".into(), input_schema:model_schema_for::<DeleteArgs>() },
+            AppToolSpec { name:"storage".into(), description:"Locate the local CAS database and report project content bytes shared with or exclusive of other projects. Content counts are compressed object bytes; database/WAL sizes include all projects and metadata.".into(), input_schema:model_schema_for::<ProjectArgs>() },
             AppToolSpec { name:"select".into(), description:"Switch cwd to an existing shared branch or the native default directory. Pass the returned directory to another Actor to collaborate. Running processes retain their cwd.".into(), input_schema:model_schema_for::<SelectArgs>() },
             AppToolSpec { name:"list".into(), description:"List shared project branches, including the native default directory. Continue with next_cursor.".into(), input_schema:model_schema_for::<ListArgs>() },
             AppToolSpec { name:"fork".into(), description:"Create an isolated shared branch from a branch or saved version. Captures current source contents and returns its version; use select to work there.".into(), input_schema:model_schema_for::<ForkArgs>() },
@@ -429,7 +472,14 @@ impl App for WorkspaceApp {
                 context,
                 matches!(
                     call.name.as_str(),
-                    "select" | "fork" | "commit" | "merge" | "publish" | "compact"
+                    "select"
+                        | "fork"
+                        | "commit"
+                        | "merge"
+                        | "publish"
+                        | "compact"
+                        | "rebind"
+                        | "delete"
                 ),
             )?
             .clone();
@@ -456,27 +506,35 @@ impl App for WorkspaceApp {
                 } else {
                     None
                 };
+                let system = self.system.clone();
+                let actor_id = self.actor_id.clone();
+                let message_id = caller.message_id.clone();
+                let expected = context.execution_cwd.clone();
                 let selected = self
                     .blocking(move || {
-                        if let Some(origin) = origin {
-                            return manager.select(origin, DEFAULT_BRANCH, DEFAULT_BRANCH);
-                        }
-                        manager
-                            .select_recorded(&location.path, &args.branch, &args.branch)?
-                            .ok_or_else(|| {
-                                daat_locus_workspace::Error::Invalid(
-                                    "select an existing workspace branch".into(),
-                                )
-                            })
+                        let selected = if let Some(origin) = origin {
+                            manager.select(origin, DEFAULT_BRANCH, DEFAULT_BRANCH)?
+                        } else {
+                            manager
+                                .select_recorded(&location.path, &args.branch, &args.branch)?
+                                .ok_or_else(|| {
+                                    daat_locus_workspace::Error::Invalid(
+                                        "select an existing workspace branch".into(),
+                                    )
+                                })?
+                        };
+                        system
+                            .store()
+                            .select_actor_workspace(
+                                &actor_id,
+                                &message_id,
+                                &expected,
+                                &selected.directory,
+                            )
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        Ok(selected)
                     })
                     .await?;
-                self.caller(context, true)?;
-                self.system.store().select_actor_workspace(
-                    &self.actor_id,
-                    &caller.message_id,
-                    &context.execution_cwd,
-                    &selected.directory,
-                )?;
                 AppToolExecutionResult::structured(
                     "workspace selected",
                     &LocationOutput::from(selected),
@@ -838,6 +896,69 @@ impl App for WorkspaceApp {
                     },
                     None,
                 )
+            }
+            "rebind" => {
+                let args: ProjectArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let location = self.project(context, args.path.as_deref())?;
+                let origin = self.origin(&location, &caller)?;
+                let path = location.path.clone();
+                let system = self.system.clone();
+                let authority = caller.clone();
+                self.blocking(move || {
+                    system
+                        .record_for_tool(&authority.actor_id, &authority)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    system
+                        .ensure_workspace_unused(&path, None, true)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    manager.rebind(&origin)
+                })
+                .await?;
+                AppToolExecutionResult::structured(
+                    "workspace directory rebound",
+                    &LocationOutput::from(location),
+                    None,
+                )
+            }
+            "delete" => {
+                let args: DeleteArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let location = self.project(context, args.path.as_deref())?;
+                let system = self.system.clone();
+                let path = location.path.clone();
+                let branch = args.branch.clone();
+                let authority = caller.clone();
+                self.blocking(move || {
+                    system
+                        .record_for_tool(&authority.actor_id, &authority)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    system
+                        .ensure_workspace_unused(&path, branch.as_deref(), false)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    manager.delete(&path, branch.as_deref())
+                })
+                .await?;
+                AppToolExecutionResult::structured(
+                    "workspace deleted",
+                    &DeleteOutput {
+                        path: location.path.to_string_lossy().into_owned(),
+                        branch: args.branch,
+                    },
+                    None,
+                )
+            }
+            "storage" => {
+                let args: ProjectArgs =
+                    serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let location = self.project(context, args.path.as_deref())?;
+                let storage = self
+                    .blocking(move || manager.store().storage(&location.path))
+                    .await?;
+                let storage: StorageOutput =
+                    serde_json::from_value(serde_json::to_value(storage).into_diagnostic()?)
+                        .into_diagnostic()?;
+                AppToolExecutionResult::structured("workspace storage", &storage, None)
             }
             _ => Err(miette!("Unknown Workspace tool")),
         }

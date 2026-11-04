@@ -586,6 +586,39 @@ impl ActorSystem {
         *workspaces = Some(manager.clone());
         Ok(manager)
     }
+    pub(crate) fn workspace_metadata(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.inner.metadata.lock()
+    }
+
+    pub(crate) fn ensure_workspace_unused(
+        &self,
+        path: &Path,
+        branch: Option<&str>,
+        allow_default: bool,
+    ) -> Result<()> {
+        let manager = self.workspaces()?;
+        let mut users = Vec::new();
+        for actor in self.store().actors()? {
+            let location = manager.locate(&actor.config.workspace).into_diagnostic()?;
+            if (location.path == path
+                || branch.is_none()
+                    && location.branch == daat_locus_workspace::DEFAULT_BRANCH
+                    && location.path.starts_with(path))
+                && branch.is_none_or(|branch| location.branch == branch)
+                && !(allow_default && location.branch == daat_locus_workspace::DEFAULT_BRANCH)
+            {
+                users.push(format!("{} ({})", actor.config.name, actor.id));
+            }
+        }
+        if users.is_empty() {
+            Ok(())
+        } else {
+            Err(miette::miette!(
+                "Workspace is selected by Actors: {}. Move them to another workspace first",
+                users.join(", ")
+            ))
+        }
+    }
     pub(crate) fn workspace_authorize(
         &self,
         call: Option<ActorCallContext>,
@@ -2188,6 +2221,7 @@ impl ActorSystem {
             .join("workspaces/store.sqlite3")
             .exists()
         {
+            let _metadata = self.workspace_metadata();
             let workspaces = self.workspaces()?;
             let location = workspaces
                 .locate(&actor.config.workspace)
@@ -2217,6 +2251,14 @@ impl ActorSystem {
             .map_or(4096, |model| model.tool_output_max_tokens);
         let mut sandbox_policy =
             crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, actor.remote_read_only);
+        if let Some(manager) = self.inner.workspaces.lock().clone() {
+            let projections = manager.active_projections().into_diagnostic()?;
+            sandbox_policy.filesystem.project(
+                projections
+                    .iter()
+                    .map(|location| (location.path.as_path(), location.directory.as_path())),
+            )?;
+        }
         sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
         let context = AppToolExecutionContext {
             restart_native: false,

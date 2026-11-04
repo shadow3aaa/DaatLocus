@@ -20,9 +20,9 @@ serde_json = "1.0.150"
 tracing = "0.1.41"
 
 [target.'cfg(windows)'.dependencies]
-appcontainer_common = { git = "https://github.com/shadow3aaa/mxc", rev = "9f5bb88c1cf7fe83325bcc7770d1490dcde5612f" }
-learning_mode_windows = { git = "https://github.com/shadow3aaa/mxc", rev = "9f5bb88c1cf7fe83325bcc7770d1490dcde5612f" }
-wxc_common = { git = "https://github.com/shadow3aaa/mxc", rev = "9f5bb88c1cf7fe83325bcc7770d1490dcde5612f" }
+appcontainer_common = { git = "https://github.com/shadow3aaa/mxc", rev = "bce006844ce15fd80e41b277a9a636f22f809e11" }
+learning_mode_windows = { git = "https://github.com/shadow3aaa/mxc", rev = "bce006844ce15fd80e41b277a9a636f22f809e11" }
+wxc_common = { git = "https://github.com/shadow3aaa/mxc", rev = "bce006844ce15fd80e41b277a9a636f22f809e11" }
 tracelogging = "=1.2.3"
 parking_lot = "0.12.5"
 dunce = "1.0.5"

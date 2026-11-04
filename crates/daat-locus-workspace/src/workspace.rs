@@ -12,8 +12,10 @@ use std::{
 const BLOCK: usize = 64 * 1024;
 
 mod history;
+mod lifecycle;
 pub(crate) use history::migrate_versions;
 pub use history::{FileVersion, MergeOutcome, PublishOutcome, Resolution, Version};
+pub use lifecycle::Storage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +94,7 @@ pub struct Workspace {
     binding: String,
     project: i64,
     name: String,
+    generation: i64,
 }
 
 impl Store {
@@ -101,29 +104,10 @@ impl Store {
         let mut connection = self.connection.lock();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut pending: Vec<ObjectId> = transaction.prepare(
+        let pending: Vec<ObjectId> = transaction.prepare(
             "SELECT base FROM branches UNION SELECT head FROM branches UNION SELECT root FROM versions UNION SELECT head FROM merges WHERE state IN ('prepared','applying','interrupted') UNION SELECT root FROM native_files"
         )?.query_map([], |row| Ok(ObjectId(row.get(0)?)))?.collect::<std::result::Result<_, _>>()?;
-        let mut live = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if !live.insert(id.clone()) {
-                continue;
-            }
-            let domain: u8 = transaction.query_row(
-                "SELECT domain FROM objects WHERE id=?1",
-                [&id.0],
-                |row| row.get(0),
-            )?;
-            match domain {
-                0 => {}
-                1 => {
-                    let node = Node::load(&transaction, &id)?;
-                    pending.extend(node.children.into_values());
-                    pending.extend(node.blocks);
-                }
-                _ => return Err(Error::Corrupt(id.0)),
-            }
-        }
+        let live = reachable(&transaction, pending)?;
         transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS workspace_live_objects(id TEXT PRIMARY KEY); DELETE FROM workspace_live_objects;")?;
         {
             let mut insert =
@@ -184,12 +168,18 @@ impl Store {
             .optional()?
             .ok_or_else(|| missing("workspace project"))?;
         roots(&connection, project, name)?;
+        let generation = connection.query_row(
+            "SELECT generation FROM branches WHERE project=?1 AND name=?2",
+            params![project, name],
+            |row| row.get(0),
+        )?;
         Ok(Workspace {
             store: self.clone(),
             origin: path.to_owned(),
             binding,
             project,
             name: name.into(),
+            generation,
         })
     }
 
@@ -227,19 +217,19 @@ impl Store {
                 history::save_branch(&transaction, project, from, "Fork workspace")?
             };
             transaction.execute(
-                "INSERT INTO branches(project,name,base,head) VALUES(?1,?2,?3,?4)",
-                params![project, name, version.root.0, version.root.0],
+                "INSERT INTO branches(project,name,base,head,generation) VALUES(?1,?2,?3,?3,?4)",
+                params![
+                    project,
+                    name,
+                    version.root.0,
+                    next_inode(&transaction)? as i64
+                ],
             )?;
             history::set_tip(&transaction, project, name, &version.id)?;
         }
         transaction.commit()?;
-        Ok(Workspace {
-            store: self.clone(),
-            origin: origin.path().to_owned(),
-            binding: origin.binding(),
-            project,
-            name: name.into(),
-        })
+        drop(connection);
+        self.open_recorded_branch(origin.path(), name)
     }
 
     pub fn branches(&self, origin: &Directory, offset: usize, limit: usize) -> Result<Vec<String>> {
@@ -277,6 +267,16 @@ impl Store {
 }
 
 impl Workspace {
+    fn roots(&self, connection: &Connection) -> Result<(ObjectId, ObjectId)> {
+        connection
+            .query_row(
+                "SELECT base,head FROM branches WHERE project=?1 AND name=?2 AND generation=?3",
+                params![self.project, self.name, self.generation],
+                |row| Ok((ObjectId(row.get(0)?), ObjectId(row.get(1)?))),
+            )
+            .optional()?
+            .ok_or_else(|| Error::Conflict("workspace branch was deleted or replaced".into()))
+    }
     pub(crate) fn project_id(&self) -> i64 {
         self.project
     }
@@ -289,7 +289,7 @@ impl Workspace {
         let mut connection = self.store.connection.lock();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let root = roots(&transaction, self.project, &self.name)?.1;
+        let root = self.roots(&transaction)?.1;
         let node = lookup(&transaction, &root, path)?;
         let pin = uuid::Uuid::new_v4().to_string();
         let root = node.save(&transaction)?;
@@ -311,22 +311,27 @@ impl Workspace {
         &self.origin
     }
     pub fn key(&self) -> String {
-        format!("{}:{}", self.project, self.name)
+        if self.generation == 0 {
+            format!("{}:{}", self.project, self.name)
+        } else {
+            format!("{}:{}:{}", self.project, self.name, self.generation)
+        }
     }
     pub fn root(&self) -> Result<ObjectId> {
-        Ok(roots(&self.store.connection.lock(), self.project, &self.name)?.1)
+        Ok(self.roots(&self.store.connection.lock())?.1)
     }
     pub fn fork(&self, name: &str) -> Result<Self> {
-        self.store.fork_at(&self.origin, name, &self.name)
+        self.store
+            .fork_at(&self.origin, name, &self.commit("Fork workspace")?.id)
     }
     pub fn entry(&self, path: &str) -> Result<Entry> {
         let connection = self.store.connection.lock();
-        let root = roots(&connection, self.project, &self.name)?.1;
+        let root = self.roots(&connection)?.1;
         Ok(lookup(&connection, &root, path)?.entry)
     }
     pub fn read_dir(&self, path: &str) -> Result<Vec<(String, Entry)>> {
         let connection = self.store.connection.lock();
-        let root = roots(&connection, self.project, &self.name)?.1;
+        let root = self.roots(&connection)?.1;
         let directory = lookup(&connection, &root, path)?;
         if directory.entry.kind != EntryKind::Directory {
             return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
@@ -339,7 +344,7 @@ impl Workspace {
     }
     pub fn read(&self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
         let connection = self.store.connection.lock();
-        let root = roots(&connection, self.project, &self.name)?.1;
+        let root = self.roots(&connection)?.1;
         read_node(
             &connection,
             &lookup(&connection, &root, path)?,
@@ -349,7 +354,7 @@ impl Workspace {
     }
     pub fn read_link(&self, path: &str) -> Result<String> {
         let connection = self.store.connection.lock();
-        let root = roots(&connection, self.project, &self.name)?.1;
+        let root = self.roots(&connection)?.1;
         lookup(&connection, &root, path)?
             .target
             .ok_or_else(|| Error::Invalid("not a symlink".into()))
@@ -361,7 +366,7 @@ impl Workspace {
         let mut connection = self.store.connection.lock();
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let root = roots(&transaction, self.project, &self.name)?.1;
+        let root = self.roots(&transaction)?.1;
         let (root, result) = change(&transaction, &root)?;
         transaction.execute(
             "UPDATE branches SET head=?3,revision=revision+1 WHERE project=?1 AND name=?2",
@@ -435,7 +440,7 @@ impl Workspace {
     #[cfg(windows)]
     pub(crate) fn reparse_point(&self, path: &str) -> Result<Option<crate::reparse::ReparsePoint>> {
         let connection = self.store.connection.lock();
-        let (_, root) = roots(&connection, self.project, &self.name)?;
+        let (_, root) = self.roots(&connection)?;
         let node = lookup(&connection, &root, path)?;
         if node.entry.kind != EntryKind::Symlink {
             return Ok(None);
@@ -604,7 +609,7 @@ impl Workspace {
     }
     pub fn changes(&self, offset: usize, limit: usize) -> Result<Vec<Change>> {
         let connection = self.store.connection.lock();
-        let (base, head) = roots(&connection, self.project, &self.name)?;
+        let (base, head) = self.roots(&connection)?;
         let before = flatten(&connection, &base)?;
         let after = flatten(&connection, &head)?;
         Ok(changed_paths(&before, &after)
@@ -707,6 +712,29 @@ fn validate_branch(name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn reachable(transaction: &Connection, mut pending: Vec<ObjectId>) -> Result<BTreeSet<ObjectId>> {
+    let mut live = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !live.insert(id.clone()) {
+            continue;
+        }
+        let domain: u8 =
+            transaction.query_row("SELECT domain FROM objects WHERE id=?1", [&id.0], |row| {
+                row.get(0)
+            })?;
+        match domain {
+            0 => {}
+            1 => {
+                let node = Node::load(transaction, &id)?;
+                pending.extend(node.children.into_values());
+                pending.extend(node.blocks);
+            }
+            _ => return Err(Error::Corrupt(id.0)),
+        }
+    }
+    Ok(live)
 }
 
 fn project(connection: &Connection, origin: &Directory) -> Result<i64> {
