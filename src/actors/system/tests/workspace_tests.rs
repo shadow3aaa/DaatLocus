@@ -49,7 +49,7 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     let selected = system.actor("root").unwrap();
     let context = system.execution_context(&selected, &input).unwrap();
     #[cfg(any(windows, target_os = "linux"))]
-    {
+    if crate::sandbox::test_support::native_sandbox_available() {
         #[cfg(windows)]
         let (shell, args): (String, Vec<String>) = (
             std::env::var("ComSpec").unwrap(),
