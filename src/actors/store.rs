@@ -1311,6 +1311,14 @@ impl ActorStore {
             value.map(decode).transpose()
         })
     }
+    pub(crate) fn last_generation(&self, actor: &str, message: &str) -> Result<u32> {
+        database_io(|| {
+            sql(self.db.lock().query_row(
+            "SELECT COALESCE(MAX(json_extract(record,'$.generation')),0) FROM events WHERE actor_id=?1 AND json_extract(record,'$.message_id')=?2 AND json_extract(record,'$.type')='generation_started'",
+            params![actor, message], |row| row.get(0),
+        ))
+        })
+    }
     pub fn message_events(
         &self,
         actor: &str,
@@ -2246,14 +2254,7 @@ impl ActorStore {
                     MessageKind::Progress
                 };
                 delivery.in_reply_to = Some(original.id);
-                delivery.content = if finish_turn {
-                    format!("Result for delegated request {}:\n{}", source.id, content)
-                } else {
-                    format!(
-                        "Progress for delegated request {} (still running):\n{}",
-                        source.id, content
-                    )
-                };
+                delivery.content = content.into();
                 delivery.reply = None;
                 delivery.status = MessageStatus::Queued;
                 delivery.finished_at_ms = None;

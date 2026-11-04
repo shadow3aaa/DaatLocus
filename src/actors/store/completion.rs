@@ -174,12 +174,6 @@ pub(super) fn finish_message_tx(
                         });
                     }
                 }
-                answer = format!(
-                    "Result for request {} ({}):\n{}",
-                    original.id,
-                    original.content.chars().take(1500).collect::<String>(),
-                    answer
-                );
                 Some(insert_message(
                     tx,
                     MessageRecord {

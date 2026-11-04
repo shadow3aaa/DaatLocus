@@ -374,16 +374,6 @@ async fn core_stop_routes_to_remote_actor_and_cancels_all_its_open_inputs() {
     b.shutdown().await;
 }
 
-async fn wait_requests(provider: &ReplayProvider, count: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while provider.requests.lock().len() < count {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("incoming message did not reach inference");
-}
-
 #[tokio::test]
 async fn actor_messages_retain_bodies_in_detail_and_only_references_in_events() {
     let (_directory, system, _) = paused_runtime().await;
@@ -572,8 +562,7 @@ async fn messages_are_retained_during_automatic_review_and_received_at_the_settl
             name: "files__write_file".into(),
             arguments: json!({"path":target,"content":"approved original effect"}),
         }]),
-        MockReply::Answer("Incoming message received"),
-        MockReply::Answer("Original write finished"),
+        MockReply::Answer("Original write and incoming message handled"),
     ]));
     provider.review_blocked.store(true, Ordering::Release);
     provider
@@ -618,8 +607,12 @@ async fn messages_are_retained_during_automatic_review_and_received_at_the_settl
     provider.review_release.notify_one();
     let incoming = wait_completed(&system, &incoming.id).await;
     let original = wait_completed(&system, &original.id).await;
-    assert_eq!(incoming.reply.as_deref(), Some("Incoming message received"));
-    assert_eq!(original.reply.as_deref(), Some("Original write finished"));
+    assert_eq!(incoming.reply, None);
+    assert_eq!(
+        original.reply.as_deref(),
+        Some("Original write and incoming message handled")
+    );
+    assert_eq!(provider.requests.lock().len(), 2);
     assert_eq!(
         std::fs::read_to_string(target).unwrap(),
         "approved original effect"
@@ -744,8 +737,7 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
                 arguments: json!({}),
             },
         ]),
-        MockReply::Answer("Incoming input processed"),
-        MockReply::Answer("Original input processed"),
+        MockReply::Answer("Combined inputs processed"),
     ]);
     let original = system
         .send_user("root", "Execute both effects".into(), vec![], None)
@@ -789,19 +781,22 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
     );
     assert_eq!(provider.requests.lock().len(), 1);
     release.notify_one();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), execution)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .as_deref(),
-        Some("Original input processed")
-    );
-    assert_eq!(
-        wait_completed(&system, &incoming.id).await.reply.as_deref(),
-        Some("Incoming input processed")
-    );
+    let reply = tokio::time::timeout(Duration::from_secs(5), execution)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.as_deref(), Some("Combined inputs processed"));
+    system
+        .store()
+        .finish_message(
+            &original.id,
+            MessageStatus::Completed,
+            reply.as_deref(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(wait_completed(&system, &incoming.id).await.reply, None);
     assert_eq!(effects.load(Ordering::SeqCst), 2);
     {
         let requests = provider.requests.lock();
@@ -836,8 +831,7 @@ fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
                 name: "boundary__effect".into(),
                 arguments: json!({}),
             }]));
-            replies.push_back(MockReply::Answer("Incoming input batch processed"));
-            replies.push_back(MockReply::Answer("Original input processed"));
+            replies.push_back(MockReply::Answer("Combined inputs processed"));
         }
 
         let original = system
@@ -879,7 +873,16 @@ fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
             .expect("queued steering inputs stalled the worker")
             .unwrap()
             .unwrap();
-        assert_eq!(reply.as_deref(), Some("Original input processed"));
+        assert_eq!(reply.as_deref(), Some("Combined inputs processed"));
+        system
+            .store()
+            .finish_message(
+                &original.id,
+                MessageStatus::Completed,
+                reply.as_deref(),
+                None,
+            )
+            .unwrap();
         let mut replies = Vec::new();
         for item in incoming {
             let completed = wait_completed(&system, &item.id).await;
@@ -888,8 +891,8 @@ fn many_queued_steering_inputs_do_not_grow_the_worker_stack() {
                 replies.push(reply);
             }
         }
-        assert_eq!(replies, ["Incoming input batch processed"]);
-        assert_eq!(provider.requests.lock().len(), 3);
+        assert!(replies.is_empty());
+        assert_eq!(provider.requests.lock().len(), 2);
         assert_eq!(effects.load(Ordering::SeqCst), 1);
         system.shutdown().await;
     });
@@ -914,7 +917,7 @@ async fn remote_core_initial_authorization_survives_new_inputs_without_replay() 
         MockReply::Calls(vec![AgentToolCall {id:"remote-create".into(),name:"actors__create".into(),
             arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":"mock","initial_authorization":null})}]),
         MockReply::Pending,
-        MockReply::Answer("Incoming message received"),MockReply::Answer("Original creation completed"),MockReply::PendingOnEveryRequest,
+        MockReply::Answer("Creation and incoming message handled"),MockReply::PendingOnEveryRequest,
     ]);
     let original = a
         .send_user("core", "Create the collaborator".into(), vec![], None)
@@ -938,13 +941,10 @@ async fn remote_core_initial_authorization_survives_new_inputs_without_replay() 
         MessageStatus::Running
     );
     assert!(a.store().message(&incoming.id).is_ok());
-    assert_eq!(
-        wait_completed(&a, &incoming.id).await.reply.as_deref(),
-        Some("Incoming message received")
-    );
+    assert_eq!(wait_completed(&a, &incoming.id).await.reply, None);
     assert_eq!(
         wait_completed(&a, &original.id).await.reply.as_deref(),
-        Some("Original creation completed")
+        Some("Creation and incoming message handled")
     );
     assert!(workspace.is_dir());
     assert_eq!(

@@ -69,9 +69,7 @@ impl TaskHandoff {
         let mut seen = vec![current.id.clone()];
         // Request inputs always start their own task. In particular, never
         // inherit the last anchor or parse a "Current request" ID from prose.
-        while matches!(source.kind, MessageKind::Result | MessageKind::Progress)
-            && seen.len() <= RELATED_LIMIT
-        {
+        while matches!(source.kind, MessageKind::Result | MessageKind::Progress) {
             let Some(next) = source.in_reply_to.as_deref() else {
                 break;
             };
@@ -92,6 +90,7 @@ impl TaskHandoff {
             current.id.clone()
         };
         seen.retain(|id| *id != task_message_id);
+        seen.truncate(RELATED_LIMIT);
         Self {
             task_message_id,
             checkpoint: None,

@@ -119,51 +119,19 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
             installed_config = None;
             continue;
         }
-        let active = system
-            .store()
-            .active_batch_input(&message.id)
-            .unwrap_or_else(|_| message.clone());
-        let interrupted = interruption(&control, &active);
-        let (status, reply, error, rebuild) = match (interrupted, result) {
-            (Some(status), _) => (
-                status,
-                None,
-                Some("Execution interrupted; completed effects were not rolled back".to_owned()),
-                true,
-            ),
-            (_, Ok(reply)) => (MessageStatus::Completed, reply, None, false),
-            (_, Err(error)) => (
-                MessageStatus::Failed,
-                None,
-                Some(
-                    error
-                        .downcast_ref::<crate::providers::ModelRequestFailure>()
-                        .map_or_else(
-                            || system.safe_error(&error.to_string()),
-                            |error| error.code().into(),
-                        ),
-                ),
-                true,
-            ),
-        };
-        match system
-            .store()
-            .finish_message(&message.id, status, reply.as_deref(), error.as_deref())
-        {
-            Ok(Some(result)) => system.wake(&result.actor_id),
-            Ok(None) => {}
+        let status = match finish_input(&system, &message, &control, result) {
+            Ok(status) => status,
             Err(_) => {
                 tracing::error!(actor_id, "Actor message completion could not be persisted");
                 break;
             }
-        }
+        };
         if actor_id == crate::stage::shared::ACTOR_ID
             && let Some(core) = system.shared_core()
         {
             let _ = core.checkpoint().await;
         }
-        clear_batch_cancellations(&system, &control, &message.id);
-        if rebuild {
+        if status != MessageStatus::Completed {
             shutdown_apps(&mut apps).await;
             installed_config = None;
         }
@@ -250,20 +218,18 @@ fn take_apps(apps: &mut AppManager) -> AppManager {
     )
 }
 
-type NestedExecution = std::pin::Pin<
+type ReviewInputExecution = std::pin::Pin<
     Box<dyn std::future::Future<Output = (Result<Option<String>>, AppManager)> + Send + 'static>,
 >;
 
-/// Box the nested execution so its future is finite and `Send` across the
-/// recursive steering boundary. Keeping the future concrete would make the
-/// compiler prove a recursive `Send` cycle for every nested input.
-fn execute_message_owned(
+// Break the recursive future type while a pending review retains its invocation.
+fn execute_review_input(
     system: ActorSystem,
     actor: ActorRecord,
     message: MessageRecord,
     control: ActorControl,
     mut apps: AppManager,
-) -> NestedExecution {
+) -> ReviewInputExecution {
     Box::pin(async move {
         let result = execute_message(&system, &actor, &message, &control, &mut apps).await;
         (result, apps)
@@ -391,20 +357,72 @@ async fn execute_message(
     control: &ActorControl,
     apps: &mut AppManager,
 ) -> Result<Option<String>> {
+    let mut current = message.clone();
+    let mut suspended = Vec::new();
     loop {
-        let result = execute_message_batch(system, actor, message, control, apps).await;
+        let result = match system.execution_actor(&current) {
+            Ok(active) => execute_message_batch(system, &active, &current, control, apps).await,
+            Err(error) => Err(error),
+        };
+        if let Ok(BatchExecution::Switch(next)) = result {
+            suspended.push(current.id);
+            current = *next;
+            continue;
+        }
         if result.is_err()
             && !control.stop.load(Ordering::Acquire)
-            && system.store().batch_cancellation_pending(&message.id)?
+            && system.store().batch_cancellation_pending(&current.id)?
         {
-            system.store().settle_batch_cancellations(&message.id)?;
-            let active = system.store().active_batch_input(&message.id)?;
+            system.store().settle_batch_cancellations(&current.id)?;
+            let active = system.store().active_batch_input(&current.id)?;
             if active.status == MessageStatus::Running && !active.cancel_requested {
                 continue;
             }
         }
-        return result;
+        let result = result.map(|outcome| match outcome {
+            BatchExecution::Complete(reply) => reply,
+            BatchExecution::Switch(_) => unreachable!(),
+        });
+        if current.id == message.id {
+            return result;
+        }
+        finish_incoming(system, actor, &current, control, apps, result).await?;
+        current = system
+            .store()
+            .message(&suspended.pop().expect("suspended input"))?;
+        let active = system.store().active_batch_input(&current.id)?;
+        if active.status == MessageStatus::Running && !active.cancel_requested {
+            system.store().resume_input(&actor.id, &active.id)?;
+            announce_input_batch(system, &current.id)?;
+        }
     }
+}
+
+enum BatchExecution {
+    Complete(Option<String>),
+    Switch(Box<MessageRecord>),
+}
+
+fn append_batch_inputs(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    context: &AppToolExecutionContext,
+    batch: &[MessageRecord],
+) -> Result<bool> {
+    let mut appended = false;
+    for input in batch {
+        if !system
+            .store()
+            .has_history_for_message(&actor.id, &input.id)?
+        {
+            let row = AgentMessage::user_content(system.message_content(actor, input, context)?);
+            system
+                .store()
+                .append_history(&actor.id, &input.id, &[row])?;
+            appended = true;
+        }
+    }
+    Ok(appended)
 }
 
 async fn execute_message_batch(
@@ -413,7 +431,7 @@ async fn execute_message_batch(
     message: &MessageRecord,
     control: &ActorControl,
     apps: &mut AppManager,
-) -> Result<Option<String>> {
+) -> Result<BatchExecution> {
     let batch_id = message.id.clone();
     let batch = system.store().claim_input_batch(&batch_id)?;
     system.store().settle_batch_cancellations(&batch_id)?;
@@ -426,24 +444,14 @@ async fn execute_message_batch(
         refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
     let tools = apps.model_tool_specs_for_context(&context)?;
-    for input in &batch {
-        if !system
-            .store()
-            .has_history_for_message(&actor.id, &input.id)?
-        {
-            let row = AgentMessage::user_content(system.message_content(actor, input, &context)?);
-            system
-                .store()
-                .append_history(&actor.id, &input.id, &[row])?;
-        }
-    }
+    append_batch_inputs(system, actor, &context, &batch)?;
     if batch.len() > 1 {
         announce_input_batch(system, &batch_id)?;
     }
     let mut window = ModelContext::load(system, actor, &context, tools).await?;
     let mut model = InferenceModel::load(system, actor)?;
     let mut selected_model = actor.config.model.clone();
-    let mut generation = 0u32;
+    let mut generation = system.store().last_generation(&actor.id, &message.id)?;
     let mut call_ids = std::collections::HashSet::new();
     let mut after = 0;
     loop {
@@ -488,7 +496,7 @@ async fn execute_message_batch(
                 &message.id,
                 &[AgentMessage::assistant("")],
             )?;
-            return Ok(None);
+            return Ok(BatchExecution::Complete(None));
         }
         if system
             .store()
@@ -501,9 +509,15 @@ async fn execute_message_batch(
                 &message.id,
                 &[AgentMessage::assistant("")],
             )?;
-            return Ok(Some(String::new()));
+            return Ok(BatchExecution::Complete(Some(String::new())));
         }
-        Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+        let batch = system.store().claim_input_batch(&batch_id)?;
+        if append_batch_inputs(system, actor, &context, &batch)? {
+            announce_input_batch(system, &batch_id)?;
+        }
+        if let Some(next) = system.store().claim_incoming(&actor.id, &message.id)? {
+            return Ok(BatchExecution::Switch(Box::new(next)));
+        }
         let active = system.execution_actor(message)?;
         if active.config.model != selected_model {
             model = InferenceModel::load(system, &active)?;
@@ -665,7 +679,7 @@ async fn execute_message_batch(
             system
                 .store()
                 .append_history(&actor.id, &message.id, &[final_message])?;
-            return Ok(Some(reply));
+            return Ok(BatchExecution::Complete(Some(reply)));
         }
         empty_reasoning_responses = 0;
         validate_response_calls(&response)?;
@@ -816,7 +830,7 @@ async fn execute_sudo_call(
                 result = &mut future => break result,
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     if check_interruption(system, control, message).is_err() { return None; }
-                    if let Err(error) = Box::pin(receive_incoming(system, actor, message, control, apps)).await {
+                    if let Err(error) = Box::pin(receive_during_review(system, actor, message, control, apps)).await {
                         return Some(Err(error));
                     }
                 }
@@ -977,7 +991,7 @@ async fn execute_call(
                 result = &mut future => break Some(result),
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     if check_interruption(system, control, message).is_err() { break None; }
-                    Box::pin(receive_incoming(system, actor, message, control, apps)).await?;
+                    Box::pin(receive_during_review(system, actor, message, control, apps)).await?;
                 }
             }
         }
@@ -1171,10 +1185,78 @@ fn context_overflow(error: &miette::Report) -> bool {
             .is_some()
 }
 
-/// New messages preempt inference at settled boundaries. A nested input owns
-/// its execution authority, replies and lifetime; the interrupted request stays
-/// open and resumes from history once the incoming input releases the worker.
-async fn receive_incoming(
+fn finish_input(
+    system: &ActorSystem,
+    message: &MessageRecord,
+    control: &ActorControl,
+    result: Result<Option<String>>,
+) -> Result<MessageStatus> {
+    let active = system.store().active_batch_input(&message.id)?;
+    let (status, reply, error) = match (interruption(control, &active), result) {
+        (Some(status), _) => (
+            status,
+            None,
+            Some("Execution interrupted; completed effects were not rolled back".to_owned()),
+        ),
+        (_, Ok(reply)) => (MessageStatus::Completed, reply, None),
+        (_, Err(error)) => (
+            MessageStatus::Failed,
+            None,
+            Some(
+                error
+                    .downcast_ref::<crate::providers::ModelRequestFailure>()
+                    .map_or_else(
+                        || system.safe_error(&error.to_string()),
+                        |error| error.code().into(),
+                    ),
+            ),
+        ),
+    };
+    if let Some(reply) =
+        system
+            .store()
+            .finish_message(&message.id, status, reply.as_deref(), error.as_deref())?
+    {
+        system.wake(&reply.actor_id);
+    }
+    clear_batch_cancellations(system, control, &message.id);
+    Ok(status)
+}
+
+async fn finish_incoming(
+    system: &ActorSystem,
+    actor: &ActorRecord,
+    input: &MessageRecord,
+    control: &ActorControl,
+    apps: &mut AppManager,
+    result: Result<Option<String>>,
+) -> Result<()> {
+    if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
+        return Err(miette!("Core worker no longer owns execution"));
+    }
+    let status = finish_input(system, input, control, result)?;
+    if status != MessageStatus::Completed {
+        let replacements = if actor.id == crate::stage::shared::ACTOR_ID && !system.local_core() {
+            system
+                .shared_core()
+                .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
+                .model_apps()
+                .await?
+        } else {
+            builtin_apps::create_apps(actor, system.clone(), &system.config())?
+        };
+        let previous = std::mem::replace(apps, replacements);
+        previous.shutdown().await?;
+    }
+    if actor.id == crate::stage::shared::ACTOR_ID {
+        system.checkpoint_core().await?;
+    }
+    Ok(())
+}
+
+// Only a pending review retains a live invocation while other inputs execute.
+// Ordinary message preemption switches batches in execute_message's flat loop.
+async fn receive_during_review(
     system: &ActorSystem,
     actor: &ActorRecord,
     current: &MessageRecord,
@@ -1186,11 +1268,8 @@ async fn receive_incoming(
         received = true;
         let result = {
             let incoming_actor = system.execution_actor(&input)?;
-            // Keep the suspended input future and its App state on the heap.
-            // Polling a nested execute_message future inline would add a native
-            // stack frame for every steering input and eventually overflow the
-            // Tokio worker stack.
-            let task = tokio::spawn(execute_message_owned(
+            // Retain the reviewed invocation while another input uses the Apps.
+            let task = tokio::spawn(execute_review_input(
                 system.clone(),
                 incoming_actor,
                 input.clone(),
@@ -1205,57 +1284,7 @@ async fn receive_incoming(
                 Err(error) => Err(miette!("Actor input execution task failed: {error}")),
             }
         };
-        if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
-            return Err(miette!("Core worker no longer owns execution"));
-        }
-        let active = system.store().active_batch_input(&input.id)?;
-        let (status, reply, error) = match (interruption(control, &active), result) {
-            (Some(status), _) => (
-                status,
-                None,
-                Some("Execution interrupted; completed effects were not rolled back".to_owned()),
-            ),
-            (_, Ok(reply)) => (MessageStatus::Completed, reply, None),
-            (_, Err(error)) => (
-                MessageStatus::Failed,
-                None,
-                Some(
-                    error
-                        .downcast_ref::<crate::providers::ModelRequestFailure>()
-                        .map_or_else(
-                            || system.safe_error(&error.to_string()),
-                            |error| error.code().into(),
-                        ),
-                ),
-            ),
-        };
-        if let Some(reply) =
-            system
-                .store()
-                .finish_message(&input.id, status, reply.as_deref(), error.as_deref())?
-        {
-            system.wake(&reply.actor_id);
-        }
-        clear_batch_cancellations(system, control, &input.id);
-        if status != MessageStatus::Completed {
-            let replacements = if actor.id == crate::stage::shared::ACTOR_ID && !system.local_core()
-            {
-                system
-                    .shared_core()
-                    .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-                    .model_apps()
-                    .await?
-            } else {
-                builtin_apps::create_apps(actor, system.clone(), &system.config())?
-            };
-            let previous = std::mem::replace(apps, replacements);
-            previous.shutdown().await?;
-            let context = system.execution_context(actor, current)?;
-            refresh_apps(system, actor, current, control, apps, &context, false).await?;
-        }
-        if actor.id == crate::stage::shared::ACTOR_ID {
-            system.checkpoint_core().await?;
-        }
+        finish_incoming(system, actor, &input, control, apps, result).await?;
         check_interruption(system, control, current)?;
     }
     if received {

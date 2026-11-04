@@ -47,68 +47,64 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut first = message_tx(&tx, id)?;
-            let mut batch = members(&tx, &first)?;
             if first.input_batch.is_none() {
-                let started: bool = sql(tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM history WHERE actor_id=?1 AND message_id=?2)",
-                    params![first.actor_id, first.id],
+                first.input_batch = Some(first.id.clone());
+                save_message(&tx, &first)?;
+            }
+            let mut batch = members(&tx, &first)?;
+            for member in &mut batch {
+                if member.status == MessageStatus::Queued {
+                    member.status = MessageStatus::Running;
+                    member.started_at_ms.get_or_insert(now());
+                    member.updated_at_ms = now();
+                    save_message(&tx, member)?;
+                }
+            }
+            if let Some(active) = batch
+                .iter()
+                .find(|input| input.status == MessageStatus::Running && !input.cancel_requested)
+                .cloned()
+            {
+                let batch_id = first.input_batch.as_ref().expect("input batch");
+                let shared: bool = sql(tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_order')",
+                    [],
                     |row| row.get(0),
                 ))?;
-                if !started && !first.cancel_requested {
-                    let shared: bool = sql(tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_order')",
-                        [],
-                        |row| row.get(0),
-                    ))?;
-                    let query = if shared && first.actor_id == crate::stage::shared::ACTOR_ID {
-                        "SELECT m.record FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 128"
-                    } else {
-                        "SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 128"
+                let query = if shared && first.actor_id == crate::stage::shared::ACTOR_ID {
+                    "SELECT m.record FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 128"
+                } else {
+                    "SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 128"
+                };
+                'prefix: loop {
+                    let page = {
+                        let mut stmt = sql(tx.prepare(query))?;
+                        sql(stmt.query_map([&first.actor_id], |row| row.get::<_, String>(0)))?
+                            .map(|row| decode(sql(row)?))
+                            .collect::<Result<Vec<MessageRecord>>>()?
                     };
-                    'prefix: loop {
-                        let page = {
-                            let mut stmt = sql(tx.prepare(query))?;
-                            sql(stmt.query_map([&first.actor_id], |row| row.get::<_, String>(0)))?
-                                .map(|row| decode(sql(row)?))
-                                .collect::<Result<Vec<MessageRecord>>>()?
-                        };
-                        if page.is_empty() {
-                            break;
-                        }
-                        for mut next in page {
-                            let started: bool = sql(tx.query_row(
-                                "SELECT EXISTS(SELECT 1 FROM history WHERE message_id=?1)",
-                                [&next.id],
-                                |row| row.get(0),
-                            ))?;
-                            if next.input_batch.is_some()
-                                || next.started_at_ms.is_some()
-                                || started
-                                || !compatible(&first, &next)
-                            {
-                                break 'prefix;
-                            }
-                            next.input_batch = Some(first.id.clone());
-                            next.status = MessageStatus::Running;
-                            next.started_at_ms = Some(now());
-                            next.updated_at_ms = now();
-                            save_message(&tx, &next)?;
-                            batch.push(next);
-                        }
+                    if page.is_empty() {
+                        break;
                     }
-                    if batch.len() > 1 {
-                        first.input_batch = Some(first.id.clone());
-                        save_message(&tx, &first)?;
-                        batch[0] = first;
-                    }
-                }
-            } else {
-                for member in &mut batch {
-                    if member.status == MessageStatus::Queued {
-                        member.status = MessageStatus::Running;
-                        member.started_at_ms.get_or_insert(now());
-                        member.updated_at_ms = now();
-                        save_message(&tx, member)?;
+                    for mut next in page {
+                        let started: bool = sql(tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM history WHERE message_id=?1)",
+                            [&next.id],
+                            |row| row.get(0),
+                        ))?;
+                        if next.input_batch.is_some()
+                            || next.started_at_ms.is_some()
+                            || started
+                            || !compatible(&active, &next)
+                        {
+                            break 'prefix;
+                        }
+                        next.input_batch = Some(batch_id.clone());
+                        next.status = MessageStatus::Running;
+                        next.started_at_ms = Some(now());
+                        next.updated_at_ms = now();
+                        save_message(&tx, &next)?;
+                        batch.push(next);
                     }
                 }
             }

@@ -373,10 +373,10 @@ async fn automatic_review(
     let proposed_call = call;
     let source = system.store().message(&record.message_id)?;
     let requests = system.store().input_batch(&source.id)?;
+    let execution_actor = system.execution_actor(&source)?;
     let task = system
         .store()
         .task_handoff(&actor.id, &source.id)
-        .filter(|handoff| handoff.task_message_id != source.id)
         .map(|handoff| system.store().message(&handoff.task_message_id))
         .transpose()?
         .filter(|task| task.actor_id == actor.id);
@@ -385,10 +385,10 @@ async fn automatic_review(
         Err(_) => return Ok(Err(ReviewFailure::Configuration)),
     };
     let input = json!({"actor":{"id":actor.id,
-            "installed_apps":actor.config.apps,"workspace":actor.config.workspace,"remote_read_only":actor.remote_read_only},
+            "installed_apps":execution_actor.config.apps,"workspace":execution_actor.config.workspace,"remote_read_only":execution_actor.remote_read_only},
             "request":{"id":source.id,"content":source.content,"source":source.source,
                 "kind":source.kind,"in_reply_to":source.in_reply_to},
-            "request_inputs":requests.iter().map(|input| json!({"id":input.id,"content":input.content,"source":input.source,"kind":input.kind,"in_reply_to":input.in_reply_to})).collect::<Vec<_>>(),
+            "request_inputs":requests.iter().map(|input| json!({"id":input.id,"content":input.content,"source":input.source,"kind":input.kind,"in_reply_to":input.in_reply_to,"status":input.status,"cancel_requested":input.cancel_requested})).collect::<Vec<_>>(),
             "task_request":task.as_ref().map(|task| json!({"id":task.id,"content":task.content,"source":task.source,"status":task.status,"cancel_requested":task.cancel_requested})),
             "application":application,
             "remembered_permissions":system.store().sandbox_scopes()?,

@@ -2,6 +2,126 @@ use super::*;
 use crate::actors::ReplyTarget;
 
 #[tokio::test]
+async fn live_progress_stays_in_one_execution_and_reviews_the_originating_task() {
+    let (directory, system, provider) = paused_runtime().await;
+    system.install_local_core().unwrap();
+    system.set_workspace_backend_for_test(true);
+    let parent = system
+        .send_user("root", "Test branch writes".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let worker = system
+        .create_owned("root", project_config(&system, "Writer"))
+        .unwrap();
+    let observer = system
+        .create_owned("root", project_config(&system, "Observer"))
+        .unwrap();
+    let original = system
+        .message_from_actor(
+            "root",
+            &parent.id,
+            &worker.id,
+            "Write the beta branch report".into(),
+        )
+        .unwrap();
+    let input = system.store().claim_next(&worker.id).unwrap().unwrap();
+    let selected = directory.path().join("selected");
+    std::fs::create_dir(&selected).unwrap();
+    let target = selected.join("report.txt");
+    const UPDATES: usize = 12;
+    provider
+        .replies
+        .lock()
+        .extend((0..UPDATES).map(|_| MockReply::Pending));
+    provider.replies.lock().extend([
+        MockReply::Calls(vec![
+            AgentToolCall {
+                id: "select-current-directory".into(),
+                name: "workspace__select".into(),
+                arguments: json!({"path":selected,"branch":"default"}),
+            },
+            AgentToolCall {
+                id: "write-once-after-progress".into(),
+                name: "files__write_file".into(),
+                arguments: json!({"path":target,"content":"beta report"}),
+            },
+        ]),
+        MockReply::Calls(vec![AgentToolCall {
+            id: "finish-batch".into(),
+            name: "actors__yield".into(),
+            arguments: json!({}),
+        }]),
+    ]);
+    provider
+        .review_replies
+        .lock()
+        .push_back(json!({"decision":"approve","reason":"Requested report"}));
+    let actor = system.execution_actor(&input).unwrap();
+    let mut apps = builtin_apps::create_apps(&actor, system.clone(), &system.config()).unwrap();
+    let control = ActorControl::default();
+    let execution = execute_message(&system, &actor, &input, &control, &mut apps);
+    let incoming = async {
+        let mut previous = original.id.clone();
+        let mut updates = Vec::new();
+        for index in 0..UPDATES {
+            wait_requests(&provider, index + 1).await;
+            let mut update = original.clone();
+            update.id = uuid::Uuid::new_v4().to_string();
+            update.kind = MessageKind::Progress;
+            update.source = MessageSource::Actor {
+                actor_id: observer.id.clone(),
+            };
+            update.in_reply_to = Some(previous);
+            update.content = format!("Observer update {index}: I am only inspecting default");
+            previous = update.id.clone();
+            updates.push(system.store().enqueue(update, None).unwrap());
+        }
+        updates
+    };
+    let (result, updates) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(execution, incoming)
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.unwrap(), None);
+    system
+        .store()
+        .finish_message(&input.id, MessageStatus::Completed, None, None)
+        .unwrap();
+    assert_eq!(
+        provider.requests.lock().len(),
+        UPDATES + 2,
+        "no per-message unwind inference"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "beta report");
+    for update in updates {
+        let settled = system.store().message(&update.id).unwrap();
+        assert_eq!(settled.status, MessageStatus::Completed);
+        assert_eq!(settled.reply, None);
+        assert_eq!(settled.source, update.source);
+    }
+    {
+        let reviews = provider.review_requests.lock();
+        assert_eq!(reviews.len(), 1);
+        let facts: serde_json::Value =
+            serde_json::from_str(&reviews[0].current_user_message).unwrap();
+        assert_eq!(facts["request"]["id"], original.id);
+        assert_eq!(facts["task_request"]["id"], original.id);
+        assert_eq!(facts["application"]["task"], original.content);
+        assert_eq!(
+            facts["actor"]["workspace"],
+            json!(selected.canonicalize().unwrap())
+        );
+        assert_eq!(
+            facts["request_inputs"].as_array().unwrap().len(),
+            UPDATES + 1
+        );
+    }
+    apps.shutdown().await.unwrap();
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn batch_context_handoff_keeps_every_unfinished_input_locator() {
     let (_directory, system, provider) = paused_runtime().await;
     let first = system

@@ -3852,7 +3852,7 @@ mod tests {
             .filter(|input| input.kind == MessageKind::Result)
             .collect::<Vec<_>>();
         assert_eq!(results.len(), 1);
-        assert!(results[0].content.contains("UNIQUE_RESULT"));
+        assert_eq!(results[0].content, "UNIQUE_RESULT");
         system.shutdown().await;
     }
 }

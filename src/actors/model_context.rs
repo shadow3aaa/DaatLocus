@@ -250,7 +250,7 @@ fn push_batch_history(
     input: &str,
     mut row: AgentMessage,
 ) {
-    if batch.is_some()
+    if batch.is_some_and(|batch| batch != input)
         && let AgentMessage::User { content } = &mut row
     {
         *content = content

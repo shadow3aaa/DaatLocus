@@ -72,11 +72,17 @@ impl crate::sandbox::access::SandboxAccessBroker for InvocationAccess {
         }
         let record =
             create_scope_application(&self.system, &self.message, &self.call, &base, requested)?;
+        let task = self
+            .system
+            .store()
+            .task_handoff(&self.actor.id, &self.message.id)
+            .and_then(|handoff| self.system.store().message(&handoff.task_message_id).ok())
+            .unwrap_or_else(|| self.message.clone());
         let application = record
             .application
             .clone()
             .unwrap_or_else(|| ReviewApplication {
-                task: self.message.content.chars().take(1000).collect(),
+                task: task.content.chars().take(1000).collect(),
                 reason: format!(
                     "The suspended filesystem operation needs {} access to {}",
                     if write { "write" } else { "read" },

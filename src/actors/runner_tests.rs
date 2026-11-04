@@ -20,6 +20,16 @@ use crate::{
 };
 use std::{collections::VecDeque, sync::atomic::AtomicBool};
 
+async fn wait_requests(provider: &ReplayProvider, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.requests.lock().len() < count {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("incoming message did not reach inference");
+}
+
 enum MockReply {
     Answer(&'static str),
     AnswerOnEveryRequest(&'static str),
@@ -311,10 +321,26 @@ async fn filesystem_boundary_approval_resumes_original_call_without_a_model_retr
         .lock()
         .push_back(json!({"decision":"approve","reason":"Requested output"}));
     let (_dir, system) = runtime(provider.clone()).await;
+    system.suspend_execution().await.unwrap();
     system.install_local_core().unwrap();
-    let input = system
+    let task = system
         .send_user("root", "Create the output".into(), vec![], None)
         .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    system
+        .store()
+        .finish_message(&task.id, MessageStatus::Completed, None, None)
+        .unwrap();
+    let mut update = task.clone();
+    update.id = uuid::Uuid::new_v4().to_string();
+    update.kind = MessageKind::Progress;
+    update.source = MessageSource::Actor {
+        actor_id: "core".into(),
+    };
+    update.in_reply_to = Some(task.id.clone());
+    update.content = "My inspection is complete".into();
+    let input = system.store().enqueue(update, None).unwrap();
+    system.resume_execution().await.unwrap();
 
     let finished = wait_completed(&system, &input.id).await;
     assert_eq!(
@@ -346,6 +372,14 @@ async fn filesystem_boundary_approval_resumes_original_call_without_a_model_retr
         1
     );
     assert!(!system.store().sandbox_scopes().unwrap().is_empty());
+    {
+        let reviews = provider.review_requests.lock();
+        let facts: serde_json::Value =
+            serde_json::from_str(&reviews[0].current_user_message).unwrap();
+        assert_eq!(facts["request"]["id"], input.id);
+        assert_eq!(facts["task_request"]["id"], task.id);
+        assert_eq!(facts["application"]["task"], task.content);
+    }
     system.shutdown().await;
 }
 
@@ -1878,8 +1912,7 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
     let core_model = Arc::new(ReplayProvider::new(vec![]));
     let worker_model = Arc::new(ReplayProvider::new(vec![
         MockReply::Pending,
-        MockReply::Answer("Remote message handled"),
-        MockReply::Answer("Remote task updated"),
+        MockReply::Answer("Remote task and guidance handled"),
     ]));
     let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(core_model.clone(), worker_model.clone()).await;
@@ -1929,13 +1962,14 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
             None,
         )
         .unwrap();
+    assert_eq!(wait_completed(&a, &update.id).await.reply, None);
     assert_eq!(
-        wait_completed(&a, &update.id).await.reply.as_deref(),
+        wait_completed(&a, &original.id).await.reply.as_deref(),
         Some("Guidance sent")
     );
     assert_eq!(
         wait_completed(&b, &target.id).await.reply.as_deref(),
-        Some("Remote task updated")
+        Some("Remote task and guidance handled")
     );
     let guides = b.store().messages("root", None, 10).unwrap().items;
     let guide = guides
@@ -1949,12 +1983,14 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
     assert_eq!(b.execution_actor(&target).unwrap().config, policy);
     let result = a
         .store()
-        .tool_summaries("core", &update.id, None, 10)
+        .tool_summaries("core", &original.id, None, 10)
         .unwrap()
-        .items;
-    assert_eq!(result.len(), 1);
-    assert!(result[0].error.is_none());
-    let outcome = result[0].outcome.as_ref().unwrap();
+        .items
+        .into_iter()
+        .find(|tool| tool.call_id == "remote-guidance")
+        .unwrap();
+    assert!(result.error.is_none());
+    let outcome = result.outcome.as_ref().unwrap();
     assert_eq!(outcome["stage_id"], net_b.host.local.to_string());
     assert_eq!(outcome["reply_to"], target.id);
     assert_eq!(outcome["sent_message"], json!(true));
@@ -1968,10 +2004,10 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
         json!(true)
     );
     assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    // The new coordination input does not implicitly finish its parent.
+    // The compatible coordination inputs settle together; delegated work remains independent.
     assert_eq!(
         a.store().message(&original.id).unwrap().status,
-        MessageStatus::Running
+        MessageStatus::Completed
     );
     net_a.stop().await;
     net_b.stop().await;
@@ -2616,14 +2652,9 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     use crate::stage::{host::Host, ledger::StageLedger, runtime::Runtime, shared, shared_store};
     let model_a = Arc::new(ReplayProvider::new(vec![]));
     let (_a_dir, a) = runtime(model_a.clone()).await;
-    let model_b = Arc::new(ReplayProvider::new(vec![
-        MockReply::Answer("Continued on the next device without repeating Actor creation."),
-        MockReply::Calls(vec![AgentToolCall {
-            id: "finish-resumed-original".into(),
-            name: "actors__yield".into(),
-            arguments: json!({}),
-        }]),
-    ]));
+    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
+        "Continued on the next device without repeating Actor creation.",
+    )]));
     let (_b_dir, b) = runtime(model_b.clone()).await;
     let model_c = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
         "Continued on the third device with the same account context.",
@@ -2940,22 +2971,21 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
     })
     .await
     .unwrap();
-    assert_eq!(
-        result.reply.as_deref(),
-        Some("Continued on the next device without repeating Actor creation.")
-    );
+    assert_eq!(result.reply, None);
     assert!(model_a.dropped.load(Ordering::Acquire));
     assert_eq!(
         model_a.pending.load(Ordering::Acquire),
         0,
         "the retired worker must not retain pending inference"
     );
-    // Completing the incoming input does not complete the suspended original.
-    // The replacement worker resumes it separately without repeating its effect.
+    // The compatible incoming instruction and original request finish together.
     let retained = wait_core_completed(&b, &input.id).await;
-    assert_eq!(model_b.requests.lock().len(), 2);
+    assert_eq!(model_b.requests.lock().len(), 1);
     assert_eq!(retained.status, MessageStatus::Completed);
-    assert!(retained.reply.is_none());
+    assert_eq!(
+        retained.reply.as_deref(),
+        Some("Continued on the next device without repeating Actor creation.")
+    );
     for request in model_b.requests.lock().iter() {
         assert!(request.messages.iter().any(|message| matches!(message,
             AgentMessage::User { content }
@@ -3050,7 +3080,7 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
         )
         .unwrap();
     let started = tokio::time::timeout(Duration::from_secs(12), async {
-        while model_b.requests.lock().len() < 3 {
+        while model_b.requests.lock().len() < 2 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
@@ -4220,6 +4250,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         .unwrap();
     assert_eq!(routed.actor_id, "root");
     assert_eq!(routed.kind, MessageKind::Result);
+    assert_eq!(routed.content, "Delegated result");
     assert_eq!(routed.in_reply_to.as_deref(), Some(original.id.as_str()));
     assert!(matches!(routed.reply_to, ReplyTarget::User));
     assert_eq!(
@@ -5460,7 +5491,6 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         }]),
         MockReply::Pending,
         MockReply::Answer("Both messages are now considered."),
-        MockReply::Answer("Original coordination completed."),
     ]);
     let original = system
         .send_user("core", "Prepare a worker, then think.".into(), vec![], None)
@@ -5500,15 +5530,12 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
         .unwrap();
     assert_eq!(retry.id, update.id);
     let done = wait_core_completed(&system, &update.id).await;
-    assert_eq!(
-        done.reply.as_deref(),
-        Some("Both messages are now considered.")
-    );
+    assert_eq!(done.reply, None);
     let previous = wait_core_completed(&system, &original.id).await;
     assert_eq!(previous.status, MessageStatus::Completed);
     assert_eq!(
         previous.reply.as_deref(),
-        Some("Original coordination completed.")
+        Some("Both messages are now considered.")
     );
     assert!(previous.error.is_none() && !previous.cancel_requested);
     assert!(
@@ -5517,7 +5544,7 @@ async fn core_new_user_input_preempts_thinking_without_losing_context_or_complet
     );
     {
         let requests = provider.requests.lock();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 3);
         let history = &requests[2].messages;
         for text in [&original.content, &update.content] {
             assert!(history.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains(text.as_str()))));
@@ -5927,7 +5954,7 @@ async fn coordinator_yields_between_required_results_and_routes_only_progress_th
     let updates = system.store().messages("root", None, 100).unwrap().items;
     assert_eq!(updates.len(), 2);
     assert_eq!(updates[1].kind, MessageKind::Progress);
-    assert!(updates[1].content.contains("Both reviews are underway."));
+    assert_eq!(updates[1].content, "Both reviews are underway.");
 
     let input = system.store().claim_next(&first.id).unwrap().unwrap();
     system
@@ -5977,10 +6004,9 @@ async fn coordinator_yields_between_required_results_and_routes_only_progress_th
         updates[2].in_reply_to.as_deref(),
         Some(original.id.as_str())
     );
-    assert!(
-        updates[2]
-            .content
-            .contains(completed.reply.as_deref().unwrap())
+    assert_eq!(
+        updates[2].content,
+        "Combined report: area one is correct; area two needs a correction."
     );
     assert_eq!(
         provider.requests.lock().len(),
