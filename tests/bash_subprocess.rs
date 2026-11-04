@@ -3,7 +3,8 @@ use std::{path::Path, process::Output, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command};
 
 async fn run(program: &Path, args: &[&str], input: &[u8]) -> Output {
-    let commands = daat_locus_uutils::CommandPath::new(program).unwrap();
+    let commands =
+        daat_locus_uutils::CommandPath::new(program, daat_locus_bash::shell::NAMES).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("must-not-create-profile");
     let startup = directory.path().join("startup.sh");
@@ -39,8 +40,11 @@ async fn run(program: &Path, args: &[&str], input: &[u8]) -> Output {
 
 #[tokio::test]
 async fn portable_path_commands_preserve_external_dispatch_streams_and_status() {
-    let commands =
-        daat_locus_uutils::CommandPath::new(Path::new(env!("CARGO_BIN_EXE_daat-locus"))).unwrap();
+    let commands = daat_locus_uutils::CommandPath::new(
+        Path::new(env!("CARGO_BIN_EXE_daat-locus")),
+        daat_locus_bash::shell::NAMES,
+    )
+    .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let profile = directory.path().join("must-not-create-profile");
     let execute = |name: &str, args: &[&str]| {
@@ -130,6 +134,86 @@ async fn portable_path_commands_preserve_external_dispatch_streams_and_status() 
                 .starts_with("ripgrep 15.2.0")
         );
     }
+    std::fs::write(directory.path().join("中文 空格.txt"), "内容\n").unwrap();
+    let found = execute(
+        "env",
+        &["find", ".", "-type", "f", "-name", "*.txt", "-print0"],
+    )
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        found.status.success(),
+        "{}",
+        String::from_utf8_lossy(&found.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(found.stdout.clone())
+            .unwrap()
+            .replace('\\', "/"),
+        "./中文 空格.txt\0"
+    );
+    let mut xargs = execute("env", &["xargs", "-0", "printf", "<%s>"])
+        .spawn()
+        .unwrap();
+    xargs
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&found.stdout)
+        .await
+        .unwrap();
+    let output = xargs.wait_with_output().await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().replace('\\', "/"),
+        "<./中文 空格.txt>"
+    );
+    std::fs::create_dir(directory.path().join("bulk")).unwrap();
+    for index in 0..1000 {
+        std::fs::write(
+            directory
+                .path()
+                .join("bulk")
+                .join(format!("{index}-{}", "file".repeat(25))),
+            b"",
+        )
+        .unwrap();
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        execute(
+            "bash",
+            &[
+                "-lc",
+                "find bulk -type f | head -n 1; printf 'bounded-pipeline\\n'",
+            ],
+        )
+        .output(),
+    )
+    .await
+    .expect("find pipeline failed to finish after head closed its input")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(lines.lines().count(), 2);
+    assert!(
+        lines
+            .lines()
+            .next()
+            .unwrap()
+            .replace('\\', "/")
+            .starts_with("bulk/")
+    );
+    assert_eq!(lines.lines().last(), Some("bounded-pipeline"));
     assert!(
         !profile.exists(),
         "command dispatch initialized the Agent profile"
@@ -157,6 +241,8 @@ async fn relocated_service_keeps_background_coproc_and_pipeline_execution_inside
         printf 'one\ntwo\nthree\n' | head -n 2 | wc -l
         printf '%s\n' '中文输出'
         "$BASH" -c 'printf "nested-rubash\n"'
+        bash -lc '[[ "$BASH" -ef "$SHELL" ]] || exit 88; printf "named-bash\n"'
+        sh -c 'printf "named-sh\n"'
         env -i "$BASH" -c 'printf "cleared-environment\n"'
     "#,
         ],
@@ -177,6 +263,8 @@ async fn relocated_service_keeps_background_coproc_and_pipeline_execution_inside
             "2",
             "中文输出",
             "nested-rubash",
+            "named-bash",
+            "named-sh",
             "cleared-environment"
         ]
     );

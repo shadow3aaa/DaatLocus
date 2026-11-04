@@ -227,6 +227,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "argmax"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0144c58b55af0133ec3963ce5e4d07aad866e3bbcfdcddbf4590dbd7ad6ff557"
+dependencies = [
+ "libc",
+ "nix 0.30.1",
+ "once_cell",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,6 +247,16 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+]
+
+[[package]]
+name = "ariadne"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8454c8a44ce2cb9cc7e7fae67fc6128465b343b92c6631e94beca3c8d1524ea5"
+dependencies = [
+ "unicode-width 0.2.2",
+ "yansi",
 ]
 
 [[package]]
@@ -1497,7 +1518,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
 dependencies = [
  "dispatch2",
- "nix",
+ "nix 0.31.3",
  "windows-sys 0.61.2",
 ]
 
@@ -1738,6 +1759,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bstr",
+ "findutils",
  "grep",
  "ignore",
  "lexopt",
@@ -2498,6 +2520,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "faccess"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ae66425802d6a903e268ae1a08b8c38ba143520f227a205edf4e9c7e3e26d5"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2608,6 +2641,27 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "findutils"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "999509a3ca9a9cdc156820463ce2e10cf406dd8e9c39d4bd5c9ae420c8ad7699"
+dependencies = [
+ "argmax",
+ "chrono",
+ "clap",
+ "faccess",
+ "itertools",
+ "nix 0.31.3",
+ "onig",
+ "parse_datetime 0.17.0",
+ "regex",
+ "rustix",
+ "thiserror 2.0.21",
+ "uucore",
+ "walkdir",
+]
 
 [[package]]
 name = "fixed_decimal"
@@ -2806,7 +2860,7 @@ dependencies = [
  "libc",
  "log",
  "memchr",
- "nix",
+ "nix 0.31.3",
  "num_enum",
  "page_size",
  "parking_lot",
@@ -5287,6 +5341,18 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
@@ -5772,6 +5838,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "onig"
+version = "6.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
+dependencies = [
+ "bitflags 2.13.2",
+ "libc",
+ "once_cell",
+ "onig_sys",
+]
+
+[[package]]
+name = "onig_sys"
+version = "69.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5981,6 +6069,17 @@ name = "parse_datetime"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "503fd4c8b0685e5eb32a8276533611f63e3b44768e9e8724e73f6852c2542f82"
+dependencies = [
+ "jiff",
+ "num-traits",
+ "winnow 1.0.4",
+]
+
+[[package]]
+name = "parse_datetime"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb51967a779ef73b125a243688e53e4bb2474f91cae72734ee5051e857fb2645"
 dependencies = [
  "jiff",
  "num-traits",
@@ -9410,7 +9509,7 @@ dependencies = [
  "fluent",
  "indicatif",
  "libc",
- "nix",
+ "nix 0.31.3",
  "rustix",
  "thiserror 2.0.21",
  "uucore",
@@ -9458,7 +9557,7 @@ dependencies = [
  "jiff-icu",
  "jiff-tzdb",
  "libc",
- "parse_datetime",
+ "parse_datetime 0.16.0",
  "rustix",
  "thiserror 2.0.21",
  "uucore",
@@ -9561,7 +9660,7 @@ checksum = "ab63d245c1d0f7c48c076bc820491a32020e4a8bcd31e3dcbc35513be279b7ea"
 dependencies = [
  "clap",
  "fluent",
- "nix",
+ "nix 0.31.3",
  "rust-ini",
  "thiserror 2.0.21",
  "uucore",
@@ -9812,7 +9911,7 @@ dependencies = [
  "fluent",
  "indicatif",
  "libc",
- "nix",
+ "nix 0.31.3",
  "rustc-hash",
  "rustix",
  "thiserror 2.0.21",
@@ -10295,7 +10394,7 @@ dependencies = [
  "fluent",
  "jiff",
  "libc",
- "parse_datetime",
+ "parse_datetime 0.16.0",
  "rustix",
  "thiserror 2.0.21",
  "uucore",
@@ -10486,6 +10585,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f24a5910ebbf2c0baf486a9125705f8e026a8f7741a3ea8cf5eca3c9257c9bdf"
 dependencies = [
+ "ariadne",
  "base64-simd",
  "bigdecimal",
  "blake2b_simd",
@@ -10514,7 +10614,7 @@ dependencies = [
  "libc",
  "md-5",
  "memchr",
- "nix",
+ "nix 0.31.3",
  "num-traits",
  "os_display",
  "procfs",
@@ -11559,6 +11659,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
+
+[[package]]
 name = "yasna"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11795,7 +11901,7 @@ dependencies = [
  "flate2",
  "indexmap 2.14.2",
  "memchr",
- "nix",
+ "nix 0.31.3",
  "typed-path",
  "zopfli",
 ]

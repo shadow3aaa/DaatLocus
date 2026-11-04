@@ -101,7 +101,9 @@ async fn portable_commands_obey_native_filesystem_authority() {
         r#"
         set -e
         env cp input.txt copied.txt
+        env bash -lc 'find . -maxdepth 1 -type f -name "copied.txt" | grep -v missing'
         env rg needle copied.txt
+        if env find '{outside_path}' -type f >/dev/null 2>&1; then exit 42; fi
         if env cp input.txt '{outside_path}/forbidden.txt'; then exit 40; fi
         set +e
         env grep secret '{outside_path}/private.txt'

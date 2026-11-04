@@ -3,11 +3,19 @@
 use rubash::{Executor, invocation::ShellInvocation, script_driver};
 use std::io::{self, BufRead, Read, Write};
 
+pub const NAMES: &[&str] = &["bash", "sh"];
+
 /// Called before the embedding service parses CLI arguments or opens storage.
 /// The environment marker routes only Rubash's own shell-shaped respawns; it
 /// conveys no authority and never bypasses the process sandbox.
 pub fn try_run() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let named_shell = std::env::args_os().next().is_some_and(|program| {
+        std::path::Path::new(&program)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| NAMES.iter().any(|shell| name.eq_ignore_ascii_case(shell)))
+    });
     let explicit = args.first().is_some_and(|arg| arg == "--internal-bash");
     // These options do not belong to the maintenance CLI. Recognize them
     // without an environment marker so `env -i "$BASH" -c ...` also works.
@@ -26,7 +34,7 @@ pub fn try_run() {
         && args
             .first()
             .is_none_or(|arg| std::path::Path::new(arg).is_file());
-    if explicit || shell_flag || inherited_shell {
+    if named_shell || explicit || shell_flag || inherited_shell {
         let args = args
             .into_iter()
             .skip(usize::from(explicit))

@@ -3,7 +3,7 @@ name = "daat-locus-uutils"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 AND MIT"
-description = "Embedded portable coreutils and ripgrep with real multicall PATH entries."
+description = "Embedded portable coreutils, findutils and ripgrep with real multicall PATH entries."
 
 [features]
 default = []
@@ -12,6 +12,7 @@ pcre2 = ["grep/pcre2"]
 [dependencies]
 anyhow = "1.0.75"
 bstr = "1.7.0"
+findutils = "=0.11.0"
 grep = "=0.4.1"
 ignore = "0.4.29"
 lexopt = "0.3.1"

@@ -243,8 +243,8 @@ impl HeadTailOutputBuffer {
             return;
         }
 
-        if self.head_len < self.head_budget {
-            let remaining_head = self.head_budget.saturating_sub(self.head_len);
+        if start < self.head_budget {
+            let mut remaining_head = self.head_budget.saturating_sub(start);
             if bytes.len() <= remaining_head {
                 self.push_head(OutputSegment {
                     start,
@@ -253,6 +253,9 @@ impl HeadTailOutputBuffer {
                 return;
             }
 
+            while remaining_head > 0 && bytes[remaining_head] & 0xc0 == 0x80 {
+                remaining_head -= 1;
+            }
             let (head_part, tail_part) = bytes.split_at(remaining_head);
             if !head_part.is_empty() {
                 self.push_head(OutputSegment {
@@ -273,7 +276,8 @@ impl HeadTailOutputBuffer {
         }
 
         if bytes.len() >= self.tail_budget {
-            let keep_from = bytes.len().saturating_sub(self.tail_budget);
+            let keep_from =
+                skip_utf8_continuation(bytes, bytes.len().saturating_sub(self.tail_budget));
             self.tail.clear();
             self.tail_len = 0;
             self.push_tail_segment(OutputSegment {
@@ -301,19 +305,20 @@ impl HeadTailOutputBuffer {
     }
 
     fn trim_tail_to_budget(&mut self) {
-        let mut overflow = self.tail_len.saturating_sub(self.tail_budget);
-        self.tail_len = self.tail_len.saturating_sub(overflow);
-        while overflow > 0 {
+        while self.tail_len > self.tail_budget {
+            let overflow = self.tail_len - self.tail_budget;
             let Some(front) = self.tail.front_mut() else {
                 break;
             };
             if overflow >= front.bytes.len() {
-                overflow -= front.bytes.len();
+                self.tail_len -= front.bytes.len();
                 self.tail.pop_front();
                 continue;
             }
-            front.bytes.drain(..overflow);
-            front.start += overflow;
+            let removed = skip_utf8_continuation(&front.bytes, overflow);
+            front.bytes.drain(..removed);
+            front.start += removed;
+            self.tail_len -= removed;
             break;
         }
     }
@@ -398,6 +403,13 @@ impl HeadTailOutputBuffer {
     fn iter_segments(&self) -> impl Iterator<Item = &OutputSegment> {
         self.head.iter().chain(self.tail.iter())
     }
+}
+
+fn skip_utf8_continuation(bytes: &[u8], mut offset: usize) -> usize {
+    while bytes.get(offset).is_some_and(|byte| byte & 0xc0 == 0x80) {
+        offset += 1;
+    }
+    offset
 }
 
 fn spawn_reader<R>(
@@ -496,5 +508,23 @@ mod tests {
             Some("中".as_bytes().to_vec())
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn truncation_preserves_complete_characters_and_chronological_output() {
+        let mut buffer = HeadTailOutputBuffer::new(10);
+        buffer.append("中文甲乙丙".as_bytes());
+        assert_eq!(buffer.output_since(0).text, "中丙");
+        buffer.append("尾".as_bytes());
+        let output = buffer.output_since(0);
+        assert_eq!(output.text, "中尾");
+        assert_eq!(output.missed_bytes, 12);
+        assert_eq!(output.next_offset, 18);
+        assert_eq!(buffer.tail_chars(2), "中尾");
+        let mut buffer = HeadTailOutputBuffer::new(8);
+        for bytes in ["中文".as_bytes(), b"a", b"b"] {
+            buffer.append(bytes);
+        }
+        assert_eq!(buffer.output_since(0).text, "中ab");
     }
 }

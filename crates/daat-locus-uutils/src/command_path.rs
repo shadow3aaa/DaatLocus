@@ -11,14 +11,14 @@ pub struct CommandPath {
 }
 
 impl CommandPath {
-    pub fn new(host: &Path) -> io::Result<Self> {
+    pub fn new(host: &Path, aliases: &[&'static str]) -> io::Result<Self> {
         let host = std::fs::canonicalize(host)?;
         let directory = tempfile::Builder::new()
             .prefix("daat-locus-tools-")
             .tempdir()?;
         #[cfg(windows)]
         let mut backing = host.clone();
-        for name in crate::names() {
+        for name in crate::names().chain(aliases.iter().copied()) {
             let entry = directory
                 .path()
                 .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
@@ -43,6 +43,10 @@ impl CommandPath {
         std::fs::write(
             directory.path().join("LICENSE-ripgrep"),
             include_bytes!("../vendor/ripgrep/LICENSE-MIT"),
+        )?;
+        std::fs::write(
+            directory.path().join("LICENSE-findutils"),
+            include_bytes!("../LICENSE-findutils"),
         )?;
         Ok(Self { directory })
     }

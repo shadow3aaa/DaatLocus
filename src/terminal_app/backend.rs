@@ -67,7 +67,8 @@ impl ProcessPolicy for RuntimeSandboxPolicy {
                 "Terminal backend requires its current embedded Bash host",
             ));
         }
-        let commands = daat_locus_uutils::CommandPath::new(&executable)?;
+        let commands =
+            daat_locus_uutils::CommandPath::new(&executable, daat_locus_bash::shell::NAMES)?;
         let inherited = std::env::var_os("PATH");
         let path = commands.prepend_to(inherited.as_deref())?;
         let path = path.into_string().map_err(|_| {

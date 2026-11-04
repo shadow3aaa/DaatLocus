@@ -34,7 +34,10 @@ mod search;
 mod ripgrep;
 
 pub fn names() -> impl Iterator<Item = &'static str> {
-    commands::NAMES.iter().copied().chain(["rg", "grep"])
+    commands::NAMES
+        .iter()
+        .copied()
+        .chain(["rg", "grep", "find", "xargs"])
 }
 
 /// Recognize only exact applet basenames. Environment variables never select a
@@ -51,6 +54,29 @@ pub fn try_run() -> Option<std::process::ExitCode> {
     let name = name
         .strip_suffix(std::env::consts::EXE_SUFFIX)
         .unwrap_or(name);
+    if matches!(name, "find" | "xargs") {
+        uucore::panic::mute_sigpipe_panic();
+        let args = match std::env::args_os()
+            .map(OsString::into_string)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(args) => args,
+            Err(argument) => {
+                eprintln!(
+                    "{name}: invalid non-UTF-8 argument: {}",
+                    argument.to_string_lossy()
+                );
+                std::process::exit(1);
+            }
+        };
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        let code = if name == "find" {
+            findutils::find::find_main(&args, &findutils::find::StandardDependencies::new())
+        } else {
+            findutils::xargs::xargs_main(&args)
+        };
+        std::process::exit(code);
+    }
     if matches!(name, "rg" | "grep") {
         // The upstream CLI owns process-global logging and streams; invoke it
         // once, in the child process, with its original argument parser.

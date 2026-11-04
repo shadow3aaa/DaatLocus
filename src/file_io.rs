@@ -1532,8 +1532,9 @@ mod tests {
                 .contains("overwritten")
         );
         drop(child);
+        fs::write(root.join("中文 文本.txt"), "中文内容\n").unwrap();
         let mut terminal = daat_locus_bash::process::TerminalProcess::spawn(
-            "cat new.txt > bash.txt; cmd.exe /d /c 'type new.txt > bash-cmd.txt'",
+            r#"set -e; cat new.txt > bash.txt; cmd.exe /d /c 'type new.txt > bash-cmd.txt'; bash -lc 'find . -maxdepth 1 -type f -name "中文 文本.txt" -exec cat {} \; | grep 中文'"#,
             root.to_str(),
             &policy,
         )
@@ -1554,6 +1555,7 @@ mod tests {
                 .await
         );
         assert!(status.success(), "{}", terminal.output_since(0).text);
+        assert!(terminal.output_since(0).text.contains("中文内容"));
         for name in ["bash.txt", "bash-cmd.txt"] {
             assert!(
                 fs::read_to_string(root.join(name))
