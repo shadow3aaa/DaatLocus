@@ -372,6 +372,8 @@
     "set_text": "替换文本"
   },
   "tool_details": {
+    "conflicting_files": "存在冲突的文件",
+    "file_outcome_unknown": "继续前请检查此文件：{{path}}",
     "waiting_for_output": "等待输出…",
     "exit_code": "退出码 {{code}}",
     "sudo_submitted": "权限申请已交给 Core",
@@ -392,7 +394,6 @@
     "plain_text": "纯文本",
     "command_output": "命令输出",
     "elapsed": "用时",
-    "exit_code": "退出代码",
     "command_is_running": "命令仍在运行",
     "command_finished": "命令已结束",
     "read_attachment_or_complete_output": "已读取附件或完整输出。",
@@ -525,6 +526,19 @@
     "suggestions_failed": "未能读取搜索记录，请重试。"
   },
   "tool_presentation": {
+    "view_workspace": "查看工作区",
+    "reconnect_workspace": "重新连接工作区",
+    "remove_workspace": "移除工作区",
+    "workspace_storage": "工作区存储",
+    "switch_workspace": "切换工作区",
+    "view_branches": "查看分支",
+    "create_branch": "创建分支",
+    "save_version": "保存版本",
+    "version_history": "版本历史",
+    "compare_versions": "比较版本",
+    "merge_changes": "合并修改",
+    "apply_changes": "应用修改",
+    "clean_workspace": "清理工作区",
     "cancel_request": "取消请求",
     "change_model": "切换模型",
     "resolve_permission": "审核权限",

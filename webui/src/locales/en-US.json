@@ -372,6 +372,8 @@
     "set_text": "Replace text"
   },
   "tool_details": {
+    "conflicting_files": "Files with conflicts",
+    "file_outcome_unknown": "Check this file before continuing: {{path}}",
     "waiting_for_output": "Waiting for output…",
     "exit_code": "Exit code {{code}}",
     "sudo_submitted": "Permission request submitted to Core",
@@ -392,7 +394,6 @@
     "plain_text": "Plain text",
     "command_output": "Command output",
     "elapsed": "Elapsed",
-    "exit_code": "Exit code",
     "command_is_running": "Command is running",
     "command_finished": "Command finished",
     "read_attachment_or_complete_output": "Read attachment or complete output.",
@@ -525,6 +526,19 @@
     "suggestions_failed": "Could not load suggestions. Try again."
   },
   "tool_presentation": {
+    "view_workspace": "View workspace",
+    "reconnect_workspace": "Reconnect workspace",
+    "remove_workspace": "Remove workspace",
+    "workspace_storage": "Workspace storage",
+    "switch_workspace": "Switch workspace",
+    "view_branches": "View branches",
+    "create_branch": "Create branch",
+    "save_version": "Save version",
+    "version_history": "Version history",
+    "compare_versions": "Compare versions",
+    "merge_changes": "Merge changes",
+    "apply_changes": "Apply changes",
+    "clean_workspace": "Clean up workspace",
     "cancel_request": "Cancel request",
     "change_model": "Change model",
     "resolve_permission": "Review permission",

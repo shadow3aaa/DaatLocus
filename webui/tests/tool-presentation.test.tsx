@@ -16,7 +16,7 @@ const guiSchema:JsonValue={properties:{status:{},observation:{properties:{title:
 const mcpSchema:JsonValue={"x-dl-error":"generic",properties:{content:{items:{properties:{text:{"x-dl-content":"text"},name:{},uri:{format:"uri"}}}},structuredContent:{},resources:{items:{properties:{name:{},uri:{format:"uri"}}}}}};
 const webSchema:JsonValue={properties:{results:{items:{properties:{operation:{},error:{},result:{properties:{title:{},url:{format:"uri"},content:{},structured_content:{},next_offset:{}}}}}}}};
 
-const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "extension__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
+const result = (patch: Partial<ToolResult>): ToolResult => ({ id: "private-result-id", actor_id: "root", message_id: "message", call_id: "call", name: "mcp_00000000000000000000000000000001__inspect", arguments: {}, payload: { private_metadata: "HIDDEN_PAYLOAD" }, model_content: '{"internal":"HIDDEN_MODEL_PROTOCOL"}', summary: "检查已完成", error: null, ...patch });
 
 describe("tool observations are product content, never protocol dumps", () => {
   test("file results without a diff never claim that a file was updated", () => {
@@ -24,6 +24,7 @@ describe("tool observations are product content, never protocol dumps", () => {
       const html = renderToStaticMarkup(<ToolDetail result={result({name:"files__write_file",output_schema:changeSchema,payload:{path:"notes.md",change:null},error})}/>);
       expect(html.replace(/<[^>]*>/g, "")).toBe(error ? `${error}notes.md` : "");
     }
+    for(const outcome of [{path:"notes.md"},{path:"notes.md",added_lines:0,removed_lines:0}])expect(messageOutcomeTools([{seq:1,...result({name:"files__write_file",outcome})}]).changes).toHaveLength(0);
   });
   test("Rust output descriptors drive identical content across arbitrary tool names",()=>{
     const payload={path:"example.ts",content:"const answer = 42;",start_line:1,end_line:1,total_lines:1};
@@ -114,7 +115,7 @@ describe("tool observations are product content, never protocol dumps", () => {
     const submitted = renderToStaticMarkup(<ToolDetail result={result({name:"sudo__execute_as_admin",output_schema:{properties:{status:{"x-dl-content":"status"},executed:{}}},payload:{status:"submitted",executed:false,approval_id:"PRIVATE_APPROVAL"}})}/>);
     expect(submitted).toContain(i18n.t("observation_status.submitted"));
     expect(submitted).not.toContain("PRIVATE_APPROVAL");
-    const custom = renderToStaticMarkup(<ToolDetail result={result({name:"extension__inspect",payload:{text:"Inspection complete",sandbox:{denials:[{resource:"PRIVATE_NATIVE_TARGET"}]},sudo:{approval_id:"PRIVATE_APPROVAL"}}})}/>);
+    const custom = renderToStaticMarkup(<ToolDetail result={result({payload:{text:"Inspection complete",sandbox:{denials:[{resource:"PRIVATE_NATIVE_TARGET"}]},sudo:{approval_id:"PRIVATE_APPROVAL"}}})}/>);
     expect(custom).toContain("Inspection complete");
     for(const hidden of ["PRIVATE_NATIVE_TARGET","PRIVATE_APPROVAL"]) expect(custom).not.toContain(hidden);
   });
@@ -232,7 +233,7 @@ describe("tool observations are product content, never protocol dumps", () => {
     expect(html).not.toContain("cargo check");
     expect(html).not.toContain("HIDDEN_SUMMARY"); expect(html).not.toContain("HIDDEN_MODEL_PROTOCOL");
   });
-  test("unknown tools retain a readable outcome while hiding internal envelopes", () => {
+  test("external tools retain a readable outcome while hiding internal envelopes", () => {
     const html = renderToStaticMarkup(<ToolDetail result={result({})} />);
     expect(html).toContain("检查已完成");
     for (const value of ["private-result-id", "HIDDEN_PAYLOAD", "HIDDEN_MODEL_PROTOCOL", "private_metadata"])

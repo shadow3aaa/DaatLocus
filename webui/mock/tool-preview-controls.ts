@@ -10,12 +10,12 @@ export function toolPreviewControls(scene: string, selected?: string) {
     const group=document.getElementById('tool-group'),example=document.getElementById('tool-case'),frame=document.getElementById('preview-frame');
     function selectExample(){const next=new URL(location.href);next.searchParams.set('scene',group.value);next.searchParams.set('width',document.getElementById('preview-width').value);if(group.value==='${scene}'&&example.value)next.searchParams.set('case',example.value);else next.searchParams.delete('case');location.href=next.href;}
     group.addEventListener('change',selectExample);example.addEventListener('change',selectExample);
-    let expanding;
+    let expanding=0;
     function expandTools(){
-      if(expanding)expanding.disconnect();
-      const doc=frame.contentDocument;if(!doc||!doc.body)return;
-      const open=()=>doc.querySelectorAll('.dl-activity-heading[aria-expanded="false"]${selected ? ',.dl-step-label[aria-expanded="false"]:not([disabled])' : ''}').forEach(button=>button.click());
-      const observer=new frame.contentWindow.MutationObserver(open);expanding=observer;observer.observe(doc.body,{childList:true,subtree:true});open();setTimeout(()=>observer.disconnect(),5000);
+      cancelAnimationFrame(expanding);
+      const until=performance.now()+5000;
+      const open=()=>{frame.contentDocument?.querySelectorAll('.dl-activity-heading[aria-expanded="false"]${selected ? ',.dl-step-label[aria-expanded="false"]:not([disabled])' : ''}').forEach(button=>button.click());if(performance.now()<until)expanding=requestAnimationFrame(open);};
+      open();
     }
     document.getElementById('tool-expand').addEventListener('click',expandTools);
     ${selected ? "frame.addEventListener('load',expandTools);" : ""}

@@ -847,8 +847,8 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-activities svg { stroke-width: 1.65; }
 .dl-step-label > .dl-step-chevron { width: 14px; height: 14px; opacity: 0; flex-shrink: 0; }
 .dl-step-label:hover > .dl-step-chevron, .dl-step-label:focus-visible > .dl-step-chevron, .dl-step-label[aria-expanded="true"] > .dl-step-chevron { opacity: 1; }
-.dl-step-detail { --tool-code-size: calc(var(--code-font-size, 13px) * 16 / 13); min-width: 0; }
-.dl-step-detail .dl-diff-lines { max-height: 144px; }
+.dl-step>.dl-tool-details { --tool-code-size: calc(var(--code-font-size, 13px) * 16 / 13); }
+.dl-step .dl-diff-lines { max-height: 144px; }
 .dl-tool-output { min-width: 0; max-width: 100%; margin: 8px 0; overflow: hidden; border: 1px solid var(--settings-border); border-radius: 12px; background: color-mix(in srgb, var(--foreground) 4%, var(--background)); color: var(--muted-foreground); }
 .dl-tool-output > header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: var(--content-font-size, 16px); line-height: 1.5; }
 .dl-output-context { min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

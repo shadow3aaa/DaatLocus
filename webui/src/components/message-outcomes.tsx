@@ -14,7 +14,7 @@ import { LazyPage } from "@/components/lazy-page";
 export function messageOutcomeTools(tools: ToolSummary[]) {
   return {
     artifacts: tools.filter(tool => !tool.error && operationToolName(tool) === "artifacts__present" && safeLink(asText(asObject(tool.outcome).uri))),
-    changes: tools.filter(tool => !tool.error && ["files__write_file", "files__edit_file", "files__copy_file"].includes(operationToolName(tool)) && asText(asObject(tool.outcome).path)),
+    changes: tools.filter(tool => !tool.error && ["files__write_file", "files__edit_file", "files__copy_file"].includes(operationToolName(tool)) && asText(asObject(tool.outcome).path) && (Number(asObject(tool.outcome).added_lines)>0||Number(asObject(tool.outcome).removed_lines)>0)),
   };
 }
 

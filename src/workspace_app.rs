@@ -233,6 +233,7 @@ impl From<Version> for VersionOutput {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "workspace"))]
 struct HistoryOutput {
     path: String,
     reference: String,
@@ -242,6 +243,7 @@ struct HistoryOutput {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "workspace"))]
 struct DiffOutput {
     path: String,
     left: String,
@@ -252,6 +254,7 @@ struct DiffOutput {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "workspace"))]
 struct ReadOutput {
     entry: EntryOutput,
     target: Option<String>,
@@ -262,6 +265,7 @@ struct ReadOutput {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "workspace"))]
 struct MergeOutput {
     path: String,
     base: String,
@@ -274,6 +278,7 @@ struct MergeOutput {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+#[schemars(extend("x-dl-content" = "workspace"))]
 struct PublishOutput {
     path: String,
     id: String,

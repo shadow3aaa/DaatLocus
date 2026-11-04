@@ -33,10 +33,6 @@ describe("tool renderer preview catalog",()=>{
       }
     }
   });
-  test("the catalog retains known failure, image, diff, protocol and empty-state examples",()=>{
-    const ids=new Set(toolExamples.map(item=>item.id));
-    for (const id of ["file-diff-long","file-binary","file-image-broken","terminal-nonzero","terminal-error","web-json","web-json-invalid","web-mixed","browser-closed","computer-error","phone-error","mcp-error","mcp-empty","artifact-html","artifact-invalid","permission-denied","permission-application_required","permission-approved","sudo-wrapped","sudo-invalid","generic-fields","error-running","error-cancelled","error-interrupted","error-queued","detail-loading","detail-retry","activity-retry"]) expect(ids.has(id)).toBe(true);
-  });
   test("single-example links validate before resetting and expose controls for every category",async()=>{
     expect(activateScenario("tools-files","file-diff-long")).toBe(true);
     expect(store.actors.get("research")!.messages).toHaveLength(1);

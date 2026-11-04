@@ -1,6 +1,6 @@
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { JsonValue, ToolSummary } from "./actor-api";
-import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon, MonitorIcon, SmartphoneIcon } from "lucide-react";
+import { FileTextIcon, FilePlus2Icon, FileMinus2Icon, PencilIcon, TerminalSquareIcon, SearchIcon, Globe2Icon, MessageCircleIcon, ImageIcon, PackageIcon, PaperclipIcon, MonitorIcon, SmartphoneIcon, GitBranchIcon } from "lucide-react";
 
 export const asObject = (value: JsonValue | undefined): Record<string, JsonValue> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export const asText = (value: JsonValue | undefined): string => typeof value === "string" ? value : "";
@@ -15,6 +15,7 @@ export function approvalNotice(value: JsonValue | null | undefined): { kind: "de
 export const approvalNoticeTitle = (kind: "denied" | "application_required" | "approved") => t(kind === "denied" ? "tool_details.not_approved" : kind === "approved" ? "tool_details.permission_approved" : "tool_details.application_required");
 
 const labels: Record<string, string> = {
+  workspace__current:"tool_presentation.view_workspace", workspace__rebind:"tool_presentation.reconnect_workspace", workspace__delete:"tool_presentation.remove_workspace", workspace__storage:"tool_presentation.workspace_storage", workspace__select:"tool_presentation.switch_workspace", workspace__list:"tool_presentation.view_branches", workspace__fork:"tool_presentation.create_branch", workspace__commit:"tool_presentation.save_version", workspace__history:"tool_presentation.version_history", workspace__diff:"tool_presentation.compare_versions", workspace__read:"tool_presentation.read_file", workspace__merge:"tool_presentation.merge_changes", workspace__publish:"tool_presentation.apply_changes", workspace__compact:"tool_presentation.clean_workspace",
   sudo__execute: "tool_presentation.sudo_execute", sudo__execute_as_admin: "tool_presentation.sudo_execute_as_admin",
   phone_use__list_apps: "computer_use.list_apps", phone_use__list_windows: "computer_use.list_windows", phone_use__launch_app: "computer_use.launch_app", phone_use__open_window: "computer_use.open_window", phone_use__get_window_state: "computer_use.observe", phone_use__click: "computer_use.click", phone_use__set_text: "computer_use.set_text", phone_use__press_key: "computer_use.press_key", phone_use__scroll: "computer_use.scroll", phone_use__drag: "computer_use.drag", phone_use__release_window: "computer_use.release_window", phone_use__close_window: "computer_use.close_window",
   computer_use__adjust_window: "computer_use.adjust_window",
@@ -46,13 +47,15 @@ function words(value: string) { return value.replace(/([a-z])([A-Z])/g, "$1 $2")
 export function domainToolName(name: string) { return name.replace(/^d_[0-9a-f]{12}_/, ""); }
 /** The backend identifies wrapped operations; never decode wrapper arguments in the client. */
 export function operationToolName(tool: Pick<ToolSummary,"name"|"outcome">) { return domainToolName(asText(asObject(tool.outcome).operation) || tool.name); }
-export function toolLabel(name: string) { const domain=domainToolName(name); return /^mcp_[a-f0-9]{32}__/.test(domain) ? t("apps.tool_action") : labels[domain] ? t(labels[domain]) : domain.split("__").map(words).join(" · "); }
+export function isBuiltinTool(tool:Pick<ToolSummary,"name"|"outcome">) { return !/^mcp_[a-f0-9]{32}__/.test(operationToolName(tool)); }
+export function toolLabel(name: string) { const domain=domainToolName(name).replace(/^super_skills__/,"files__"); return labels[domain] ? t(labels[domain]) : t("apps.tool_action"); }
 export function fieldLabel(name: string) { return t(`observation_fields.${name}`,{defaultValue:fieldLabels[name] ? t(fieldLabels[name]) : words(name)}); }
 export function toolIcon(name: string, outcome?: JsonValue | null) {
   name = operationToolName({name,outcome});
   if (name.startsWith("phone_use__")) return SmartphoneIcon;
   if (name.startsWith("computer_use__")) return MonitorIcon;
   if (name.startsWith("terminal__")) return TerminalSquareIcon;
+  if (name.startsWith("workspace__")) return GitBranchIcon;
   if ((name.startsWith("actors__") || name.startsWith("admin_actors__"))) return MessageCircleIcon;
   if (name.includes("search")) return SearchIcon;
   if (name.startsWith("web__")) return Globe2Icon;
@@ -61,7 +64,7 @@ export function toolIcon(name: string, outcome?: JsonValue | null) {
   if (name.includes("edit_file")) return PencilIcon;
   if (name.includes("write_file")) return asObject(outcome).created === true ? FilePlus2Icon : PencilIcon;
   if (name.includes("image")) return ImageIcon;
-  if (name.startsWith("files__")) return FileTextIcon;
+  if (name.startsWith("files__")||name.startsWith("super_skills__")) return FileTextIcon;
   if (name.startsWith("artifacts__")) return PaperclipIcon;
   return PackageIcon;
 }
@@ -91,8 +94,8 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
   const app = asObject(outcome.app);
   if (tool.status === "running" && name.startsWith("terminal__")) return { label: t("tool_presentation.running"), detail: asText(outcome.command) };
   const label = asText(app.name) || toolLabel(name);
-  const fact = [outcome.command, outcome.path, outcome.title, asObject(outcome.observation).title, app.tool].map(asText).find(Boolean);
-  const detail = fact || (tool.status === "running" ? t("tool_presentation.running_2") : labels[name] || tool.error ? "" : readableSummary(tool.summary));
+  const fact = [outcome.command, outcome.path, outcome.title, asObject(outcome.observation).title, ...(!isBuiltinTool(tool)?[app.tool]:[])].map(asText).find(Boolean);
+  const detail = fact || (tool.status === "running" ? t("tool_presentation.running_2") : isBuiltinTool(tool) || tool.error ? "" : readableSummary(tool.summary));
   return { label, detail: detail === label ? "" : detail };
 
 }
