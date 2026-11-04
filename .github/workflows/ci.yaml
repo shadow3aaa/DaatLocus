@@ -189,6 +189,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free Android build space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL "${ANDROID_HOME:?}/ndk"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,wasm32-unknown-unknown
