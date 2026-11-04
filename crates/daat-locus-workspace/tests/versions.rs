@@ -512,7 +512,7 @@ fn gitignore_capture_preserves_tracked_and_new_files_and_keeps_build_outputs_iso
 }
 
 #[test]
-fn committed_reads_remain_available_during_capture_and_progress_can_abort_it() {
+fn committed_reads_remain_available_during_capture_and_failures_roll_back() {
     let (temp, path, store) = fixture();
     let branch = store
         .branch(directory(&path), "existing", "default")
@@ -562,4 +562,16 @@ fn committed_reads_remain_available_during_capture_and_progress_can_abort_it() {
     });
     assert!(store.branch(origin, "aborted", "default").is_err());
     assert!(store.open_recorded_branch(&path, "aborted").is_err());
+    let vanishing = path.join("vanishing.txt");
+    fs::write(&vanishing, b"temporary contents").unwrap();
+    let source = vanishing.clone();
+    let origin = directory(&path).with_progress(move |progress| {
+        if progress.path == "code" && source.exists() {
+            fs::remove_file(&source)?;
+        }
+        Ok(())
+    });
+    let error = store.branch(origin, "vanished", "default").err().unwrap();
+    assert!(error.to_string().contains(&vanishing.display().to_string()));
+    assert!(store.open_recorded_branch(&path, "vanished").is_err());
 }

@@ -23,6 +23,8 @@ pub const DEFAULT_BRANCH: &str = "default";
 pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error("cannot capture {path}: {source}")]
+    Capture { path: String, source: io::Error },
     #[error("filesystem authorization failed: {0}")]
     Authorization(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]

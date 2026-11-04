@@ -71,6 +71,16 @@ impl Capture<'_> {
     }
 
     fn node(&mut self, path: &str) -> Result<Option<ObjectId>> {
+        self.capture_node(path).map_err(|error| match error {
+            Error::Io(source) => Error::Capture {
+                path: self.origin.path().join(path).display().to_string(),
+                source,
+            },
+            error => error,
+        })
+    }
+
+    fn capture_node(&mut self, path: &str) -> Result<Option<ObjectId>> {
         let origin = self.origin;
         let connection = self.connection;
         let project = self.project;

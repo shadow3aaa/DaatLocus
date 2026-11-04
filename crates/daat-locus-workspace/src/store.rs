@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc, time::Duration};
 
 /// Hashes include an object domain; a file block cannot impersonate a tree node.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObjectId(pub(crate) String);
 
 impl ObjectId {
@@ -32,6 +32,7 @@ pub struct Collection {
 #[derive(Clone)]
 pub struct Store {
     pub(crate) connection: Arc<Mutex<Connection>>,
+    pub(crate) directories: Arc<Mutex<lru::LruCache<ObjectId, Arc<crate::workspace::Node>>>>,
     reader: Arc<Mutex<Connection>>,
     path: Arc<std::path::PathBuf>,
 }
@@ -101,6 +102,7 @@ impl Store {
         reader.busy_timeout(Duration::from_secs(30))?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            directories: Arc::new(Mutex::new(lru::LruCache::new(128.try_into().unwrap()))),
             reader: Arc::new(Mutex::new(reader)),
             path: Arc::new(path.canonicalize()?),
         })
@@ -172,11 +174,10 @@ pub(crate) fn put(connection: &Connection, domain: u8, bytes: &[u8]) -> Result<O
 
 pub(crate) fn get(connection: &Connection, domain: u8, id: &ObjectId) -> Result<Vec<u8>> {
     let (actual_domain, size, data): (u8, usize, Vec<u8>) = connection
-        .query_row(
-            "SELECT domain,size,data FROM objects WHERE id=?1",
-            [&id.0],
-            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as usize, row.get(2)?)),
-        )
+        .prepare_cached("SELECT domain,size,data FROM objects WHERE id=?1")?
+        .query_row([&id.0], |row| {
+            Ok((row.get(0)?, row.get::<_, i64>(1)? as usize, row.get(2)?))
+        })
         .optional()?
         .ok_or_else(|| missing(format!("object {}", id.0)))?;
     if domain != actual_domain {

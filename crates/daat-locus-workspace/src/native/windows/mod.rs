@@ -154,7 +154,9 @@ struct Handler {
     security: Vec<u8>,
     origin: PathBuf,
     directory: PathBuf,
+    directories: Mutex<HashMap<u64, Arc<DirectoryEntries>>>,
 }
+type DirectoryEntries = Vec<(Vec<u16>, Entry)>;
 pub(super) struct Session {
     api: Arc<Api>,
     fs: usize,
@@ -275,6 +277,7 @@ pub(super) fn mount(workspace: Workspace, path: &Path) -> Result<Mount> {
         security: owner_security()?,
         origin,
         directory: path.to_owned(),
+        directories: Mutex::new(HashMap::new()),
     });
     let mut params: VolumeParams = unsafe { mem::zeroed() };
     params.sector_size = 512;
@@ -456,10 +459,13 @@ fn attributes(handler: &Handler, entry: &Entry) -> Result<(u32, u32)> {
     ))
 }
 fn file_info(handler: &Handler, inode: u64, output: *mut FileInfo) -> Result<()> {
+    entry_info(handler, handler.view.entry(inode)?, output)
+}
+
+fn entry_info(handler: &Handler, entry: Entry, output: *mut FileInfo) -> Result<()> {
     if output.is_null() {
         return Err(Error::Invalid("missing file information".into()));
     }
-    let entry = handler.view.entry(inode)?;
     let (attributes, tag) = if entry.kind == EntryKind::Symlink {
         attributes(handler, &entry)?
     } else {
@@ -490,7 +496,7 @@ fn file_info(handler: &Handler, inode: u64, output: *mut FileInfo) -> Result<()>
             access_time: time,
             write_time: time,
             change_time: time,
-            inode,
+            inode: entry.inode,
             ..FileInfo::default()
         };
     }
@@ -695,6 +701,7 @@ extern "C" fn cleanup(fs: Fs, context: Context, _: Name, flags: u32) {
 }
 extern "C" fn close(fs: Fs, context: Context) {
     call(fs, |handler| {
+        handler.directories.lock().remove(&handle(context));
         handler.view.close(handle(context));
         Ok(STATUS_SUCCESS)
     });
@@ -850,6 +857,29 @@ extern "C" fn get_security(fs: Fs, _: Context, buffer: Buffer, size: *mut usize)
 extern "C" fn set_security(_: Fs, _: Context, _: u32, _: Buffer) -> Status {
     STATUS_ACCESS_DENIED
 }
+fn directory_entries(handler: &Handler, id: u64, restart: bool) -> Result<Arc<DirectoryEntries>> {
+    let mut directories = handler.directories.lock();
+    if !restart && let Some(entries) = directories.get(&id) {
+        return Ok(entries.clone());
+    }
+    let inode = handler.view.handle_inode(id)?;
+    let mut entries = handler.view.read_dir(inode)?;
+    let path = handler.view.handle_path(id)?;
+    if !path.is_empty() {
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        entries.push((".".into(), handler.view.entry(inode)?));
+        entries.push(("..".into(), handler.view.lookup(parent)?));
+    }
+    let mut entries: DirectoryEntries = entries
+        .into_iter()
+        .map(|(name, entry)| (name.encode_utf16().collect(), entry))
+        .collect();
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let entries = Arc::new(entries);
+    directories.insert(id, entries.clone());
+    Ok(entries)
+}
+
 extern "C" fn read_directory(
     fs: Fs,
     context: Context,
@@ -866,25 +896,16 @@ extern "C" fn read_directory(
         unsafe {
             *transferred = 0;
         }
-        let inode = handler.view.handle_inode(handle(context))?;
-        let mut entries = handler.view.read_dir(inode)?;
-        let path = handler.view.handle_path(handle(context))?;
-        if !path.is_empty() {
-            let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-            entries.push((".".into(), handler.view.entry(inode)?));
-            entries.push(("..".into(), handler.view.lookup(parent)?));
-        }
+        let entries = directory_entries(handler, handle(context), marker.is_null())?;
         let marker = if marker.is_null() {
             None
         } else {
             Some(text(marker)?.encode_utf16().collect::<Vec<_>>())
         };
-        entries.sort_by_cached_key(|(name, _)| name.encode_utf16().collect::<Vec<_>>());
-        for (name, entry) in entries {
-            let name: Vec<_> = name.encode_utf16().collect();
-            if marker.as_ref().is_some_and(|marker| name <= *marker) {
-                continue;
-            }
+        let start = marker.as_ref().map_or(0, |marker| {
+            entries.partition_point(|(name, _)| name <= marker)
+        });
+        for (name, entry) in &entries[start..] {
             let size = mem::size_of::<DirInfo>() + name.len() * 2;
             let mut aligned = vec![0u64; size.div_ceil(8)];
             let item = aligned.as_mut_ptr().cast::<DirInfo>();
@@ -892,7 +913,7 @@ extern "C" fn read_directory(
                 (*item).size = u16::try_from(size)
                     .map_err(|_| Error::Invalid("directory entry too long".into()))?;
             }
-            file_info(handler, entry.inode, unsafe { &mut (*item).file })?;
+            entry_info(handler, entry.clone(), unsafe { &mut (*item).file })?;
             unsafe {
                 ptr::copy_nonoverlapping(
                     name.as_ptr(),

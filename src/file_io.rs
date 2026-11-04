@@ -588,13 +588,22 @@ fn read_authorized_bytes_within(
     policy: &RuntimeSandboxPolicy,
     boundary: Option<&Path>,
 ) -> Result<Vec<u8>> {
+    read_authorized_file_within(path, limit, policy, boundary).map(|(_, bytes)| bytes)
+}
+
+fn read_authorized_file_within(
+    path: &Path,
+    limit: u64,
+    policy: &RuntimeSandboxPolicy,
+    boundary: Option<&Path>,
+) -> Result<(PathBuf, Vec<u8>)> {
     ensure_read_boundary(path, boundary)?;
     guarded_directory::local_path(path)
         .map_err(|_| miette!("remote or device file paths are unsupported"))?;
     if !policy.is_path_readable(path)
         && let Some(resource) = builtin_resource_for_path(path, policy)?
     {
-        return read_builtin_bytes(resource, limit);
+        return Ok((resource.path.clone(), read_builtin_bytes(resource, limit)?));
     }
     policy.ensure_path_readable(path, "file target")?;
     let mut options = fs::OpenOptions::new();
@@ -634,7 +643,7 @@ fn read_authorized_bytes_within(
     if bytes.len() as u64 > limit {
         return Err(miette!("file exceeds the size limit"));
     }
-    Ok(bytes)
+    Ok((actual, bytes))
 }
 
 /// Read at most the leading `limit` bytes of a file for bounded inspection.
@@ -889,6 +898,9 @@ fn search_text_with_global_rules(
             if use_ignore_files && entry.file_name() == ".git" {
                 return false;
             }
+            if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                return true;
+            }
             // Rule discovery is internal metadata I/O. Admission to the search
             // still checks Actor authority before descending into a directory.
             let Ok(actual) = authorized_path(
@@ -902,18 +914,12 @@ fn search_text_with_global_rules(
             if ensure_read_boundary(&actual, filter_boundary.as_deref()).is_err() {
                 return false;
             }
-            if entry.file_type().is_some_and(|kind| kind.is_dir()) {
-                return guarded_directory::GuardedDirectory::open(&actual, false).is_ok_and(
-                    |directory| {
-                        check_opened_file(directory.handle(), &actual, &filter_policy, false)
-                            .is_ok()
-                            && opened_file_path(directory.handle(), &actual).is_ok_and(|path| {
-                                ensure_read_boundary(&path, filter_boundary.as_deref()).is_ok()
-                            })
-                    },
-                );
-            }
-            true
+            guarded_directory::GuardedDirectory::open(&actual, false).is_ok_and(|directory| {
+                check_opened_file(directory.handle(), &actual, &filter_policy, false).is_ok()
+                    && opened_file_path(directory.handle(), &actual).is_ok_and(|path| {
+                        ensure_read_boundary(&path, filter_boundary.as_deref()).is_ok()
+                    })
+            })
         });
     for entry in walker.build() {
         let entry = entry.map_err(|_| miette!("unable to traverse search directory"))?;
@@ -924,11 +930,11 @@ fn search_text_with_global_rules(
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let Ok(actual) = authorized_path(cwd, policy, &entry.path().to_string_lossy(), false)
-        else {
+        if ensure_authorized_read(entry.path(), policy, "search file").is_err() {
             continue;
-        };
-        let bytes = read_authorized_bytes_within(&actual, u64::MAX, policy, boundary)?;
+        }
+        let (actual, bytes) =
+            read_authorized_file_within(entry.path(), u64::MAX, policy, boundary)?;
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };

@@ -178,6 +178,72 @@ fn runtime_mount_probe_uses_the_native_backend() {
     );
 }
 
+#[test]
+#[ignore = "requires the installed WinFsp driver or a working FUSE device and mount helper"]
+fn native_directory_pages_keep_one_snapshot_and_reopening_sees_new_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let mut names: Vec<_> = (0..700)
+        .map(|index| format!("{index:04}-{}.txt", "entry".repeat(16)))
+        .chain(["unicode-😀.txt".into(), "unicode-\u{e000}.txt".into()])
+        .collect();
+    for name in &names {
+        fs::write(source.join(name), b"contents").unwrap();
+    }
+    let manager = Workspaces::new(
+        Store::open(&temp.path().join("store.sqlite3")).unwrap(),
+        temp.path().join("mounts"),
+    );
+    let location = manager
+        .select(
+            Directory::open(&source, Arc::new(|_, _| Ok(()))).unwrap(),
+            "paged",
+            "default",
+        )
+        .unwrap();
+    let mut entries = fs::read_dir(&location.directory).unwrap();
+    let first = entries.next().unwrap().unwrap().file_name();
+    fs::write(location.directory.join("zz-new.txt"), b"new file").unwrap();
+    let mut original: Vec<_> = std::iter::once(first)
+        .chain(entries.map(|entry| entry.unwrap().file_name()))
+        .collect();
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        assert!(
+            original
+                .windows(2)
+                .all(|pair| { pair[0].encode_wide().cmp(pair[1].encode_wide()).is_lt() })
+        );
+    }
+    original.sort();
+    names.sort();
+    assert_eq!(original.len(), names.len());
+    assert_eq!(
+        original,
+        names
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+    );
+    let mut reopened: Vec<_> = fs::read_dir(&location.directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    reopened.sort();
+    names.push("zz-new.txt".into());
+    names.sort();
+    assert_eq!(
+        reopened,
+        names
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+    );
+    manager.close();
+}
+
 #[cfg(windows)]
 fn windows_fixture() -> (
     tempfile::TempDir,

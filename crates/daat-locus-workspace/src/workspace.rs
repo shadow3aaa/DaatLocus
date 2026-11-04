@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,7 +38,7 @@ pub struct Entry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Node {
+pub(crate) struct Node {
     entry: Entry,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blocks: Vec<ObjectId>,
@@ -103,6 +104,21 @@ pub struct Workspace {
 }
 
 impl Store {
+    fn directory_node(&self, connection: &Connection, id: &ObjectId) -> Result<Arc<Node>> {
+        if let Some(node) = self.directories.lock().get(id).cloned() {
+            return Ok(node);
+        }
+        let node = Arc::new(Node::load(connection, id)?);
+        if node.entry.kind == EntryKind::Directory {
+            self.directories.lock().put(id.clone(), node.clone());
+        }
+        Ok(node)
+    }
+
+    fn lookup(&self, connection: &Connection, root: &ObjectId, path: &str) -> Result<Arc<Node>> {
+        lookup_node(root, path, |id| self.directory_node(connection, id))
+    }
+
     /// Reclaim obsolete blocks and trees while retaining every live branch,
     /// checkpoint, unfinished merge and native unlinked-file handle.
     pub fn collect_garbage(&self) -> Result<crate::Collection> {
@@ -277,11 +293,12 @@ impl Store {
 impl Workspace {
     fn roots(&self, connection: &Connection) -> Result<(ObjectId, ObjectId)> {
         connection
-            .query_row(
+            .prepare_cached(
                 "SELECT base,head FROM branches WHERE project=?1 AND name=?2 AND generation=?3",
-                params![self.project, self.name, self.generation],
-                |row| Ok((ObjectId(row.get(0)?), ObjectId(row.get(1)?))),
-            )
+            )?
+            .query_row(params![self.project, self.name, self.generation], |row| {
+                Ok((ObjectId(row.get(0)?), ObjectId(row.get(1)?)))
+            })
             .optional()?
             .ok_or_else(|| Error::Conflict("workspace branch was deleted or replaced".into()))
     }
@@ -335,13 +352,13 @@ impl Workspace {
     pub fn entry(&self, path: &str) -> Result<Entry> {
         self.store.read(|connection| {
             let root = self.roots(connection)?.1;
-            Ok(lookup(connection, &root, path)?.entry)
+            Ok(self.store.lookup(connection, &root, path)?.entry.clone())
         })
     }
     pub fn read_dir(&self, path: &str) -> Result<Vec<(String, Entry)>> {
         self.store.read(|connection| {
             let root = self.roots(connection)?.1;
-            let directory = lookup(connection, &root, path)?;
+            let directory = self.store.lookup(connection, &root, path)?;
             if directory.entry.kind != EntryKind::Directory {
                 return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
             }
@@ -357,7 +374,7 @@ impl Workspace {
             let root = self.roots(connection)?.1;
             read_node(
                 connection,
-                &lookup(connection, &root, path)?,
+                self.store.lookup(connection, &root, path)?.as_ref(),
                 offset,
                 length,
             )
@@ -366,8 +383,10 @@ impl Workspace {
     pub fn read_link(&self, path: &str) -> Result<String> {
         self.store.read(|connection| {
             let root = self.roots(connection)?.1;
-            lookup(connection, &root, path)?
+            self.store
+                .lookup(connection, &root, path)?
                 .target
+                .clone()
                 .ok_or_else(|| Error::Invalid("not a symlink".into()))
         })
     }
@@ -455,11 +474,11 @@ impl Workspace {
     pub(crate) fn reparse_point(&self, path: &str) -> Result<Option<crate::reparse::ReparsePoint>> {
         self.store.read(|connection| {
             let (_, root) = self.roots(connection)?;
-            let node = lookup(connection, &root, path)?;
+            let node = self.store.lookup(connection, &root, path)?;
             if node.entry.kind != EntryKind::Symlink {
                 return Ok(None);
             }
-            let point = match node.reparse {
+            let point = match node.reparse.clone() {
                 Some(point) => point,
                 None => crate::reparse::ReparsePoint::symlink(
                     node.target
@@ -787,11 +806,10 @@ fn project(connection: &Connection, origin: &Directory) -> Result<i64> {
 
 fn roots(connection: &Connection, project: i64, name: &str) -> Result<(ObjectId, ObjectId)> {
     connection
-        .query_row(
-            "SELECT base,head FROM branches WHERE project=?1 AND name=?2",
-            params![project, name],
-            |row| Ok((ObjectId(row.get(0)?), ObjectId(row.get(1)?))),
-        )
+        .prepare_cached("SELECT base,head FROM branches WHERE project=?1 AND name=?2")?
+        .query_row(params![project, name], |row| {
+            Ok((ObjectId(row.get(0)?), ObjectId(row.get(1)?)))
+        })
         .optional()?
         .ok_or_else(|| missing("workspace branch"))
 }
@@ -806,16 +824,22 @@ fn snapshot(
 }
 
 fn lookup(connection: &Connection, root: &ObjectId, path: &str) -> Result<Node> {
+    lookup_node(root, path, |id| Node::load(connection, id))
+}
+
+fn lookup_node<N: std::borrow::Borrow<Node>>(
+    root: &ObjectId,
+    path: &str,
+    mut load: impl FnMut(&ObjectId) -> Result<N>,
+) -> Result<N> {
     relative_path(path)?;
-    let mut node = Node::load(connection, root)?;
+    let mut node = load(root)?;
     for name in path.split('/').filter(|name| !name.is_empty()) {
-        if node.entry.kind != EntryKind::Directory {
+        let current = node.borrow();
+        if current.entry.kind != EntryKind::Directory {
             return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
         }
-        node = Node::load(
-            connection,
-            node.children.get(name).ok_or_else(|| missing(path))?,
-        )?;
+        node = load(current.children.get(name).ok_or_else(|| missing(path))?)?;
     }
     Ok(node)
 }
@@ -944,7 +968,11 @@ fn apply(
 ) -> Result<()> {
     let current = match snapshot(connection, origin, project, path) {
         Ok(id) => Some(Node::load(connection, &id)?),
-        Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(Error::Io(error) | Error::Capture { source: error, .. })
+            if error.kind() == io::ErrorKind::NotFound =>
+        {
+            None
+        }
         Err(error) => return Err(error),
     };
     if !equivalent(current.as_ref(), expected) {

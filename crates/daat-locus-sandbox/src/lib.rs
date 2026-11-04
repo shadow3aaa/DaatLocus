@@ -885,15 +885,12 @@ impl FileSystemSandboxPolicy {
             if path_is_denied(path, &self.deny_read_paths) {
                 return false;
             }
-            if path_is_system_temporary(path) {
+            if self.full_disk_read || path_is_system_temporary(path) {
                 return true;
             }
             if runtime_read_scopes()
                 .is_ok_and(|scopes| scopes.iter().any(|scope| scope.covers(path)))
             {
-                return true;
-            }
-            if self.full_disk_read {
                 return true;
             }
             self.readable_roots
@@ -917,10 +914,7 @@ impl FileSystemSandboxPolicy {
             if path_is_denied(path, &self.deny_write_paths) {
                 return false;
             }
-            if path_is_system_temporary(path) {
-                return true;
-            }
-            if self.full_disk_write {
+            if self.full_disk_write || path_is_system_temporary(path) {
                 return true;
             }
             self.writable_roots

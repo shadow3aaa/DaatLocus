@@ -1866,6 +1866,7 @@ dependencies = [
  "ignore",
  "libc",
  "libloading 0.8.9",
+ "lru",
  "parking_lot",
  "rusqlite",
  "same-file",
