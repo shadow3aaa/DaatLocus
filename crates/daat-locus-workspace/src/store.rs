@@ -32,6 +32,7 @@ pub struct Collection {
 #[derive(Clone)]
 pub struct Store {
     pub(crate) connection: Arc<Mutex<Connection>>,
+    reader: Arc<Mutex<Connection>>,
     path: Arc<std::path::PathBuf>,
 }
 
@@ -96,14 +97,23 @@ impl Store {
             Some(other) => return Err(Error::Unsupported(format!("storage format {other}"))),
         }
         crate::workspace::migrate_versions(&mut connection)?;
+        let reader = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        reader.busy_timeout(Duration::from_secs(30))?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            reader: Arc::new(Mutex::new(reader)),
             path: Arc::new(path.canonicalize()?),
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let mut connection = self.reader.lock();
+        let transaction = connection.transaction()?;
+        read(&transaction)
     }
 
     /// Only the exclusive host may call this during crash recovery, before it

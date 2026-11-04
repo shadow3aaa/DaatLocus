@@ -18,6 +18,7 @@ pub enum Access {
 /// Called for each host access, including descendants, temporary files and
 /// deletion targets. An App supplies its current common sandbox policy here.
 pub type Authorize = Arc<dyn Fn(&Path, Access) -> Result<()> + Send + Sync>;
+type CaptureSink = dyn Fn(&crate::CaptureProgress) -> Result<()> + Send + Sync;
 
 #[derive(Clone)]
 pub struct Directory {
@@ -25,6 +26,8 @@ pub struct Directory {
     pub(crate) dir: Arc<Dir>,
     identity: Arc<same_file::Handle>,
     authorize: Authorize,
+    pub(crate) include_ignored: bool,
+    pub(crate) progress: Option<Arc<CaptureSink>>,
 }
 
 impl Directory {
@@ -39,6 +42,8 @@ impl Directory {
             dir: Arc::new(dir),
             identity: Arc::new(identity),
             authorize,
+            include_ignored: false,
+            progress: None,
         };
         result.check_binding()?;
         Ok(result)
@@ -46,6 +51,25 @@ impl Directory {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn authorizer(&self) -> Authorize {
+        self.authorize.clone()
+    }
+
+    /// Capture ignored files as well as ordinary project contents.
+    pub fn with_ignored(mut self, include: bool) -> Self {
+        self.include_ignored = include;
+        self
+    }
+
+    /// Observe native capture progress. Returning an error aborts the capture.
+    pub fn with_progress(
+        mut self,
+        progress: impl Fn(&crate::CaptureProgress) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Some(Arc::new(progress));
+        self
     }
 
     pub(crate) fn binding(&self) -> String {

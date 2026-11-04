@@ -429,3 +429,137 @@ fn project_storage_counts_shared_blocks_once_and_reclaims_only_unreferenced_cont
     assert_eq!(stats.shared_stored_bytes, 0);
     assert_eq!(stats.stored_bytes, stats.exclusive_stored_bytes);
 }
+
+#[test]
+fn gitignore_capture_preserves_tracked_and_new_files_and_keeps_build_outputs_isolated() {
+    for (hash, split) in [("sha1", true), ("sha256", false)] {
+        let (temp, path, store) = fixture();
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet", &format!("--object-format={hash}")]);
+        fs::create_dir(path.join("target")).unwrap();
+        fs::create_dir(path.join("nested")).unwrap();
+        fs::write(path.join(".gitignore"), "/target/\n*.tmp\n!keep.tmp\n").unwrap();
+        fs::write(path.join("target/tracked"), b"tracked").unwrap();
+        fs::write(path.join("target/cache"), b"native").unwrap();
+        fs::write(path.join("new.txt"), b"new").unwrap();
+        fs::write(path.join("drop.tmp"), b"ignored").unwrap();
+        fs::write(path.join("keep.tmp"), b"keep").unwrap();
+        fs::write(path.join("nested/.gitignore"), "*.cache\n!keep.cache\n").unwrap();
+        fs::write(path.join("nested/drop.cache"), b"ignored").unwrap();
+        fs::write(path.join("nested/keep.cache"), b"keep").unwrap();
+        git(&["add", "-f", "target/tracked"]);
+        if split {
+            git(&["update-index", "--split-index"]);
+        } else {
+            git(&["update-index", "--index-version=4"]);
+        }
+        let branch = store.branch(directory(&path), "work", "default").unwrap();
+        for name in ["target/cache", "drop.tmp", "nested/drop.cache"] {
+            assert!(branch.entry(name).is_err(), "{name}");
+        }
+        for name in ["target/tracked", "new.txt", "keep.tmp", "nested/keep.cache"] {
+            assert!(branch.entry(name).is_ok(), "{name}");
+        }
+        branch
+            .create("target/generated", EntryKind::File, 0o644)
+            .unwrap();
+        branch
+            .write("target/generated", 0, b"branch cache")
+            .unwrap();
+        branch.write("code", 0, b"ONE").unwrap();
+        let saved = branch.commit("Source edits").unwrap();
+        assert!(
+            store
+                .read_version(&path, &saved.id, "target/generated", 0, 100)
+                .is_err()
+        );
+        assert_eq!(
+            branch.read("target/generated", 0, 100).unwrap(),
+            b"branch cache"
+        );
+        let published = branch.publish(&directory(&path)).unwrap();
+        assert!(
+            published.error.is_none() && published.conflicts.is_empty(),
+            "{published:?}"
+        );
+        assert_eq!(fs::read(path.join("target/cache")).unwrap(), b"native");
+        assert!(!path.join("target/generated").exists());
+        assert!(branch.changes(0, 100).unwrap().is_empty());
+        let full = store
+            .branch(directory(&path).with_ignored(true), "full", "default")
+            .unwrap();
+        full.write("target/cache", 0, b"branch").unwrap();
+        let outcome = full.publish(&directory(&path)).unwrap();
+        assert!(
+            outcome.error.is_none() && outcome.conflicts.is_empty(),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(path.join("target/cache")).unwrap(), b"branch");
+        drop(temp);
+    }
+}
+
+#[test]
+fn committed_reads_remain_available_during_capture_and_progress_can_abort_it() {
+    let (temp, path, store) = fixture();
+    let branch = store
+        .branch(directory(&path), "existing", "default")
+        .unwrap();
+    let manager = Arc::new(daat_locus_workspace::Workspaces::new(
+        store.clone(),
+        temp.path().join("mounts"),
+    ));
+    let (started, waiting) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(Some((started, blocked)));
+    let origin = directory(&path).with_progress(move |_| {
+        if let Some((started, blocked)) = gate.lock().unwrap().take() {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        }
+        Ok(())
+    });
+    let writer = store.clone();
+    let capture = std::thread::spawn(move || writer.branch(origin, "new", "default"));
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let lookup = path.clone();
+    let reader = std::thread::spawn(move || {
+        assert!(branch.read("code", 0, 3).is_ok());
+        assert_eq!(manager.locate(&lookup).unwrap().branch, "default");
+        assert!(manager.active_projections().unwrap().is_empty());
+        sent.send(()).unwrap();
+    });
+    let responsive = received
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .is_ok();
+    release.send(()).unwrap();
+    capture.join().unwrap().unwrap();
+    reader.join().unwrap();
+    assert!(
+        responsive,
+        "capture blocked committed metadata and content reads"
+    );
+    let origin = directory(&path).with_progress(|progress| {
+        if progress.bytes > 0 {
+            return Err(std::io::Error::other("capture cancelled").into());
+        }
+        Ok(())
+    });
+    assert!(store.branch(origin, "aborted", "default").is_err());
+    assert!(store.open_recorded_branch(&path, "aborted").is_err());
+}

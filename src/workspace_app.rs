@@ -53,6 +53,14 @@ struct DeleteArgs {
 
 #[model_schema]
 #[derive(Serialize, JsonSchema)]
+struct CaptureOutput {
+    path: String,
+    files: u64,
+    bytes: u64,
+}
+
+#[model_schema]
+#[derive(Serialize, JsonSchema)]
 struct DeleteOutput {
     path: String,
     branch: Option<String>,
@@ -82,6 +90,9 @@ struct ForkArgs {
     branch: String,
     /// Source branch or immutable version ID. Omission uses the current branch in this project, otherwise default.
     from: Option<String>,
+    /// Include ignored files when capturing default. Omission respects .gitignore.
+    #[serde(default)]
+    include_ignored: bool,
 }
 
 #[model_schema]
@@ -347,9 +358,7 @@ impl WorkspaceApp {
     ) -> Result<T> {
         self.pending.retain(|task| !task.is_finished());
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let system = self.system.clone();
         self.pending.push(tokio::task::spawn_blocking(move || {
-            let _metadata = system.workspace_metadata();
             let _ = sender.send(operation());
         }));
         // Keep the JoinHandle in the App when this invocation future is
@@ -400,11 +409,56 @@ impl WorkspaceApp {
         Ok(location)
     }
 
-    fn origin(&self, location: &Location, caller: &ActorCallContext) -> Result<Directory> {
+    fn origin(
+        &self,
+        location: &Location,
+        caller: &ActorCallContext,
+        call: &AgentToolCall,
+    ) -> Result<Directory> {
+        let system = self.system.clone();
+        let authority = caller.clone();
+        let call_id = call.id.clone();
+        let reported = parking_lot::Mutex::new(None::<std::time::Instant>);
         Directory::open(
             &location.path,
             self.system.workspace_authorize(Some(caller.clone()))?,
         )
+        .map(|directory| {
+            directory.with_progress(move |progress| {
+                let mut reported = reported.lock();
+                if !progress.path.is_empty()
+                    && reported
+                        .is_some_and(|time| time.elapsed() < std::time::Duration::from_secs(1))
+                {
+                    return Ok(());
+                }
+                let result = (|| -> Result<()> {
+                    system.record_for_tool(&authority.actor_id, &authority)?;
+                    let output = CaptureOutput {
+                        path: progress.path.clone(),
+                        files: progress.files,
+                        bytes: progress.bytes,
+                    };
+                    let result = AppToolExecutionResult::structured(
+                        format!(
+                            "Capturing {} files, {} bytes: {}",
+                            output.files, output.bytes, output.path
+                        ),
+                        &output,
+                        None,
+                    )?;
+                    system.store().tool_progress(
+                        &authority.actor_id,
+                        &authority.message_id,
+                        &call_id,
+                        result,
+                    )
+                })();
+                result.map_err(|error| std::io::Error::other(error.to_string()))?;
+                *reported = Some(std::time::Instant::now());
+                Ok(())
+            })
+        })
         .into_diagnostic()
     }
     fn current_reference(
@@ -451,7 +505,7 @@ impl App for WorkspaceApp {
             AppToolSpec { name:"storage".into(), description:"Locate the local CAS database and report project content bytes shared with or exclusive of other projects. Content counts are compressed object bytes; database/WAL sizes include all projects and metadata.".into(), input_schema:model_schema_for::<ProjectArgs>() },
             AppToolSpec { name:"select".into(), description:"Switch cwd to an existing shared branch or the native default directory. Pass the returned directory to another Actor to collaborate. Running processes retain their cwd.".into(), input_schema:model_schema_for::<SelectArgs>() },
             AppToolSpec { name:"list".into(), description:"List shared project branches, including the native default directory. Continue with next_cursor.".into(), input_schema:model_schema_for::<ListArgs>() },
-            AppToolSpec { name:"fork".into(), description:"Create an isolated shared branch from a branch or saved version. Captures current source contents and returns its version; use select to work there.".into(), input_schema:model_schema_for::<ForkArgs>() },
+            AppToolSpec { name:"fork".into(), description:"Create an isolated shared branch from a branch or saved version. Native captures respect project .gitignore rules and retain tracked files; include_ignored=true captures all native contents. Saved versions retain their capture policy. Use select to work there.".into(), input_schema:model_schema_for::<ForkArgs>() },
             AppToolSpec { name:"commit".into(), description:"Save current branch contents as an immutable version for recovery, comparison or sharing. default captures the current native directory. Unchanged contents reuse the saved version.".into(), input_schema:model_schema_for::<CommitArgs>() },
             AppToolSpec { name:"history".into(), description:"Read saved versions and their parents, newest first. default reads captured native history. Continue with next_cursor.".into(), input_schema:model_schema_for::<HistoryArgs>() },
             AppToolSpec { name:"diff".into(), description:"List changed paths between branches or saved versions. default captures the current native directory. Read each version for content comparison; continue with next_cursor.".into(), input_schema:model_schema_for::<DiffArgs>() },
@@ -502,7 +556,7 @@ impl App for WorkspaceApp {
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
                 let location = self.project(context, args.path.as_deref())?;
                 let origin = if args.branch == DEFAULT_BRANCH {
-                    Some(self.origin(&location, &caller)?)
+                    Some(self.origin(&location, &caller, call)?)
                 } else {
                     None
                 };
@@ -512,6 +566,7 @@ impl App for WorkspaceApp {
                 let expected = context.execution_cwd.clone();
                 let selected = self
                     .blocking(move || {
+                        let _metadata = system.workspace_metadata();
                         let selected = if let Some(origin) = origin {
                             manager.select(origin, DEFAULT_BRANCH, DEFAULT_BRANCH)?
                         } else {
@@ -574,8 +629,14 @@ impl App for WorkspaceApp {
                     .from
                     .unwrap_or(self.current_reference(context, &location)?);
                 let origin = if from == DEFAULT_BRANCH {
-                    Some(self.origin(&location, &caller)?)
+                    Some(
+                        self.origin(&location, &caller, call)?
+                            .with_ignored(args.include_ignored),
+                    )
                 } else {
+                    if args.include_ignored {
+                        return Err(miette!("include_ignored applies to captures of default"));
+                    }
                     None
                 };
                 let path = location.path.to_string_lossy().into_owned();
@@ -607,7 +668,7 @@ impl App for WorkspaceApp {
                     .branch
                     .unwrap_or(self.current_reference(context, &location)?);
                 let origin = if branch == DEFAULT_BRANCH {
-                    Some(self.origin(&location, &caller)?)
+                    Some(self.origin(&location, &caller, call)?)
                 } else {
                     None
                 };
@@ -674,7 +735,7 @@ impl App for WorkspaceApp {
                 let location = self.project(context, args.path.as_deref())?;
                 let path = location.path.to_string_lossy().into_owned();
                 let origin = if args.left == DEFAULT_BRANCH || args.right == DEFAULT_BRANCH {
-                    Some(self.origin(&location, &caller)?)
+                    Some(self.origin(&location, &caller, call)?)
                 } else {
                     None
                 };
@@ -729,7 +790,7 @@ impl App for WorkspaceApp {
                 }
                 let location = self.project(context, args.path.as_deref())?;
                 let origin = if args.reference == DEFAULT_BRANCH {
-                    Some(self.origin(&location, &caller)?)
+                    Some(self.origin(&location, &caller, call)?)
                 } else {
                     None
                 };
@@ -798,7 +859,7 @@ impl App for WorkspaceApp {
                         .iter()
                         .any(|r| r.source.as_deref() == Some(DEFAULT_BRANCH));
                 let origin = if needs_native {
-                    Some(self.origin(&location, &caller)?)
+                    Some(self.origin(&location, &caller, call)?)
                 } else {
                     None
                 };
@@ -843,7 +904,7 @@ impl App for WorkspaceApp {
                 if reference == DEFAULT_BRANCH {
                     return Err(miette!("publish a named branch or saved version"));
                 }
-                let origin = self.origin(&location, &caller)?;
+                let origin = self.origin(&location, &caller, call)?;
                 let path = location.path.to_string_lossy().into_owned();
                 let resolutions = args
                     .resolutions
@@ -901,11 +962,12 @@ impl App for WorkspaceApp {
                 let args: ProjectArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
                 let location = self.project(context, args.path.as_deref())?;
-                let origin = self.origin(&location, &caller)?;
+                let origin = self.origin(&location, &caller, call)?;
                 let path = location.path.clone();
                 let system = self.system.clone();
                 let authority = caller.clone();
                 self.blocking(move || {
+                    let _metadata = system.workspace_metadata();
                     system
                         .record_for_tool(&authority.actor_id, &authority)
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -930,6 +992,7 @@ impl App for WorkspaceApp {
                 let branch = args.branch.clone();
                 let authority = caller.clone();
                 self.blocking(move || {
+                    let _metadata = system.workspace_metadata();
                     system
                         .record_for_tool(&authority.actor_id, &authority)
                         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1057,6 +1120,11 @@ mod tests {
         }
         drop(invocation);
         assert!(!app.can_passivate());
+        let observer = system.clone();
+        let mut context = tokio::task::spawn_blocking(move || observer.owner_app_context());
+        let responsive = tokio::time::timeout(std::time::Duration::from_secs(2), &mut context)
+            .await
+            .is_ok();
         let mut shutdown = Box::pin(app.shutdown());
         std::future::poll_fn(|context| {
             assert!(
@@ -1073,6 +1141,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(std::fs::read(marker).unwrap(), b"settled");
+        if !responsive {
+            context.await.unwrap().unwrap();
+        }
+        assert!(responsive, "workspace I/O held the Actor metadata lock");
         system.shutdown().await;
     }
 }

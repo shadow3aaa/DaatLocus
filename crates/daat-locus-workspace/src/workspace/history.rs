@@ -255,7 +255,8 @@ pub(super) fn save_branch(
     let previous =
         tip_optional(connection, project, name)?.ok_or_else(|| missing("workspace branch"))?;
     let version = load_version(connection, project, &previous)?;
-    let head = roots(connection, project, name)?.1;
+    let (base, head) = roots(connection, project, name)?;
+    let head = capture::saved_tree(connection, &head, &base)?;
     if trees_equal(connection, &head, &version.root)? {
         return Ok(version);
     }
@@ -575,6 +576,12 @@ impl Store {
             reference,
             "Capture published workspace",
         )?;
+        let capture_origin = origin.clone().with_ignored(
+            Node::load(&transaction, &source.root)?
+                .include_ignored
+                .unwrap_or(true),
+        );
+        let origin = &capture_origin;
         let target = capture_default(&transaction, origin, project, "Capture native edits")?;
         if let Some(expected) = expected_target {
             let expected = load_version(&transaction, project, expected)?;
@@ -695,7 +702,12 @@ impl Store {
                 )?
             };
             set_tip(&transaction, project, DEFAULT_BRANCH, &version.id)?;
-            transaction.execute("UPDATE branches SET base=?3,revision=revision+1 WHERE project=?1 AND name=?2 AND head=?3",params![project,reference,source.root.0])?;
+            if !is_version_id(reference) {
+                let (base, head) = roots(&transaction, project, reference)?;
+                if capture::saved_tree(&transaction, &head, &base)? == source.root {
+                    transaction.execute("UPDATE branches SET base=?3,revision=revision+1 WHERE project=?1 AND name=?2",params![project,reference,source.root.0])?;
+                }
+            }
             transaction.commit()?;
             Ok(version)
         })();

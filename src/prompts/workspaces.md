@@ -1,4 +1,5 @@
 Use default for shared work in the original directory. Use a named Workspace branch for isolated edits and experiments.
+Native captures follow project .gitignore rules and retain tracked files. Request a complete snapshot when ignored files are needed. Inspect capture progress in the running tool result.
 Inspect existing branches and select the same branch when Actors should collaborate. Share its execution directory when creating another Actor.
 Read the selected project's instructions and relevant Skills. Check existing processes after switching your execution directory.
 Save meaningful versions before risky changes and at useful milestones. Compare versions and fork an earlier version when you need to recover or explore another approach.

@@ -11,7 +11,9 @@ use std::{
 
 const BLOCK: usize = 64 * 1024;
 
+mod capture;
 mod history;
+pub use capture::CaptureProgress;
 mod lifecycle;
 pub(crate) use history::migrate_versions;
 pub use history::{FileVersion, MergeOutcome, PublishOutcome, Resolution, Version};
@@ -43,6 +45,8 @@ struct Node {
     children: BTreeMap<String, ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    include_ignored: Option<bool>,
     #[cfg(windows)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reparse: Option<crate::reparse::ReparsePoint>,
@@ -69,6 +73,7 @@ impl Node {
             && self.entry.size == other.entry.size
             && self.blocks == other.blocks
             && self.target == other.target
+            && self.include_ignored.unwrap_or(true) == other.include_ignored.unwrap_or(true)
     }
 }
 
@@ -155,31 +160,33 @@ impl Store {
     /// after a user moves or replaces that directory; publishing still checks
     /// its original filesystem identity against a freshly authorized Directory.
     pub fn open_recorded_branch(&self, path: &std::path::Path, name: &str) -> Result<Workspace> {
-        validate_branch(name)?;
-        let connection = self.connection.lock();
-        let (project, binding): (i64, String) = connection
-            .query_row(
-                "SELECT id,binding FROM projects WHERE path=?1",
-                [path
-                    .to_str()
-                    .ok_or_else(|| Error::Invalid("project path must be Unicode".into()))?],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| missing("workspace project"))?;
-        roots(&connection, project, name)?;
-        let generation = connection.query_row(
-            "SELECT generation FROM branches WHERE project=?1 AND name=?2",
-            params![project, name],
-            |row| row.get(0),
-        )?;
-        Ok(Workspace {
-            store: self.clone(),
-            origin: path.to_owned(),
-            binding,
-            project,
-            name: name.into(),
-            generation,
+        self.read(|connection| {
+            validate_branch(name)?;
+
+            let (project, binding): (i64, String) = connection
+                .query_row(
+                    "SELECT id,binding FROM projects WHERE path=?1",
+                    [path
+                        .to_str()
+                        .ok_or_else(|| Error::Invalid("project path must be Unicode".into()))?],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| missing("workspace project"))?;
+            roots(connection, project, name)?;
+            let generation = connection.query_row(
+                "SELECT generation FROM branches WHERE project=?1 AND name=?2",
+                params![project, name],
+                |row| row.get(0),
+            )?;
+            Ok(Workspace {
+                store: self.clone(),
+                origin: path.to_owned(),
+                binding,
+                project,
+                name: name.into(),
+                generation,
+            })
         })
     }
 
@@ -242,27 +249,28 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<String>> {
-        let connection = self.connection.lock();
-        let id: Option<i64> = connection
-            .query_row(
-                "SELECT id FROM projects WHERE path=?1",
-                [path
-                    .to_str()
-                    .ok_or_else(|| Error::Invalid("project path must be Unicode".into()))?],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(id) = id else {
-            return Ok(vec![]);
-        };
-        let mut query = connection.prepare(
-            "SELECT name FROM branches WHERE project=?1 ORDER BY name LIMIT ?2 OFFSET ?3",
-        )?;
-        let offset = i64::try_from(offset)
-            .map_err(|_| Error::Invalid("offset is not representable".into()))?;
-        Ok(query
-            .query_map(params![id, limit.min(200) as i64, offset], |row| row.get(0))?
-            .collect::<std::result::Result<_, _>>()?)
+        self.read(|connection| {
+            let id: Option<i64> = connection
+                .query_row(
+                    "SELECT id FROM projects WHERE path=?1",
+                    [path
+                        .to_str()
+                        .ok_or_else(|| Error::Invalid("project path must be Unicode".into()))?],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(vec![]);
+            };
+            let mut query = connection.prepare(
+                "SELECT name FROM branches WHERE project=?1 ORDER BY name LIMIT ?2 OFFSET ?3",
+            )?;
+            let offset = i64::try_from(offset)
+                .map_err(|_| Error::Invalid("offset is not representable".into()))?;
+            Ok(query
+                .query_map(params![id, limit.min(200) as i64, offset], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?)
+        })
     }
 }
 
@@ -318,46 +326,50 @@ impl Workspace {
         }
     }
     pub fn root(&self) -> Result<ObjectId> {
-        Ok(self.roots(&self.store.connection.lock())?.1)
+        self.store.read(|connection| Ok(self.roots(connection)?.1))
     }
     pub fn fork(&self, name: &str) -> Result<Self> {
         self.store
             .fork_at(&self.origin, name, &self.commit("Fork workspace")?.id)
     }
     pub fn entry(&self, path: &str) -> Result<Entry> {
-        let connection = self.store.connection.lock();
-        let root = self.roots(&connection)?.1;
-        Ok(lookup(&connection, &root, path)?.entry)
+        self.store.read(|connection| {
+            let root = self.roots(connection)?.1;
+            Ok(lookup(connection, &root, path)?.entry)
+        })
     }
     pub fn read_dir(&self, path: &str) -> Result<Vec<(String, Entry)>> {
-        let connection = self.store.connection.lock();
-        let root = self.roots(&connection)?.1;
-        let directory = lookup(&connection, &root, path)?;
-        if directory.entry.kind != EntryKind::Directory {
-            return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
-        }
-        directory
-            .children
-            .iter()
-            .map(|(name, id)| Ok((name.clone(), Node::load(&connection, id)?.entry)))
-            .collect()
+        self.store.read(|connection| {
+            let root = self.roots(connection)?.1;
+            let directory = lookup(connection, &root, path)?;
+            if directory.entry.kind != EntryKind::Directory {
+                return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
+            }
+            directory
+                .children
+                .iter()
+                .map(|(name, id)| Ok((name.clone(), Node::load(connection, id)?.entry)))
+                .collect()
+        })
     }
     pub fn read(&self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
-        let connection = self.store.connection.lock();
-        let root = self.roots(&connection)?.1;
-        read_node(
-            &connection,
-            &lookup(&connection, &root, path)?,
-            offset,
-            length,
-        )
+        self.store.read(|connection| {
+            let root = self.roots(connection)?.1;
+            read_node(
+                connection,
+                &lookup(connection, &root, path)?,
+                offset,
+                length,
+            )
+        })
     }
     pub fn read_link(&self, path: &str) -> Result<String> {
-        let connection = self.store.connection.lock();
-        let root = self.roots(&connection)?.1;
-        lookup(&connection, &root, path)?
-            .target
-            .ok_or_else(|| Error::Invalid("not a symlink".into()))
+        self.store.read(|connection| {
+            let root = self.roots(connection)?.1;
+            lookup(connection, &root, path)?
+                .target
+                .ok_or_else(|| Error::Invalid("not a symlink".into()))
+        })
     }
     fn mutate<T>(
         &self,
@@ -394,6 +406,7 @@ impl Workspace {
                 blocks: vec![],
                 children: BTreeMap::new(),
                 target: None,
+                include_ignored: None,
                 #[cfg(windows)]
                 reparse: None,
             };
@@ -419,6 +432,7 @@ impl Workspace {
                     mode: if cfg!(windows) { 0o644 } else { 0o777 },
                     modified_ns: now_ns(),
                 },
+                include_ignored: None,
                 blocks: vec![],
                 children: BTreeMap::new(),
                 target: Some(target.into()),
@@ -439,23 +453,24 @@ impl Workspace {
     }
     #[cfg(windows)]
     pub(crate) fn reparse_point(&self, path: &str) -> Result<Option<crate::reparse::ReparsePoint>> {
-        let connection = self.store.connection.lock();
-        let (_, root) = self.roots(&connection)?;
-        let node = lookup(&connection, &root, path)?;
-        if node.entry.kind != EntryKind::Symlink {
-            return Ok(None);
-        }
-        let point = match node.reparse {
-            Some(point) => point,
-            None => crate::reparse::ReparsePoint::symlink(
-                node.target
-                    .as_deref()
-                    .ok_or_else(|| Error::Corrupt("missing link target".into()))?,
-                false,
-            )?,
-        };
-        point.target()?;
-        Ok(Some(point))
+        self.store.read(|connection| {
+            let (_, root) = self.roots(connection)?;
+            let node = lookup(connection, &root, path)?;
+            if node.entry.kind != EntryKind::Symlink {
+                return Ok(None);
+            }
+            let point = match node.reparse {
+                Some(point) => point,
+                None => crate::reparse::ReparsePoint::symlink(
+                    node.target
+                        .as_deref()
+                        .ok_or_else(|| Error::Corrupt("missing link target".into()))?,
+                    false,
+                )?,
+            };
+            point.target()?;
+            Ok(Some(point))
+        })
     }
 
     #[cfg(windows)]
@@ -608,26 +623,33 @@ impl Workspace {
         })
     }
     pub fn changes(&self, offset: usize, limit: usize) -> Result<Vec<Change>> {
-        let connection = self.store.connection.lock();
-        let (base, head) = self.roots(&connection)?;
-        let before = flatten(&connection, &base)?;
-        let after = flatten(&connection, &head)?;
-        Ok(changed_paths(&before, &after)
-            .into_iter()
-            .skip(offset)
-            .take(limit.min(200))
-            .map(|path| Change {
-                kind: if !before.contains_key(&path) {
-                    ChangeKind::Added
-                } else if !after.contains_key(&path) {
-                    ChangeKind::Deleted
-                } else {
-                    ChangeKind::Modified
-                },
-                entry: after.get(&path).map(|node| node.entry.clone()),
-                path,
-            })
-            .collect())
+        let mut database = self.store.connection.lock();
+        let transaction = database.transaction()?;
+        let connection = &transaction;
+        let result = (|| -> Result<_> {
+            let (base, head) = self.roots(connection)?;
+            let head = capture::saved_tree(connection, &head, &base)?;
+            let before = flatten(connection, &base)?;
+            let after = flatten(connection, &head)?;
+            Ok(changed_paths(&before, &after)
+                .into_iter()
+                .skip(offset)
+                .take(limit.min(200))
+                .map(|path| Change {
+                    kind: if !before.contains_key(&path) {
+                        ChangeKind::Added
+                    } else if !after.contains_key(&path) {
+                        ChangeKind::Deleted
+                    } else {
+                        ChangeKind::Modified
+                    },
+                    entry: after.get(&path).map(|node| node.entry.clone()),
+                    path,
+                })
+                .collect())
+        })()?;
+        transaction.commit()?;
+        Ok(result)
     }
 }
 
@@ -780,101 +802,7 @@ fn snapshot(
     project: i64,
     path: &str,
 ) -> Result<ObjectId> {
-    let metadata = origin.metadata(path)?;
-    let inode = match connection
-        .query_row(
-            "SELECT inode FROM source_inodes WHERE project=?1 AND path=?2",
-            params![project, path],
-            |row| Ok(row.get::<_, i64>(0)? as u64),
-        )
-        .optional()?
-    {
-        Some(inode) => inode,
-        None => {
-            let inode = next_inode(connection)?;
-            connection.execute(
-                "INSERT INTO source_inodes VALUES(?1,?2,?3)",
-                params![project, path, inode as i64],
-            )?;
-            inode
-        }
-    };
-    let kind = if metadata.is_symlink() {
-        EntryKind::Symlink
-    } else if metadata.is_dir() {
-        EntryKind::Directory
-    } else if metadata.is_file() {
-        EntryKind::File
-    } else {
-        return Err(Error::Unsupported(format!(
-            "special filesystem entry {path}"
-        )));
-    };
-    #[cfg(unix)]
-    let mode = {
-        use cap_std::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o777
-    };
-    #[cfg(not(unix))]
-    let mode = if metadata.permissions().readonly() {
-        0o444
-    } else if kind == EntryKind::Directory {
-        0o755
-    } else {
-        0o644
-    };
-    let modified_ns = metadata
-        .modified()?
-        .into_std()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |time| time.as_nanos().min(i64::MAX as u128) as i64);
-    let mut node = Node {
-        entry: Entry {
-            inode,
-            kind,
-            size: 0,
-            mode,
-            modified_ns,
-        },
-        blocks: vec![],
-        children: BTreeMap::new(),
-        target: None,
-        #[cfg(windows)]
-        reparse: None,
-    };
-    match kind {
-        EntryKind::Directory => {
-            for name in origin.names(path)? {
-                let child = if path.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{path}/{name}")
-                };
-                node.children
-                    .insert(name, snapshot(connection, origin, project, &child)?);
-            }
-        }
-        EntryKind::File => {
-            node.entry.size = origin.read_chunks(path, |chunk| {
-                node.blocks.push(put(connection, 0, chunk)?);
-                Ok(())
-            })?;
-        }
-        EntryKind::Symlink => {
-            #[cfg(not(windows))]
-            let target = origin.read_link(path)?;
-            #[cfg(windows)]
-            let target = {
-                let point = origin.read_reparse(path)?;
-                let target = point.target()?;
-                node.reparse = Some(point);
-                target
-            };
-            node.entry.size = target.len() as u64;
-            node.target = Some(target);
-        }
-    }
-    node.save(connection)
+    capture::snapshot(connection, origin, project, path)
 }
 
 fn lookup(connection: &Connection, root: &ObjectId, path: &str) -> Result<Node> {

@@ -204,6 +204,16 @@ pub(super) fn merge_trees(
     let root = merger
         .node("", Some(&base.root), Some(&left.root), Some(&right.root))?
         .ok_or_else(|| Error::Invalid("cannot delete a workspace root".into()))?;
+    let mut node = Node::load(connection, &root)?;
+    node.include_ignored = Some(
+        Node::load(connection, &left.root)?
+            .include_ignored
+            .unwrap_or(true)
+            || Node::load(connection, &right.root)?
+                .include_ignored
+                .unwrap_or(true),
+    );
+    let root = node.save(connection)?;
     if let Some(unused) = merger
         .resolutions
         .keys()

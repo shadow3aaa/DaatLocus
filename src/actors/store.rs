@@ -1894,27 +1894,7 @@ impl ActorStore {
         if delta.is_empty() {
             return Ok(());
         }
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let input = message_tx(&tx, message)?;
-            if input.actor_id != actor
-                || input.status != MessageStatus::Running
-                || input.cancel_requested
-            {
-                return Err(ActorError::Forbidden(
-                    "Terminal output belongs to an inactive input".into(),
-                )
-                .into());
-            }
-            let record: Option<String> = sql(tx.query_row(
-                "SELECT record FROM tools WHERE actor_id=?1 AND message_id=?2 AND call_id=?3 AND done=0",
-                params![actor,message,call], |row| row.get(0),
-            ).optional())?;
-            let Some(record) = record else {
-                return Ok(());
-            };
-            let mut result: ToolResultRecord = decode(record)?;
+        self.update_tool_output(actor, message, call, |result| {
             let mut output = result
                 .payload
                 .get("captured_output")
@@ -1930,6 +1910,52 @@ impl ActorStore {
             result.payload = serde_json::json!({"session":session,"captured_output":output,"running":session.status=="running"});
             result.output_schema =
                 Some(schemars::schema_for!(crate::terminal_app::TerminalToolResult).to_value());
+        })
+    }
+
+    pub(crate) fn tool_progress(
+        &self,
+        actor: &str,
+        message: &str,
+        call: &str,
+        progress: crate::app::AppToolExecutionResult,
+    ) -> Result<()> {
+        self.update_tool_output(actor, message, call, |result| {
+            result.summary = progress.summary;
+            result.payload = progress.payload;
+            result.output_schema = progress.output_schema;
+        })
+    }
+
+    fn update_tool_output(
+        &self,
+        actor: &str,
+        message: &str,
+        call: &str,
+        update: impl FnOnce(&mut ToolResultRecord),
+    ) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let input = message_tx(&tx, message)?;
+            if input.actor_id != actor
+                || input.status != MessageStatus::Running
+                || input.cancel_requested
+            {
+                return Err(ActorError::Forbidden(
+                    "Tool output belongs to an inactive input".into(),
+                )
+                .into());
+            }
+            let record: Option<String> = sql(tx.query_row(
+                "SELECT record FROM tools WHERE actor_id=?1 AND message_id=?2 AND call_id=?3 AND done=0",
+                params![actor,message,call], |row| row.get(0),
+            ).optional())?;
+            let Some(record) = record else {
+                return Ok(());
+            };
+            let mut result: ToolResultRecord = decode(record)?;
+            update(&mut result);
             sql(tx.execute(
                 "UPDATE tools SET record=?2 WHERE id=?1 AND done=0",
                 params![result.id, encode(&result)?],

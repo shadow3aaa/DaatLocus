@@ -50,7 +50,7 @@ impl Workspaces {
     }
 
     pub fn projections(&self) -> Result<Vec<Location>> {
-        let connection = self.store.connection.lock();
+        self.store.read(|connection| {
         let mut statement = connection.prepare("SELECT projects.path,projections.name,projections.directory FROM projections JOIN projects ON projects.id=projections.project")?;
         Ok(statement
             .query_map([], |row| {
@@ -61,6 +61,7 @@ impl Workspaces {
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
+            })
     }
 
     pub fn active_projections(&self) -> Result<Vec<Location>> {
@@ -168,10 +169,21 @@ impl Workspaces {
             Err(error) => return Err(error.into()),
         }
         let mount = native::Mount::open(workspace.clone(), &directory)?;
-        self.store.connection.lock().execute(
+        let recorded = self.store.read(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT directory FROM projections WHERE project=?1 AND name=?2",
+                    params![workspace.project_id(), workspace.name()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })?;
+        if recorded.as_deref().map(Path::new) != Some(directory.as_path()) {
+            self.store.connection.lock().execute(
             "INSERT INTO projections(project,name,directory) VALUES(?1,?2,?3) ON CONFLICT(project,name) DO UPDATE SET directory=excluded.directory",
             params![workspace.project_id(), workspace.name(), directory.to_str().ok_or_else(|| Error::Invalid("mount directory must be Unicode".into()))?],
         )?;
+        }
         let location = Location {
             directory: mount.directory().to_owned(),
             ..location
@@ -198,7 +210,7 @@ impl Workspaces {
     /// remounted their parent projection. Ordinary directories need no record.
     pub fn locate(&self, directory: &Path) -> Result<Location> {
         let lookup = native::logical_path(directory, &self.projection_root()?);
-        let connection = self.store.connection.lock();
+        self.store.read(|connection| {
         // Windows canonicalization adds a trailing separator at a mounted
         // volume's root. Path components compare equally, but SQLite TEXT keys
         // do not; normalize separators before looking up persisted projections.
@@ -224,6 +236,7 @@ impl Workspaces {
             branch: DEFAULT_BRANCH.into(),
             directory: directory.to_owned(),
         })
+            })
     }
 
     pub fn restore(&self, directory: &Path) -> Result<Location> {
@@ -234,10 +247,10 @@ impl Workspaces {
         let workspace = self
             .store
             .open_recorded_branch(&location.path, &location.branch)?;
-        let root: String = self.store.connection.lock().query_row(
+        let root: String = self.store.read(|connection| Ok(connection.query_row(
             "SELECT projections.directory FROM projections JOIN projects ON projects.id=projections.project WHERE projects.path=?1 AND projections.name=?2",
             params![location.path.to_str(), location.branch], |row| row.get(0),
-        )?;
+        )?))?;
         let lookup = native::logical_path(directory, &self.projection_root()?);
         let relative = lookup
             .strip_prefix(root)

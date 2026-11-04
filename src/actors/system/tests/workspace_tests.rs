@@ -2,6 +2,36 @@ use super::*;
 use crate::app::App;
 
 #[tokio::test]
+async fn native_capture_updates_the_running_tool_with_files_and_bytes() {
+    let (_directory, system) = fixture().await;
+    system.set_workspace_backend_for_test(true);
+    let actor = system.actor("root").unwrap();
+    std::fs::write(actor.config.workspace.join("file.txt"), b"abc").unwrap();
+    let input = system
+        .send_user("root", "Capture a branch".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let call = crate::model_protocol::AgentToolCall {
+        id: "capture".into(),
+        name: "fork".into(),
+        arguments: serde_json::json!({"branch":"work"}),
+    };
+    let id = system
+        .store()
+        .tool_started("root", &input.id, &call)
+        .unwrap();
+    let mut app = crate::workspace_app::WorkspaceApp::new("root".into(), system.clone());
+    app.execute_tool(&call, &system.execution_context(&actor, &input).unwrap())
+        .await
+        .unwrap();
+    let progress = system.store().tool_result(&id).unwrap();
+    assert_eq!(progress.payload["files"], 1);
+    assert_eq!(progress.payload["bytes"], 3);
+    assert!(progress.finished_at_ms.is_none());
+    system.shutdown().await;
+}
+
+#[tokio::test]
 #[ignore = "requires an installed native workspace backend and permission to mount directories"]
 async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_directory() {
     use crate::file_io::{ReadFileArgs, WriteFileArgs};

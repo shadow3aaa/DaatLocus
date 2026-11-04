@@ -11,8 +11,8 @@ pub use directory::{Access, Authorize, Directory};
 pub use projections::{Location, Workspaces};
 pub use store::{Collection, ObjectId, Statistics, Store};
 pub use workspace::{
-    Change, ChangeKind, Entry, EntryKind, FileVersion, MergeOutcome, PublishOutcome, Resolution,
-    Storage, Version, Workspace,
+    CaptureProgress, Change, ChangeKind, Entry, EntryKind, FileVersion, MergeOutcome,
+    PublishOutcome, Resolution, Storage, Version, Workspace,
 };
 
 use std::io;

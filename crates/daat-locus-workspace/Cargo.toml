@@ -10,6 +10,8 @@ cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 diffy = "0.5.0"
 hex = "0.4.3"
+ignore = "0.4.24"
+gix-index = { version = "0.58.0", features = ["sha1", "sha256"] }
 parking_lot = "0.12.5"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
