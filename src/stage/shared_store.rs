@@ -1174,7 +1174,6 @@ mod tests {
             reply_to: ReplyTarget::User,
             kind: MessageKind::Request,
             in_reply_to: None,
-            input_batch: None,
 
             remote_authority: None,
             content: "hello shared Actor".into(),
@@ -1202,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn input_batches_survive_checkpoint_takeover_and_settle_once() {
+    fn received_inputs_survive_checkpoint_takeover_and_settle_once() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
         let a = store(a_dir.path());
@@ -1211,7 +1210,7 @@ mod tests {
         let first = a.enqueue(input(), None).unwrap();
         let second = a.enqueue(input(), None).unwrap();
         a.claim_next(ACTOR_ID).unwrap().unwrap();
-        assert_eq!(a.claim_input_batch(&first.id).unwrap().len(), 2);
+        assert_eq!(a.receive_inputs(&first.id).unwrap().len(), 2);
         for message in [&first, &second] {
             a.append_history(
                 ACTOR_ID,
@@ -1228,15 +1227,14 @@ mod tests {
         resume(&b).unwrap();
         let restored = b.claim_next(ACTOR_ID).unwrap().unwrap();
         assert_eq!(restored.id, first.id);
-        let batch = b.claim_input_batch(&restored.id).unwrap();
+        let batch = b.receive_inputs(&restored.id).unwrap();
         assert_eq!(batch.len(), 2);
         assert!(
             batch
                 .iter()
-                .all(|input| input.status == MessageStatus::Running
-                    && input.input_batch.as_deref() == Some(first.id.as_str()))
+                .all(|input| input.status == MessageStatus::Running)
         );
-        b.finish_message(
+        b.finish_execution(
             &first.id,
             MessageStatus::Completed,
             Some("One combined outcome"),
@@ -1266,7 +1264,7 @@ mod tests {
         let input = a.enqueue(input(), None).unwrap();
         a.claim_next(ACTOR_ID).unwrap().unwrap();
         let receipt = a
-            .deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+            .deliver(ACTOR_ID, &input.id, "ack", "Started", Vec::new())
             .unwrap();
         assert!(
             a.delivery_receipt(ACTOR_ID, &input.id, "ack")
@@ -1284,13 +1282,13 @@ mod tests {
         );
 
         assert_eq!(
-            a.deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+            a.deliver(ACTOR_ID, &input.id, "ack", "Started", Vec::new())
                 .unwrap()
                 .id,
             receipt.id
         );
         assert!(
-            a.deliver(ACTOR_ID, &input.id, "ack", "Changed content", false)
+            a.deliver(ACTOR_ID, &input.id, "ack", "Changed content", Vec::new())
                 .is_err()
         );
         assert_eq!(a.message(&input.id).unwrap().status, MessageStatus::Running);
@@ -1322,7 +1320,7 @@ mod tests {
             Some("Started")
         );
         assert_eq!(
-            b.deliver(ACTOR_ID, &input.id, "ack", "Started", false)
+            b.deliver(ACTOR_ID, &input.id, "ack", "Started", Vec::new())
                 .unwrap()
                 .id,
             receipt.id
@@ -1335,10 +1333,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(b.message(&input.id).unwrap().reply.as_deref(), Some(""));
+        assert_eq!(b.message(&input.id).unwrap().reply, None);
         assert_eq!(b.messages(ACTOR_ID, None, 100).unwrap().items.len(), 2);
         assert!(
-            b.deliver(ACTOR_ID, &input.id, "late", "Too late", false)
+            b.deliver(ACTOR_ID, &input.id, "late", "Too late", Vec::new())
                 .is_err()
         );
     }
@@ -1583,7 +1581,7 @@ mod tests {
         );
     }
     #[test]
-    fn takeover_preserves_a_committed_yield_without_turning_its_boundary_into_a_reply() {
+    fn takeover_preserves_a_committed_silent_end_without_creating_a_reply() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();
         let a = store(a_dir.path());
@@ -1591,33 +1589,6 @@ mod tests {
         let leader = StageId::new();
         let input = a.enqueue(input(), None).unwrap();
         a.claim_next(ACTOR_ID).unwrap().unwrap();
-        let call = crate::model_protocol::AgentToolCall {
-            id: "silent-update".into(),
-            name: "actors__yield".into(),
-            arguments: serde_json::json!({}),
-        };
-        a.append_history(
-            ACTOR_ID,
-            &input.id,
-            &[
-                crate::model_protocol::AgentMessage::assistant_tool_call_protocol_with_reasoning(
-                    None,
-                    None,
-                    vec![call.clone()],
-                ),
-            ],
-        )
-        .unwrap();
-        a.tool_finished(
-            ACTOR_ID,
-            &input.id,
-            &call,
-            serde_json::json!({"finish_turn":true}),
-            "Input yielded",
-            "Input yielded",
-            None,
-        )
-        .unwrap();
         a.append_history(
             ACTOR_ID,
             &input.id,
@@ -1631,11 +1602,8 @@ mod tests {
         resume(&b).unwrap();
         assert!(incomplete_calls(&b, &input.id).unwrap().is_empty());
         let boundary = completed_answer(&b, &input.id).unwrap().unwrap();
-        assert!(
-            b.finish_message(&input.id, MessageStatus::Completed, Some(&boundary), None)
-                .unwrap()
-                .is_none()
-        );
+        b.finish_message(&input.id, MessageStatus::Completed, Some(&boundary), None)
+            .unwrap();
         let completed = b.message(&input.id).unwrap();
         assert_eq!(completed.status, MessageStatus::Completed);
         assert_eq!(completed.reply, None);

@@ -403,6 +403,8 @@ pub(super) async fn parse_stream(
         items,
         raw_stream_follow_up: !tool_calls.is_empty()
             || output_needs_follow_up(&responses_output, response_end_turn),
+        end_turn: tool_calls.is_empty()
+            && !output_needs_follow_up(&responses_output, response_end_turn),
         last_assistant_message: assistant_message,
         last_reasoning_content: non_empty_string(reasoning_content),
         last_reasoning_signature: None,
@@ -1058,13 +1060,14 @@ mod tests {
         let response = test_sse_response(&[
             json!({"type":"response.completed","response":{"id":"resp_empty","status":"completed","output":[],"usage":{"output_tokens":0}}}),
         ], false).await;
-        let error = parse_test_stream(response, None, None).await.err().unwrap();
-        assert!(crate::core::should_retry_agent_turn_error(&error));
-        let detail = error.to_string();
+        let result = parse_test_stream(response, None, None).await.unwrap();
+        assert!(result.end_turn);
         assert!(
-            detail.contains("no assistant text")
-                && detail.contains("stream-fixture")
-                && detail.contains("resp_empty")
+            result
+                .last_assistant_message
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
         );
 
         for done in [false, true] {

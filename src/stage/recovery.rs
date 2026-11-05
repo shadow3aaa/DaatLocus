@@ -164,7 +164,6 @@ pub(crate) fn merge_conversation(
                 if let Some(parent) = message.in_reply_to.as_mut() && let Some(mapped) = ids.get(parent) { *parent = mapped.clone(); }
                 // Retained losing-branch observations cannot join a live batch.
                 // The private branch archive preserves its original grouping.
-                message.input_batch = None;
                 let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)", [&message.id], |r| r.get(0))?;
                 if exists { continue; }
                 tx.execute("INSERT INTO messages(id,actor_id,status,record) VALUES(?1,'core',?2,'')", params![message.id, serde_json::to_string(&message.status).map_err(|_| StageError::Invalid("Invalid retained status"))?])?;

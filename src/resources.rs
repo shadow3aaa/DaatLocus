@@ -166,6 +166,42 @@ pub fn publish(
     Ok(resource)
 }
 
+pub(crate) fn share_references(
+    system: &ActorSystem,
+    sender: &str,
+    recipient: &str,
+    text: &str,
+) -> Result<(String, Vec<crate::actors::Attachment>)> {
+    let prefix = format!("/v1/actors/{sender}/resources/");
+    let ids: std::collections::BTreeSet<String> = text
+        .split(&prefix)
+        .skip(1)
+        .map(|suffix| {
+            suffix
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .collect()
+        })
+        .collect();
+    let mut content = text.to_owned();
+    let mut attachments = Vec::new();
+    for id in ids.into_iter().rev() {
+        let resource = export(system, sender, &id)?;
+        bytes(system, sender, &resource)?;
+        install(system, recipient, &resource)?;
+        let uri = resource.uri(recipient);
+        content = content.replace(&resource.uri(sender), &uri);
+        attachments.push(crate::actors::Attachment {
+            id: resource.id,
+            name: resource.name,
+            media_type: resource.media_type,
+            size_bytes: resource.content.size,
+            uri,
+        });
+    }
+    Ok((content, attachments))
+}
+
 pub fn bytes(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<Vec<u8>> {
     resource.validate()?;
     resource.ensure_available()?;

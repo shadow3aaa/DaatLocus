@@ -1087,7 +1087,6 @@ impl Controller {
                     // finished this exact input. Acknowledge known immutable
                     // input above; never admit an unknown started execution.
                     if message.status != MessageStatus::Queued
-                        || message.input_batch.is_some()
                         || message.started_at_ms.is_some()
                         || message.finished_at_ms.is_some()
                         || message.cancel_requested
@@ -2483,10 +2482,24 @@ impl Controller {
                 .into_iter()
                 .filter(|message| message.status == MessageStatus::Queued)
             {
+                if system
+                    .store()
+                    .message(&message.id)
+                    .map_err(|_| StageError::Unavailable("Cannot read resumable input"))?
+                    .status
+                    != MessageStatus::Queued
+                {
+                    continue;
+                }
                 if let Some(answer) = shared_store::completed_answer(system.store(), &message.id)? {
                     system
                         .store()
-                        .finish_message(&message.id, MessageStatus::Completed, Some(&answer), None)
+                        .finish_execution(
+                            &message.id,
+                            MessageStatus::Completed,
+                            Some(&answer),
+                            None,
+                        )
                         .map_err(|_| StageError::Unavailable("Cannot deliver committed answer"))?;
                     continue;
                 }
@@ -2501,7 +2514,7 @@ impl Controller {
                         system.store().publish_delivery(&receipt.id).map_err(|_| {
                             StageError::Unavailable("Cannot publish committed delivery")
                         })?;
-                        let payload = serde_json::json!({"message_id":receipt.id,"finish_turn":call.arguments.get("finish_turn").and_then(serde_json::Value::as_bool).unwrap_or(false)});
+                        let payload = serde_json::json!({"message_id":receipt.id});
                         system
                             .store()
                             .tool_finished(
@@ -2823,7 +2836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_final_answer_older_than_one_page_is_repaired_without_another_inference() {
+    async fn final_answer_older_than_one_page_settles_received_inputs_without_another_inference() {
         let (_directory, runtime, core, context) = running_core().await;
         let system = &runtime.host.system;
         let first = &context.actor_call.as_ref().unwrap().message_id;
@@ -2837,7 +2850,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(system.store().claim_input_batch(first).unwrap().len(), 131);
+        assert_eq!(system.store().receive_inputs(first).unwrap().len(), 131);
         system
             .store()
             .append_history(
@@ -2847,6 +2860,9 @@ mod tests {
                     "Already generated one combined answer",
                 )],
             )
+            .unwrap();
+        let unread = system
+            .send_user(shared::ACTOR_ID, "Still buffered".into(), vec![], None)
             .unwrap();
         // The restored checkpoint has queued inputs and a confirmed final model
         // boundary, with no inference provider available on the replacement.
@@ -2865,7 +2881,14 @@ mod tests {
                 .unwrap();
             for message in page.items {
                 count += 1;
-                assert_eq!(message.status, MessageStatus::Completed);
+                assert_eq!(
+                    message.status,
+                    if message.id == unread.id {
+                        MessageStatus::Queued
+                    } else {
+                        MessageStatus::Completed
+                    }
+                );
                 if let Some(reply) = message.reply {
                     replies.push(reply);
                 }
@@ -2875,7 +2898,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(count, 131);
+        assert_eq!(count, 132);
         assert_eq!(replies, ["Already generated one combined answer"]);
         system.shutdown().await;
     }
@@ -2993,7 +3016,7 @@ mod tests {
         let input = &context.actor_call.as_ref().unwrap().message_id;
         assert!(!core.permitted());
         let receipt = system
-            .deliver_from_actor(shared::ACTOR_ID, input, "direct", "Still authorized", false)
+            .deliver_from_actor(shared::ACTOR_ID, input, "direct", "Still authorized")
             .unwrap();
         assert_eq!(receipt.reply.as_deref(), Some("Still authorized"));
         assert_eq!(receipt.in_reply_to.as_deref(), Some(input.as_str()));
@@ -3054,7 +3077,7 @@ mod tests {
             let call = AgentToolCall {
                 id: reason.into(),
                 name: "actors__reply".into(),
-                arguments: json!({"content":"Must not be delivered","finish_turn":false}),
+                arguments: json!({"content":"Must not be delivered"}),
             };
             assert!(
                 apps.execute_tool(&call, &context).await.is_err(),
@@ -3062,7 +3085,7 @@ mod tests {
             );
             assert!(
                 system
-                    .deliver_from_actor(shared::ACTOR_ID, input, reason, "Forbidden", false)
+                    .deliver_from_actor(shared::ACTOR_ID, input, reason, "Forbidden")
                     .is_err(),
                 "{reason}"
             );

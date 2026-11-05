@@ -32,7 +32,7 @@ const labels: Record<string, string> = {
   apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close", apps_manager__configure_timeouts: "tool_presentation.update_app_settings",
   artifacts__present: "tool_details.deliver_result",
   actors__read_resource: "tool_presentation.read_attachment_or_output",
-  actors__reply: "tool_presentation.message_actor", actors__status: "tool_presentation.view_actor", actors__cancel: "tool_presentation.cancel_request", admin_actors__set_model:"tool_presentation.change_model", admin_actors__read_conversation:"tool_presentation.read_history", actors__yield: "tool_presentation.yield_input",
+  actors__reply: "tool_presentation.message_actor", actors__status: "tool_presentation.view_actor", actors__cancel: "tool_presentation.cancel_request", admin_actors__set_model:"tool_presentation.change_model", admin_actors__read_conversation:"tool_presentation.read_history",
 };
 
 const fieldLabels: Record<string, string> = {

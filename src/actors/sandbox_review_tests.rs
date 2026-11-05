@@ -456,8 +456,9 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     system.store().enqueue(result_input, None).unwrap();
     let message = system
         .store()
-        .claim_incoming(&actor.id, &task.id)
+        .receive_inputs(&task.id)
         .unwrap()
+        .pop()
         .unwrap();
     let (_, result) = source(&system, &actor, &message, false);
     let mut nested = message.clone();
@@ -468,8 +469,9 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     system.store().enqueue(nested, None).unwrap();
     let nested = system
         .store()
-        .claim_incoming(&actor.id, &message.id)
+        .receive_inputs(&message.id)
         .unwrap()
+        .pop()
         .unwrap();
     let base = system.execution_context(&actor, &nested).unwrap();
     assert!(!base.sandbox_policy.is_path_writable(&outside));

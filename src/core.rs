@@ -681,6 +681,7 @@ mod tests {
         AgentTurnStreamResult {
             items: Vec::new(),
             raw_stream_follow_up: false,
+            end_turn: false,
             last_assistant_message: None,
             last_reasoning_content: None,
             last_reasoning_signature: None,

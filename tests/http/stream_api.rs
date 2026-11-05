@@ -241,7 +241,7 @@ async fn explicit_report_streams_and_can_be_fetched_before_task_completion() {
             &input.id,
             "progress",
             "Investigation is underway.",
-            false,
+            Vec::new(),
         )
         .unwrap();
     assert_eq!(

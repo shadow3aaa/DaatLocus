@@ -160,111 +160,18 @@ fn interruption(control: &ActorControl, message: &MessageRecord) -> Option<Messa
     }
 }
 
-fn clear_batch_cancellations(system: &ActorSystem, control: &ActorControl, id: &str) {
-    if let Ok(inputs) = system.store().input_batch(id) {
-        let mut cancelled = control.cancelled.lock();
-        for input in inputs {
-            cancelled.remove(&input.id);
-        }
-    }
-}
-
-fn announce_input_batch(system: &ActorSystem, id: &str) -> Result<()> {
-    let inputs = system.store().input_batch(id)?;
-    let active = system.store().active_batch_input(id)?;
-    let facts = inputs
-        .iter()
-        .map(|input| {
-            json!({
-                "id": input.id, "source": input.source, "reply_to": input.reply_to,
-                "status": input.status, "cancel_requested": input.cancel_requested,
-            })
-        })
-        .collect::<Vec<_>>();
-    // Append boundaries instead of rewriting the system prompt or old history:
-    // resuming an input must preserve the provider's cacheable prefix.
-    system.store().append_history(
-        &active.actor_id,
-        &active.id,
-        &[AgentMessage::user(format!(
-            "Active input batch:\n{}",
-            json!(facts)
-        ))],
-    )
-}
-
 fn check_interruption(
     system: &ActorSystem,
     control: &ActorControl,
     message: &MessageRecord,
 ) -> Result<()> {
     if interruption(control, message).is_some()
-        || (message.input_batch.is_some()
-            && system.store().batch_cancellation_pending(&message.id)?)
+        || (system.store().cancellation_pending(&message.id)?)
         || message.actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted()
     {
         Err(miette!("Execution interrupted"))
     } else {
         Ok(())
-    }
-}
-
-/// Move the Actor's Apps into a nested execution task. The parent is suspended
-/// while the task runs, so it must not observe the temporary empty manager.
-fn take_apps(apps: &mut AppManager) -> AppManager {
-    std::mem::replace(
-        apps,
-        AppManager::new(Vec::new()).expect("an empty AppManager is valid"),
-    )
-}
-
-type ReviewInputExecution = std::pin::Pin<
-    Box<dyn std::future::Future<Output = (Result<Option<String>>, AppManager)> + Send + 'static>,
->;
-
-// Break the recursive future type while a pending review retains its invocation.
-fn execute_review_input(
-    system: ActorSystem,
-    actor: ActorRecord,
-    message: MessageRecord,
-    control: ActorControl,
-    mut apps: AppManager,
-) -> ReviewInputExecution {
-    Box::pin(async move {
-        let result = execute_message(&system, &actor, &message, &control, &mut apps).await;
-        (result, apps)
-    })
-}
-
-/// Abort a nested execution task if the awaiting frame is dropped. This keeps
-/// cancellation semantics aligned with awaiting the future inline.
-struct AbortOnDrop<T> {
-    handle: Option<tokio::task::JoinHandle<T>>,
-}
-
-impl<T> AbortOnDrop<T> {
-    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self {
-            handle: Some(handle),
-        }
-    }
-
-    async fn wait(mut self) -> std::result::Result<T, tokio::task::JoinError> {
-        let handle = self.handle.take().expect("task handle");
-        let mut guard = Self {
-            handle: Some(handle),
-        };
-        let result = guard.handle.as_mut().expect("task handle").await;
-        guard.handle = None;
-        result
-    }
-}
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
     }
 }
 
@@ -350,67 +257,13 @@ impl InferenceModel {
     }
 }
 
-async fn execute_message(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    message: &MessageRecord,
-    control: &ActorControl,
-    apps: &mut AppManager,
-) -> Result<Option<String>> {
-    let mut current = message.clone();
-    let mut suspended = Vec::new();
-    loop {
-        let result = match system.execution_actor(&current) {
-            Ok(active) => execute_message_batch(system, &active, &current, control, apps).await,
-            Err(error) => Err(error),
-        };
-        if let Ok(BatchExecution::Switch(next)) = result {
-            suspended.push(current.id);
-            current = *next;
-            continue;
-        }
-        if result.is_err()
-            && !control.stop.load(Ordering::Acquire)
-            && system.store().batch_cancellation_pending(&current.id)?
-        {
-            system.store().settle_batch_cancellations(&current.id)?;
-            let active = system.store().active_batch_input(&current.id)?;
-            if active.status == MessageStatus::Running && !active.cancel_requested {
-                continue;
-            }
-        }
-        let result = result.map(|outcome| match outcome {
-            BatchExecution::Complete(reply) => reply,
-            BatchExecution::Switch(_) => unreachable!(),
-        });
-        if current.id == message.id {
-            return result;
-        }
-        finish_incoming(system, actor, &current, control, apps, result).await?;
-        current = system
-            .store()
-            .message(&suspended.pop().expect("suspended input"))?;
-        let active = system.store().active_batch_input(&current.id)?;
-        if active.status == MessageStatus::Running && !active.cancel_requested {
-            system.store().resume_input(&actor.id, &active.id)?;
-            announce_input_batch(system, &current.id)?;
-        }
-    }
-}
-
-enum BatchExecution {
-    Complete(Option<String>),
-    Switch(Box<MessageRecord>),
-}
-
-fn append_batch_inputs(
+fn append_inputs(
     system: &ActorSystem,
     actor: &ActorRecord,
     context: &AppToolExecutionContext,
-    batch: &[MessageRecord],
-) -> Result<bool> {
-    let mut appended = false;
-    for input in batch {
+    inputs: &[MessageRecord],
+) -> Result<()> {
+    for input in inputs {
         if !system
             .store()
             .has_history_for_message(&actor.id, &input.id)?
@@ -419,23 +272,22 @@ fn append_batch_inputs(
             system
                 .store()
                 .append_history(&actor.id, &input.id, &[row])?;
-            appended = true;
         }
     }
-    Ok(appended)
+    Ok(())
 }
 
-async fn execute_message_batch(
+async fn execute_message(
     system: &ActorSystem,
     actor: &ActorRecord,
     message: &MessageRecord,
     control: &ActorControl,
     apps: &mut AppManager,
-) -> Result<BatchExecution> {
-    let batch_id = message.id.clone();
-    let batch = system.store().claim_input_batch(&batch_id)?;
-    system.store().settle_batch_cancellations(&batch_id)?;
-    let active = system.store().active_batch_input(&batch_id)?;
+) -> Result<Option<String>> {
+    let execution_id = message.id.clone();
+    let inputs = system.store().receive_inputs(&execution_id)?;
+    system.store().settle_cancellations(&execution_id)?;
+    let active = system.store().active_input(&execution_id)?;
     let message = &active;
     check_interruption(system, control, message)?;
     let mut context = system.execution_context(actor, message)?;
@@ -444,10 +296,7 @@ async fn execute_message_batch(
         refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
     let tools = apps.model_tool_specs_for_context(&context)?;
-    append_batch_inputs(system, actor, &context, &batch)?;
-    if batch.len() > 1 {
-        announce_input_batch(system, &batch_id)?;
-    }
+    append_inputs(system, actor, &context, &inputs)?;
     let mut window = ModelContext::load(system, actor, &context, tools).await?;
     let mut model = InferenceModel::load(system, actor)?;
     let mut selected_model = actor.config.model.clone();
@@ -472,12 +321,8 @@ async fn execute_message_batch(
     let mut handoff_required = false;
     let mut empty_reasoning_responses = 0;
     'execution: loop {
-        let cancelled = system.store().batch_cancellation_pending(&batch_id)?;
-        system.store().settle_batch_cancellations(&batch_id)?;
-        if cancelled {
-            announce_input_batch(system, &batch_id)?;
-        }
-        let active = system.store().active_batch_input(&batch_id)?;
+        system.store().settle_cancellations(&execution_id)?;
+        let active = system.store().active_input(&execution_id)?;
         let message = &active;
         check_interruption(system, control, message)?;
         context = system.execution_context(actor, message)?;
@@ -487,36 +332,6 @@ async fn execute_message_batch(
             refresh_apps(system, actor, message, control, apps, &context, true).await?;
             let tools = apps.model_tool_specs_for_context(&context)?;
             window = ModelContext::load(system, actor, &context, tools).await?;
-        }
-        if system.store().turn_yielded(&actor.id, &message.id)? {
-            // The successful tool observation is durable and all calls in its
-            // protocol group have settled; no final text is sent or inferred.
-            system.store().append_history(
-                &actor.id,
-                &message.id,
-                &[AgentMessage::assistant("")],
-            )?;
-            return Ok(BatchExecution::Complete(None));
-        }
-        if system
-            .store()
-            .reply_turn_delivered(&actor.id, &message.id)?
-        {
-            // All observations of the previous group have settled. Persist the
-            // turn boundary so takeover does not ask the model to reply again.
-            system.store().append_history(
-                &actor.id,
-                &message.id,
-                &[AgentMessage::assistant("")],
-            )?;
-            return Ok(BatchExecution::Complete(Some(String::new())));
-        }
-        let batch = system.store().claim_input_batch(&batch_id)?;
-        if append_batch_inputs(system, actor, &context, &batch)? {
-            announce_input_batch(system, &batch_id)?;
-        }
-        if let Some(next) = system.store().claim_incoming(&actor.id, &message.id)? {
-            return Ok(BatchExecution::Switch(Box::new(next)));
         }
         let active = system.execution_actor(message)?;
         if active.config.model != selected_model {
@@ -574,9 +389,6 @@ async fn execute_message_batch(
                 .filter(|text| !text.trim().is_empty())
                 .ok_or_else(|| miette!("Context handoff note is empty"))?;
             check_interruption(system, control, message)?;
-            if system.store().has_queued_input(&actor.id)? {
-                continue;
-            }
             let recovery = system
                 .store()
                 .reset_model_context(&actor.id, &message.id, &note)?;
@@ -623,9 +435,7 @@ async fn execute_message_batch(
             }
             Err(error) => return Err(error),
         };
-        if system.store().has_queued_input(&actor.id)?
-            || system.store().batch_cancellation_pending(&batch_id)?
-        {
+        if system.store().cancellation_pending(&execution_id)? {
             continue;
         }
         let response = response.protocol();
@@ -640,7 +450,7 @@ async fn execute_message_batch(
                     .reasoning_content
                     .as_ref()
                     .is_some_and(|text| !text.trim().is_empty());
-            if response.raw_stream_follow_up || reasoning_only {
+            if response.raw_stream_follow_up || reasoning_only && !response.end_turn {
                 empty_reasoning_responses = if reply.is_none() {
                     empty_reasoning_responses + 1
                 } else {
@@ -672,14 +482,15 @@ async fn execute_message_batch(
                 window.history.extend([row, guidance]);
                 continue;
             }
-            let reply =
-                reply.ok_or_else(|| miette!("Model returned no final answer or App calls"))?;
-            let final_message = AgentMessage::assistant(reply.clone())
+            if reply.is_none() && !response.end_turn {
+                return Err(miette!("Model returned no final answer or App calls"));
+            }
+            let final_message = AgentMessage::assistant(reply.clone().unwrap_or_default())
                 .with_responses_output(response.responses_output);
             system
                 .store()
                 .append_history(&actor.id, &message.id, &[final_message])?;
-            return Ok(BatchExecution::Complete(Some(reply)));
+            return Ok(reply);
         }
         empty_reasoning_responses = 0;
         validate_response_calls(&response)?;
@@ -754,7 +565,7 @@ async fn execute_message_batch(
                         )?;
                     }
                     if !control.stop.load(Ordering::Acquire)
-                        && system.store().batch_cancellation_pending(&batch_id)?
+                        && system.store().cancellation_pending(&execution_id)?
                     {
                         continue 'execution;
                     }
@@ -774,6 +585,8 @@ async fn execute_message_batch(
                 .append_history(&actor.id, &message.id, std::slice::from_ref(&images))?;
             window.history.push(images);
         }
+        let inputs = system.store().receive_inputs(&message.id)?;
+        append_inputs(system, actor, &context, &inputs)?;
     }
 }
 
@@ -830,9 +643,6 @@ async fn execute_sudo_call(
                 result = &mut future => break result,
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
                     if check_interruption(system, control, message).is_err() { return None; }
-                    if let Err(error) = Box::pin(receive_during_review(system, actor, message, control, apps)).await {
-                        return Some(Err(error));
-                    }
                 }
             }
         }
@@ -978,23 +788,6 @@ async fn execute_call(
     );
     let outcome = if call.name.starts_with("sudo__") {
         execute_sudo_call(system, actor, message, control, apps, call, &context).await
-    } else if call.name == "actors__appeal_approval" {
-        // Actors is a stateless facade. Keep its review-control future while
-        // retaining this Actor's existing stateful Apps for incoming input.
-        use crate::app::App;
-        let mut facade = crate::actor_app::ActorApp::new(actor.id.clone(), system.clone());
-        let control_call = call.with_name("appeal_approval");
-        let future = facade.execute_tool(&control_call, &context);
-        tokio::pin!(future);
-        loop {
-            tokio::select! {
-                result = &mut future => break Some(result),
-                () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                    if check_interruption(system, control, message).is_err() { break None; }
-                    Box::pin(receive_during_review(system, actor, message, control, apps)).await?;
-                }
-            }
-        }
     } else {
         let future = apps.execute_tool(call, &context);
         tokio::pin!(future);
@@ -1191,7 +984,7 @@ fn finish_input(
     control: &ActorControl,
     result: Result<Option<String>>,
 ) -> Result<MessageStatus> {
-    let active = system.store().active_batch_input(&message.id)?;
+    let active = system.store().active_input(&message.id)?;
     let (status, reply, error) = match (interruption(control, &active), result) {
         (Some(status), _) => (
             status,
@@ -1212,86 +1005,11 @@ fn finish_input(
             ),
         ),
     };
-    if let Some(reply) =
-        system
-            .store()
-            .finish_message(&message.id, status, reply.as_deref(), error.as_deref())?
-    {
-        system.wake(&reply.actor_id);
-    }
-    clear_batch_cancellations(system, control, &message.id);
+    system
+        .store()
+        .finish_execution(&message.id, status, reply.as_deref(), error.as_deref())?;
+    control.cancelled.lock().clear();
     Ok(status)
-}
-
-async fn finish_incoming(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    input: &MessageRecord,
-    control: &ActorControl,
-    apps: &mut AppManager,
-    result: Result<Option<String>>,
-) -> Result<()> {
-    if actor.id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
-        return Err(miette!("Core worker no longer owns execution"));
-    }
-    let status = finish_input(system, input, control, result)?;
-    if status != MessageStatus::Completed {
-        let replacements = if actor.id == crate::stage::shared::ACTOR_ID && !system.local_core() {
-            system
-                .shared_core()
-                .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-                .model_apps()
-                .await?
-        } else {
-            builtin_apps::create_apps(actor, system.clone(), &system.config())?
-        };
-        let previous = std::mem::replace(apps, replacements);
-        previous.shutdown().await?;
-    }
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        system.checkpoint_core().await?;
-    }
-    Ok(())
-}
-
-// Only a pending review retains a live invocation while other inputs execute.
-// Ordinary message preemption switches batches in execute_message's flat loop.
-async fn receive_during_review(
-    system: &ActorSystem,
-    actor: &ActorRecord,
-    current: &MessageRecord,
-    control: &ActorControl,
-    apps: &mut AppManager,
-) -> Result<bool> {
-    let mut received = false;
-    while let Some(input) = system.store().claim_incoming(&actor.id, &current.id)? {
-        received = true;
-        let result = {
-            let incoming_actor = system.execution_actor(&input)?;
-            // Retain the reviewed invocation while another input uses the Apps.
-            let task = tokio::spawn(execute_review_input(
-                system.clone(),
-                incoming_actor,
-                input.clone(),
-                control.clone(),
-                take_apps(apps),
-            ));
-            match AbortOnDrop::new(task).wait().await {
-                Ok((result, returned_apps)) => {
-                    *apps = returned_apps;
-                    result
-                }
-                Err(error) => Err(miette!("Actor input execution task failed: {error}")),
-            }
-        };
-        finish_incoming(system, actor, &input, control, apps, result).await?;
-        check_interruption(system, control, current)?;
-    }
-    if received {
-        system.store().resume_input(&actor.id, &current.id)?;
-        announce_input_batch(system, &current.id)?;
-    }
-    Ok(received)
 }
 
 // Keep Actor and request authority explicit at the model execution boundary.
@@ -1312,13 +1030,10 @@ async fn generate(
 ) -> Result<Option<AgentTurnStreamResult>> {
     let policy = AgentTurnRetryPolicy::default();
     for attempt in 1..=policy.max_attempts {
-        if system.store().batch_cancellation_pending(&message.id)? {
+        if system.store().cancellation_pending(&message.id)? {
             return Ok(None);
         }
         check_interruption(system, control, message)?;
-        if system.store().has_queued_input(&actor.id)? {
-            return Ok(None);
-        }
         if publish_progress {
             *generation = generation.saturating_add(1);
             system.store().append_event(
@@ -1376,22 +1091,12 @@ async fn generate(
                 },
                 _ = timer.tick() => {
                     pending.flush(system, actor, message, *generation)?;
-                    if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
-                    check_interruption(system,control, message)?;
-                    if system.store().has_queued_input(&actor.id)? {
-                        let usage = provider.token_usage_info();
-                        system.store().record_model_usage(&actor.id, model_usage, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
-                        return Ok(None);
-                    }
+                    if system.store().cancellation_pending(&message.id)? { return Ok(None); }
+                    check_interruption(system, control, message)?;
                 },
                 () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                    if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
-                    check_interruption(system,control, message)?;
-                    if system.store().has_queued_input(&actor.id)? {
-                        let usage = provider.token_usage_info();
-                        system.store().record_model_usage(&actor.id, model_usage, usage.total_token_usage.delta_from(&usage_before), usage.model_context_window)?;
-                        return Ok(None);
-                    }
+                    if system.store().cancellation_pending(&message.id)? { return Ok(None); }
+                    check_interruption(system, control, message)?;
                 },
             }
         };
@@ -1411,7 +1116,7 @@ async fn generate(
             delta.clone(),
             usage.model_context_window,
         )?;
-        if system.store().batch_cancellation_pending(&message.id)? {
+        if system.store().cancellation_pending(&message.id)? {
             return Ok(None);
         }
         check_interruption(system, control, message)?;
@@ -1451,9 +1156,8 @@ async fn generate(
                     tokio::select! {
                         () = &mut backoff => break,
                         () = tokio::time::sleep(CANCELLATION_INTERVAL) => {
-                            if system.store().batch_cancellation_pending(&message.id)? { return Ok(None); }
-                    check_interruption(system,control, message)?;
-                            if system.store().has_queued_input(&actor.id)? { return Ok(None); }
+                            if system.store().cancellation_pending(&message.id)? { return Ok(None); }
+                            check_interruption(system, control, message)?;
                         },
                     }
                 }

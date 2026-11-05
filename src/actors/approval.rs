@@ -372,7 +372,7 @@ async fn automatic_review(
         .ok_or_else(|| miette!("Approval application is missing"))?;
     let proposed_call = call;
     let source = system.store().message(&record.message_id)?;
-    let requests = system.store().input_batch(&source.id)?;
+    let requests = system.store().execution_inputs(&source.id)?;
     let execution_actor = system.execution_actor(&source)?;
     let task = system
         .store()

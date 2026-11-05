@@ -199,29 +199,27 @@ Sandbox expansion uses the unified review/application path.
 
 - Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
   Core uses AdminActors `stop` to stop a hosted Actor's whole current execution:
-  atomically cancel every pending/running input, including suspended inputs, and
+  atomically cancel every pending/running input and
   await worker/App cleanup. Keep identity, configuration, history and completed
   effects; later messages may start new work. Ordinary request `cancel` affects
   only its exact input. Stop never grants cross-account or remote readonly authority.
-  All messages, progress, results and runtime notices are durable immediate inputs.
-  Coalesce compatible queued inputs into one inference batch while preserving
-  their individual bubbles, provenance and cancellation. Keep distinct hard
-  authorities and reply targets in separate batches; emit one batch outcome.
-  Use one Actors App message operation; do not expose queued versus steering modes.
-  New input interrupts speculative inference or retry backoff and is received at the
-  next settled tool-group boundary. Explicit applications awaiting automatic review
-  must not prevent receiving messages. Preserve the waiting invocation and immutable scope.
-  Suspend unfinished inputs without completing or cancelling their work; resume
-  inference from durable observations without replaying effects. Each input retains
-  its own authority, origin, reply target and delivery references. Related-message
-  IDs express correlation only, never authorization. Never promote Actor prose to
-  Owner approval or let a restricted input borrow another input's authority.
+  Messages, progress, results and runtime notices enter a durable inbox. Each Actor
+  has one continuous execution context. Admit buffered inputs while idle or after
+  the entire current tool group settles; new messages never interrupt inference,
+  retry backoff, tools or reviews. Preserve each input's source, cancellation,
+  reply references and hard authority, isolating incompatible authorities.
+  End inference naturally when the provider ends its turn. Send collaboration
+  updates and results explicitly through messaging; final model text does not
+  automatically reply to collaborators. Keep delivery receipts and operation
+  recovery separate from inference scheduling. Related-message IDs express
+  correlation only, never authorization. Never promote Actor prose to Owner
+  approval or let a restricted input borrow another input's authority.
   Actor communications use clickable bubbles with sender avatars and names above
   the bubble; outgoing bubbles
   retain recipient captions with a small recipient avatar. Creation
   and status queries use ordinary tool rows. Core hides Actor communications and tools.
 - Core handles short coordination turns. Explicit durable deliveries can precede
-  turn completion; yielding waits for the current tool protocol group to settle.
+  natural turn completion.
   Completing an input does not complete its delegated work. Progress and results
   return as correlated inputs; Core chooses meaningful user updates without polling
   or a second fast-response model. Core excludes platform patches, device project

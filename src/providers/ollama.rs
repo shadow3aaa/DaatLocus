@@ -673,6 +673,7 @@ impl OllamaClient {
         allowed_tool_names: &HashSet<String>,
     ) -> Result<AgentTurnStreamResult> {
         let mut content = String::new();
+        let mut end_turn = false;
         let mut thinking = String::new();
         let mut tool_calls: Vec<AgentToolCall> = Vec::new();
         let mut last_usage = None;
@@ -739,6 +740,9 @@ impl OllamaClient {
                 };
                 if let Some(error) = part.get("error").and_then(Value::as_str) {
                     return Err(miette!("ollama stream api error: {error}"));
+                }
+                if part["done"] == true {
+                    end_turn = part["done_reason"] == "stop";
                 }
                 if let Some(usage) = parse_usage_from_ollama_response(&part) {
                     last_usage = Some(usage);
@@ -858,6 +862,7 @@ impl OllamaClient {
             return Ok(AgentTurnStreamResult {
                 items,
                 raw_stream_follow_up: true,
+                end_turn: false,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_thinking),
                 last_reasoning_signature: None,
@@ -877,6 +882,7 @@ impl OllamaClient {
                 .map(|content| AgentTurnItem::AssistantMessage { content })
                 .collect(),
             raw_stream_follow_up: false,
+            end_turn,
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_thinking),
             last_reasoning_signature: None,

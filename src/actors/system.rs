@@ -708,6 +708,7 @@ impl ActorSystem {
     pub(crate) fn seed_test_actor(&self, id: &str) {
         let mut actor = self.actor(crate::stage::shared::ACTOR_ID).unwrap();
         actor.id = id.to_owned();
+        actor.status = ActorStatus::Idle;
         actor.parent_id = Some(crate::stage::shared::ACTOR_ID.into());
         actor.depth = 1;
         actor.config.name = format!("Fixture {id}");
@@ -1555,7 +1556,7 @@ impl ActorSystem {
             ));
         }
         if cancel && selected.id == current.id {
-            return Err(forbidden("Use yield to finish the current input"));
+            return Err(forbidden("End the current turn naturally"));
         }
         if caller.actor_id == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
             return Err(forbidden(
@@ -1580,14 +1581,27 @@ impl ActorSystem {
         input: &str,
         call: &str,
         content: &str,
-        finish_turn: bool,
     ) -> Result<MessageRecord> {
         if sender == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
             return Err(forbidden("Core worker no longer owns execution"));
         }
+        let source = self.store().message(input)?;
+        if source.actor_id != sender
+            || source.status != MessageStatus::Running
+            || source.cancel_requested
+        {
+            return Err(forbidden("Delivery input is no longer active"));
+        }
+        let (content, attachments) = match &source.reply_to {
+            ReplyTarget::Actor { actor_id, .. } => {
+                crate::resources::share_references(self, sender, actor_id, content)?
+            }
+            _ => (content.to_owned(), Vec::new()),
+        };
         let delivery = self
             .store()
-            .deliver(sender, input, call, content, finish_turn)?;
+            .deliver(sender, input, call, &content, attachments)?;
+
         if delivery.status == MessageStatus::Queued {
             self.wake(&delivery.actor_id);
         }
@@ -1732,6 +1746,10 @@ impl ActorSystem {
                 authority.read_only |= source.remote_read_only;
             }
         }
+        let (content, attachments) =
+            crate::resources::share_references(self, sender, target, &message.content)?;
+        message.content = content;
+        message.attachments = attachments;
         let message = self.store().enqueue(message, None)?;
         self.wake(target);
         Ok(message)
@@ -1753,7 +1771,6 @@ impl ActorSystem {
             reply_to,
             kind: MessageKind::Request,
             in_reply_to: None,
-            input_batch: None,
 
             remote_authority: None,
             content,
@@ -1869,15 +1886,13 @@ impl ActorSystem {
             return Err(forbidden("Message belongs to another Actor"));
         }
         let message = self.store().request_cancel(message_id)?;
-        if message.status == MessageStatus::Queued
-            && let Some(result) = self.store().finish_message(
+        if message.status == MessageStatus::Queued {
+            self.store().finish_message(
                 message_id,
                 MessageStatus::Cancelled,
                 None,
                 Some("Request cancelled"),
-            )?
-        {
-            self.wake(&result.actor_id);
+            )?;
         }
         if message.status == MessageStatus::Running
             && let Some(worker) = self.inner.workers.lock().get(actor_id)
@@ -2548,11 +2563,7 @@ mod tests {
         let second = system
             .send_user("root", "Nested input".into(), vec![], None)
             .unwrap();
-        system
-            .store()
-            .claim_incoming("root", &first.id)
-            .unwrap()
-            .unwrap();
+        system.store().receive_inputs(&first.id).unwrap();
         system
             .send_user("core", "Stop the Actor".into(), vec![], None)
             .unwrap();
@@ -2829,6 +2840,10 @@ mod tests {
         system
             .archive_from_core("root", false, caller)
             .await
+            .unwrap();
+        system.store().claim_next("child").unwrap().unwrap();
+        system
+            .deliver_from_actor("child", &delegated.id, "report", "Found it")
             .unwrap();
         system
             .store()
@@ -3821,80 +3836,6 @@ mod tests {
         assert!(pages > 1);
         assert_eq!(received, text);
         assert!(visible.contains("VISIBLE_COMMENTARY"));
-        system.shutdown().await;
-    }
-    #[tokio::test]
-    async fn common_reply_can_finish_a_delegated_input_with_one_result() {
-        use crate::{app::App, model_protocol::AgentToolCall};
-        let (_dir, system) = fixture().await;
-        let owner = system
-            .send_user("core", "Coordinate".into(), vec![], None)
-            .unwrap();
-        system.store().claim_next("core").unwrap().unwrap();
-        let mut request = owner.clone();
-        request.id = uuid::Uuid::new_v4().to_string();
-        request.seq = 0;
-        request.actor_id = "root".into();
-        request.status = MessageStatus::Queued;
-        request.source = MessageSource::Actor {
-            actor_id: "core".into(),
-        };
-        request.reply_to = ReplyTarget::Actor {
-            actor_id: "core".into(),
-            request_id: owner.id.clone(),
-        };
-        let request = system.store().enqueue(request, None).unwrap();
-        system.store().claim_next("root").unwrap().unwrap();
-        let context = system
-            .execution_context(&system.actor("root").unwrap(), &request)
-            .unwrap();
-        let call = AgentToolCall {
-            id: "final-reply".into(),
-            name: "actors__reply".into(),
-            arguments: serde_json::json!({"content":"UNIQUE_RESULT","finish_turn":true}),
-        };
-        system
-            .store()
-            .tool_started("root", &request.id, &call)
-            .unwrap();
-        let mut app = crate::actor_app::ActorApp::new("root".into(), system.clone());
-        let result = app
-            .execute_tool(&call.with_name("reply"), &context)
-            .await
-            .unwrap();
-        system
-            .store()
-            .tool_finished(
-                "root",
-                &request.id,
-                &call,
-                result.payload,
-                "reply sent",
-                "Reply",
-                None,
-            )
-            .unwrap();
-        assert!(
-            system
-                .store()
-                .reply_turn_delivered("root", &request.id)
-                .unwrap()
-        );
-        let duplicate = system
-            .store()
-            .finish_message(&request.id, MessageStatus::Completed, Some(""), None)
-            .unwrap();
-        assert!(duplicate.is_none());
-        let results = system
-            .store()
-            .messages("core", None, 32)
-            .unwrap()
-            .items
-            .into_iter()
-            .filter(|input| input.kind == MessageKind::Result)
-            .collect::<Vec<_>>();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].content, "UNIQUE_RESULT");
         system.shutdown().await;
     }
 }

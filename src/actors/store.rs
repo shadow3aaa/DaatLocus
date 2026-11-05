@@ -14,7 +14,7 @@ mod approval_appeals;
 mod completion;
 mod contacts;
 use completion::finish_message_tx;
-mod input_batches;
+mod inbox;
 pub(crate) use contacts::ConversationPage;
 pub use contacts::{ActorContact, ContactMessage, ContactPage, ContactSort};
 #[cfg(test)]
@@ -62,12 +62,6 @@ fn core_requires_commit(db: &Connection) -> Result<bool> {
         |row| row.get(0),
     ))?;
     Ok(!local)
-}
-fn reply_turn_delivered(db: &Connection, actor: &str, message: &str) -> Result<bool> {
-    sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__reply' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)",params![actor,message],|row|row.get(0)))
-}
-fn turn_yielded(db: &Connection, actor: &str, message: &str) -> Result<bool> {
-    sql(db.query_row("SELECT EXISTS(SELECT 1 FROM tools WHERE actor_id=?1 AND message_id=?2 AND done=1 AND json_extract(record,'$.name')='actors__yield' AND json_extract(record,'$.error') IS NULL AND json_extract(record,'$.payload.finish_turn')=1)", params![actor, message], |r|r.get(0)))
 }
 fn tool_domain_name(name: &str) -> &str {
     name.strip_prefix("d_")
@@ -1087,36 +1081,6 @@ impl ActorStore {
         })
     }
     pub fn claim_next(&self, actor_id: &str) -> Result<Option<MessageRecord>> {
-        self.claim_input(actor_id, None)
-    }
-    /// Publish a resumed input even when it predates the client's history page.
-    /// This advances no effects and does not change its authority or start time.
-    pub(crate) fn resume_input(&self, actor: &str, id: &str) -> Result<()> {
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let mut input = message_tx(&tx, id)?;
-            if input.actor_id != actor
-                || input.status != MessageStatus::Running
-                || input.cancel_requested
-            {
-                return Err(ActorError::Forbidden("Input cannot resume".into()).into());
-            }
-            input.updated_at_ms = now().max(input.updated_at_ms + 1);
-            save_message(&tx, &input)?;
-            self.commit(tx)
-        })
-    }
-    /// Claim at a safe boundary of this Actor's current execution. Other open
-    /// requests retain their authority and completion state while suspended.
-    pub(crate) fn claim_incoming(
-        &self,
-        actor_id: &str,
-        active: &str,
-    ) -> Result<Option<MessageRecord>> {
-        self.claim_input(actor_id, Some(active))
-    }
-    fn claim_input(&self, actor_id: &str, active: Option<&str>) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
@@ -1124,21 +1088,13 @@ impl ActorStore {
             if actor.status == ActorStatus::Archived {
                 return Ok(None);
             }
-            if let Some(active) = active {
-                let current = message_tx(&tx, active)?;
-                if current.actor_id != actor_id
-                    || current.status != MessageStatus::Running
-                    || current.cancel_requested
-                {
-                    return Ok(None);
-                }
-            } else if actor.status != ActorStatus::Idle {
+            if actor.status != ActorStatus::Idle {
                 return Ok(None);
             }
             // A replica/lifecycle transition can leave Actor status idle while its
             // interrupted input is still recorded as running. Recovery must repair
             // that input before the serial inbox claims any later request.
-            if active.is_none() && sql(tx.query_row(
+            if sql(tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1 AND status='\"running\"')",
                 [actor_id],
                 |r| r.get::<_, bool>(0),
@@ -2085,12 +2041,6 @@ impl ActorStore {
             Ok(result.id)
         })
     }
-    pub fn reply_turn_delivered(&self, actor: &str, message: &str) -> Result<bool> {
-        database_io(|| reply_turn_delivered(&self.db.lock(), actor, message))
-    }
-    pub(crate) fn turn_yielded(&self, actor: &str, message: &str) -> Result<bool> {
-        database_io(|| turn_yielded(&self.db.lock(), actor, message))
-    }
     pub fn tool_result(&self, id: &str) -> Result<ToolResultRecord> {
         database_io(|| {
             decode(
@@ -2215,7 +2165,7 @@ impl ActorStore {
         input: &str,
         call: &str,
         content: &str,
-        finish_turn: bool,
+        attachments: Vec<Attachment>,
     ) -> Result<MessageRecord> {
         database_io(|| {
             if content.trim().is_empty()
@@ -2248,11 +2198,10 @@ impl ActorStore {
                 reply_to: source.reply_to.clone(),
                 kind: MessageKind::Delivery,
                 in_reply_to: Some(source.id.clone()),
-                input_batch: None,
 
                 remote_authority: None,
                 content: String::new(),
-                attachments: vec![],
+                attachments,
                 status: MessageStatus::Completed,
                 cancel_requested: false,
                 started_at_ms: None,
@@ -2274,11 +2223,7 @@ impl ActorStore {
                 }
                 delivery.actor_id = actor_id.clone();
                 delivery.reply_to = original.reply_to;
-                delivery.kind = if finish_turn {
-                    MessageKind::Result
-                } else {
-                    MessageKind::Progress
-                };
+                delivery.kind = MessageKind::Progress;
                 delivery.in_reply_to = Some(original.id);
                 delivery.content = content.into();
                 delivery.reply = None;
@@ -2318,35 +2263,41 @@ impl ActorStore {
         status: MessageStatus,
         reply: Option<&str>,
         error: Option<&str>,
-    ) -> Result<Option<MessageRecord>> {
+    ) -> Result<()> {
         database_io(|| {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
-            let members = input_batches::members(&tx, &message_tx(&tx, id)?)?;
-            let active = members
+            finish_message_tx(&tx, id, status, reply, error)?;
+            self.commit(tx)
+        })
+    }
+
+    pub(crate) fn finish_execution(
+        &self,
+        id: &str,
+        status: MessageStatus,
+        reply: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let inputs = inbox::execution_inputs(&tx, &message_tx(&tx, id)?)?;
+            let active = inputs
                 .iter()
                 .find(|input| input.status == MessageStatus::Running && !input.cancel_requested)
-                .or_else(|| members.iter().find(|input| input.id == id));
-            let active = active.ok_or_else(|| missing("Input batch"))?;
-            // A single outward result closes the inference batch. Other inputs
-            // retain their own source, cancellation and completion records.
-            let mut routed = None;
-            for member in &members {
-                let primary = member.id == active.id;
-                let outcome = finish_message_tx(
+                .or_else(|| inputs.iter().find(|input| input.id == id))
+                .ok_or_else(|| missing("Execution input"))?;
+            for input in &inputs {
+                finish_message_tx(
                     &tx,
-                    &member.id,
+                    &input.id,
                     status,
-                    if primary { reply } else { None },
+                    if input.id == active.id { reply } else { None },
                     error,
-                    !primary,
                 )?;
-                if outcome.is_some() {
-                    routed = outcome;
-                }
             }
-            self.commit(tx)?;
-            Ok(routed)
+            self.commit(tx)
         })
     }
     pub fn request_cancel(&self, id: &str) -> Result<MessageRecord> {

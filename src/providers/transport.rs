@@ -434,13 +434,13 @@ mod tests {
     async fn chat_finish_reason_completes_without_done_or_connection_close_and_retains_usage() {
         use crate::model_protocol::{AgentToolInputSpec, AgentToolSpec};
         use futures_util::StreamExt;
-        for tool_call in [false, true] {
+        for (tool_call, text) in [(false, "OK"), (false, ""), (true, "")] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let app = Router::new().fallback(post(move || async move {
                 let delta = if tool_call {
                     serde_json::json!({"tool_calls":[{"index":0,"id":"call_done","type":"function","function":{"name":"review","arguments":"{\"decision\":\"approve\",\"reason\":\"ok\"}"}}]})
-                } else { serde_json::json!({"content":"OK"}) };
+                } else { serde_json::json!({"content":text}) };
                 let first = format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":delta,"finish_reason":if tool_call {"tool_calls"} else {"stop"}}]}));
                 let usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n";
                 let body = futures_util::stream::once(async move { Ok::<_,std::io::Error>(axum::body::Bytes::from(first)) })
@@ -479,12 +479,17 @@ mod tests {
             .await
             .expect("finished generation must not await connection close")
             .unwrap();
+            response.ensure_model_output().unwrap();
             let response = response.protocol();
+            assert_eq!(response.end_turn, !tool_call);
             if tool_call {
                 assert_eq!(response.tool_calls.len(), 1);
                 assert_eq!(response.tool_calls[0].arguments["decision"], "approve");
             } else {
-                assert_eq!(response.final_assistant_message.as_deref(), Some("OK"));
+                assert_eq!(
+                    response.final_assistant_message.as_deref(),
+                    (!text.is_empty()).then_some(text)
+                );
             }
             assert_eq!(provider.token_usage_info().last_token_usage.input_tokens, 7);
             assert_eq!(

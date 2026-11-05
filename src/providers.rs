@@ -717,6 +717,7 @@ impl OpenAIClient {
         ];
         let mut stream_done = false;
         let mut finished_at: Option<Instant> = None;
+        let mut end_turn = false;
         while !stream_done {
             // A finish_reason ends the generation even if a gateway keeps its SSE
             // connection alive. Briefly drain the optional trailing usage frame.
@@ -788,6 +789,7 @@ impl OpenAIClient {
                 {
                     tracing::debug!(model=%self.model, finish_reason=reason, "Chat stream generation finished");
                     finished_at = Some(Instant::now());
+                    end_turn = reason == "stop";
                 }
                 let delta = &choice["delta"];
                 if let Some(delta_content) = delta["content"].as_str() {
@@ -895,6 +897,7 @@ impl OpenAIClient {
             return Ok(AgentTurnStreamResult {
                 items,
                 raw_stream_follow_up: true,
+                end_turn: false,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
                 last_reasoning_signature: None,
@@ -932,6 +935,7 @@ impl OpenAIClient {
             return Ok(AgentTurnStreamResult {
                 items,
                 raw_stream_follow_up: true,
+                end_turn: false,
                 last_assistant_message: assistant_message,
                 last_reasoning_content: non_empty_string(cleaned_reasoning),
                 last_reasoning_signature: None,
@@ -951,6 +955,7 @@ impl OpenAIClient {
                 .map(|content| AgentTurnItem::AssistantMessage { content })
                 .collect(),
             raw_stream_follow_up: false,
+            end_turn,
             last_assistant_message,
             last_reasoning_content: non_empty_string(cleaned_reasoning),
             last_reasoning_signature: None,
@@ -1842,6 +1847,7 @@ mod tests {
                     },
                 }],
                 raw_stream_follow_up: false,
+                end_turn: false,
                 last_assistant_message: None,
                 last_reasoning_content: None,
                 last_reasoning_signature: None,

@@ -80,7 +80,7 @@ impl ModelContext {
         let actor = &current.actor_id;
         self.active_input_ids = system
             .store()
-            .input_batch(&current.id)?
+            .execution_inputs(&current.id)?
             .into_iter()
             .filter(|input| {
                 input.status == super::MessageStatus::Running && !input.cancel_requested
@@ -89,7 +89,7 @@ impl ModelContext {
             .collect();
         let start = system.store().context_start(actor)?;
         let anchor = system.store().actor(actor)?.context.anchor;
-        // An interrupted input may have lost its window to a nested reset.
+        // An interrupted input may predate the current context window.
         // Restore only missing history at the tail; older input stays immutable.
         if let Some(recovery) = &anchor
             && recovery.message_id != current.id
@@ -107,8 +107,6 @@ impl ModelContext {
         }
         let mut after = start.saturating_sub(1);
         let mut history = Vec::new();
-        let mut batches = std::collections::HashMap::new();
-        let mut previous = None;
         self.history_complete = false;
         self.history = loop {
             let page = system.store().history_page(actor, after, None, 128)?;
@@ -116,7 +114,7 @@ impl ModelContext {
                 self.history_complete = true;
                 break balanced_history(history);
             }
-            for (seq, input, mut row) in page {
+            for (seq, _, mut row) in page {
                 after = seq;
                 if seq == start
                     && let Some(recovery) = &anchor
@@ -125,14 +123,7 @@ impl ModelContext {
                     // entire prefix even when no further reset has occurred.
                     row = recovery.recovery_message();
                 }
-                let batch = batches.entry(input.clone()).or_insert_with(|| {
-                    system
-                        .store()
-                        .message(&input)
-                        .ok()
-                        .and_then(|input| input.input_batch)
-                });
-                push_batch_history(&mut history, &mut previous, batch.as_deref(), &input, row);
+                push_history(&mut history, row);
             }
             let balanced = balanced_history(history.clone());
             if !self.fits(provider, &balanced, baseline) {
@@ -241,52 +232,27 @@ impl ModelContext {
     }
 }
 
-/// Merge model input only. Durable history and conversation bubbles retain each
-/// original message, including its images and source metadata.
-fn push_batch_history(
-    history: &mut Vec<AgentMessage>,
-    previous: &mut Option<(String, String)>,
-    batch: Option<&str>,
-    input: &str,
-    mut row: AgentMessage,
-) {
-    if batch.is_some_and(|batch| batch != input)
-        && let AgentMessage::User { content } = &mut row
+fn push_history(history: &mut Vec<AgentMessage>, row: AgentMessage) {
+    if let AgentMessage::User { content } = &row
+        && let Some(AgentMessage::User { content: previous }) = history.last_mut()
     {
-        *content = content
-            .clone()
-            .with_text(format!("Input ID: {input}\n{}", content.as_text()));
-    }
-    if let (Some(batch), AgentMessage::User { content }) = (batch, &row) {
-        if previous
-            .as_ref()
-            .is_some_and(|(last_batch, last_input)| last_batch == batch && last_input != input)
-            && let Some(AgentMessage::User { content: last }) = history.last_mut()
-        {
-            let text = format!("{}\n\n---\n\n{}", last.as_text(), content.as_text());
-            let parts = last
-                .parts()
-                .iter()
-                .chain(content.parts())
-                .cloned()
-                .collect();
-            *last = AgentContent::multimodal(text, parts);
-        } else {
-            history.push(row);
-        }
-        *previous = Some((batch.into(), input.into()));
+        let text = format!("{}\n\n---\n\n{}", previous.as_text(), content.as_text());
+        let parts = previous
+            .parts()
+            .iter()
+            .chain(content.parts())
+            .cloned()
+            .collect();
+        *previous = AgentContent::multimodal(text, parts);
     } else {
         history.push(row);
-        *previous = None;
     }
 }
 
 /// Discard only incomplete replay groups from a bounded history query. The
 /// durable history is untouched; tool results never become free-standing input.
 pub(super) fn balanced_history(history: Vec<AgentMessage>) -> Vec<AgentMessage> {
-    // An approval can suspend a protocol group while another input is handled.
-    // Present complete groups atomically in settlement order, retaining source
-    // order in durable history. Incomplete intents never enter a model request.
+    // Replay complete tool groups atomically. Interrupted intents remain in durable history.
     let mut settled = Vec::new();
     let mut pending: Vec<(AgentMessage, Vec<String>, Vec<AgentMessage>)> = Vec::new();
     for row in history {

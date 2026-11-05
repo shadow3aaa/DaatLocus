@@ -1,5 +1,5 @@
-#[path = "runner_batch_tests.rs"]
-mod input_batch_tests;
+#[path = "runner_inbox_tests.rs"]
+mod inbox_tests;
 #[path = "runner_model_wait_tests.rs"]
 mod model_wait_tests;
 #[path = "super_skills_tests.rs"]
@@ -34,12 +34,14 @@ enum MockReply {
     Answer(&'static str),
     AnswerOnEveryRequest(&'static str),
     Calls(Vec<AgentToolCall>),
+    Gated(Box<MockReply>, Arc<tokio::sync::Notify>),
     Pending,
     // An explicitly unresponsive provider may resume inference any number of
     // times. Unlike Calls, this tail is never consumed or replayed as an effect.
     PendingOnEveryRequest,
     FollowUp(&'static str),
     ReasoningOnly,
+    MalformedEmpty,
     Failure(&'static str),
 }
 
@@ -666,59 +668,6 @@ async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
     system.shutdown().await;
 }
 
-#[tokio::test]
-async fn yield_preserves_delivery_and_malformed_calls_do_not_silence_a_reply() {
-    for (arguments, silent) in [(json!({}), true), (json!({"content":"invalid"}), false)] {
-        let provider = Arc::new(ReplayProvider::new(vec![
-            MockReply::Calls(vec![AgentToolCall {
-                id: "yield-input".into(),
-                name: "actors__yield".into(),
-                arguments,
-            }]),
-            MockReply::Answer("This input still needs a reply."),
-        ]));
-        let (_dir, system) = runtime(provider.clone()).await;
-        let actor = system.actor("root").unwrap();
-        system.store().save_actor(&actor).unwrap();
-
-        let input = system
-            .send_user("root", "Process this update".into(), vec![], None)
-            .unwrap();
-        let completed = wait_completed(&system, &input.id).await;
-        assert_eq!(
-            completed.status,
-            MessageStatus::Completed,
-            "{:?}",
-            completed.error
-        );
-        assert_eq!(
-            completed.reply.as_deref(),
-            if silent {
-                None
-            } else {
-                Some("This input still needs a reply.")
-            }
-        );
-        assert_eq!(provider.requests.lock().len(), if silent { 1 } else { 2 });
-        assert!(
-            system
-                .store()
-                .approvals(Some("root"), None, 10)
-                .unwrap()
-                .items
-                .is_empty()
-        );
-        let tools = system
-            .store()
-            .tool_summaries("root", &input.id, None, 10)
-            .unwrap()
-            .items;
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].error.is_none(), silent);
-        system.shutdown().await;
-    }
-}
-
 async fn wait_passivated(system: &ActorSystem) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while system.resident_workers() != 0 {
@@ -823,33 +772,13 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
         }
         wait_passivated(&system).await;
     }
-    // Retirement/wake races must settle every bubble once and emit exactly one
-    // committed answer for each independently admitted batch.
     let messages = system.store().messages("root", None, 100).unwrap().items;
     assert_eq!(messages.len(), 24);
-    let batches: HashSet<_> = messages
-        .iter()
-        .map(|message| message.input_batch.as_deref().unwrap_or(&message.id))
-        .collect();
-    assert_eq!(
+    assert!(
         messages
             .iter()
-            .filter(|message| message.reply.is_some())
-            .count(),
-        batches.len()
+            .all(|message| message.status == MessageStatus::Completed)
     );
-    assert!(provider.requests.lock().len() >= batches.len());
-    let history = system.store().history("root", 4096).unwrap();
-    assert_eq!(
-        history
-            .iter()
-            .filter(|row| matches!(row,
-                AgentMessage::Assistant {content, ..} if content == "Done"
-            ))
-            .count(),
-        batches.len()
-    );
-    system.shutdown().await;
 }
 
 #[tokio::test]
@@ -935,7 +864,7 @@ async fn empty_model_responses_retry_inference_without_replaying_completed_tool_
             name: "files__write_file".into(),
             arguments: json!({"path":"once.txt","content":"ONE_EFFECT"}),
         }]),
-        MockReply::Answer(""),
+        MockReply::MalformedEmpty,
         MockReply::Answer("Completed after retry"),
     ]));
     let (_directory, system) = runtime(provider.clone()).await;
@@ -985,7 +914,7 @@ async fn empty_model_responses_retry_inference_without_replaying_completed_tool_
 #[tokio::test]
 async fn empty_model_response_retry_exhaustion_is_a_model_failure_with_private_diagnostics() {
     let provider = Arc::new(ReplayProvider::new(
-        (0..6).map(|_| MockReply::Answer("")).collect(),
+        (0..6).map(|_| MockReply::MalformedEmpty).collect(),
     ));
     let (_directory, system) = runtime(provider.clone()).await;
     let request = system
@@ -1073,13 +1002,7 @@ async fn queued_inputs_and_actor_replies_survive_beyond_the_former_mailbox_quota
             .unwrap();
     }
     let progress = system
-        .deliver_from_actor(
-            &child.id,
-            &request.id,
-            "progress",
-            "Independent result",
-            false,
-        )
+        .deliver_from_actor(&child.id, &request.id, "progress", "Independent result")
         .unwrap();
     assert!(
         system
@@ -1371,6 +1294,13 @@ impl ModelProvider for ReplayProvider {
         if let Some(gate) = gate {
             gate.notified().await;
         }
+        let reply = match reply {
+            MockReply::Gated(reply, gate) => {
+                gate.notified().await;
+                *reply
+            }
+            reply => reply,
+        };
         let bias = self.usage_bias.load(Ordering::Relaxed);
         if bias > 0 && !matches!(reply, MockReply::Pending | MockReply::PendingOnEveryRequest) {
             self.usage
@@ -1386,10 +1316,21 @@ impl ModelProvider for ReplayProvider {
             }
         }
         match reply {
+            MockReply::Gated(..) => unreachable!("nested test gates"),
             MockReply::Failure(error) => Err(miette!("{error}")),
+            MockReply::MalformedEmpty => Ok(AgentTurnStreamResult {
+                items: vec![],
+                raw_stream_follow_up: false,
+                end_turn: false,
+                last_assistant_message: None,
+                last_reasoning_content: None,
+                last_reasoning_signature: None,
+                responses_output: None,
+            }),
             MockReply::ReasoningOnly => Ok(AgentTurnStreamResult {
                 items: vec![],
                 raw_stream_follow_up: true,
+                end_turn: false,
                 last_assistant_message: None,
                 last_reasoning_content: Some("continue thinking".into()),
                 last_reasoning_signature: None,
@@ -1400,6 +1341,7 @@ impl ModelProvider for ReplayProvider {
             MockReply::FollowUp(text) => Ok(AgentTurnStreamResult {
                 items: vec![],
                 raw_stream_follow_up: true,
+                end_turn: false,
                 last_assistant_message: Some(text.into()),
                 last_reasoning_content: None,
                 last_reasoning_signature: None,
@@ -1411,6 +1353,7 @@ impl ModelProvider for ReplayProvider {
                 Ok(AgentTurnStreamResult {
                     items: vec![],
                     raw_stream_follow_up: false,
+                    end_turn: true,
                     last_assistant_message: Some(text.into()),
                     last_reasoning_content: None,
                     last_reasoning_signature: None,
@@ -1432,6 +1375,7 @@ impl ModelProvider for ReplayProvider {
                         .map(|call| crate::model_protocol::AgentTurnItem::ToolCall { call })
                         .collect(),
                     raw_stream_follow_up: true,
+                    end_turn: false,
                     last_assistant_message: Some("Inspecting".into()),
                     last_reasoning_content: Some("private reasoning".into()),
                     last_reasoning_signature: Some("provider signature".into()),
@@ -1909,17 +1853,22 @@ async fn two_device_small_control_round_trip_uses_no_content_transfer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn messages_route_to_a_busy_worker_on_another_device() {
+    let core_gate = Arc::new(tokio::sync::Notify::new());
+    let worker_gate = Arc::new(tokio::sync::Notify::new());
     let core_model = Arc::new(ReplayProvider::new(vec![]));
     let worker_model = Arc::new(ReplayProvider::new(vec![
-        MockReply::Pending,
-        MockReply::Answer("Remote task and guidance handled"),
+        MockReply::Gated(
+            Box::new(MockReply::Answer("Remote task handled")),
+            worker_gate.clone(),
+        ),
+        MockReply::Answer("Remote guidance handled"),
     ]));
     let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(core_model.clone(), worker_model.clone()).await;
     core_model.replies.lock().extend([
         MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__message".into(),
             arguments:json!({"reply_to":null,"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task"})}]),
-        MockReply::Pending,
+        MockReply::Gated(Box::new(MockReply::Calls(vec![AgentToolCall {id:"inspect-inbox".into(),name:"actors__list".into(),arguments:json!({"stage_id":null,"cursor":null,"limit":8})}])), core_gate.clone()),
     ]);
     let original = a
         .send_user("core", "Delegate remotely".into(), vec![], None)
@@ -1962,23 +1911,47 @@ async fn messages_route_to_a_busy_worker_on_another_device() {
             None,
         )
         .unwrap();
+    assert_eq!(
+        a.store().message(&update.id).unwrap().status,
+        MessageStatus::Queued
+    );
+    assert_eq!(core_model.requests.lock().len(), 2);
+    core_gate.notify_one();
     assert_eq!(wait_completed(&a, &update.id).await.reply, None);
     assert_eq!(
         wait_completed(&a, &original.id).await.reply.as_deref(),
         Some("Guidance sent")
     );
+    let guide = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(guide) = b
+                .store()
+                .messages("root", None, 10)
+                .unwrap()
+                .items
+                .into_iter()
+                .find(|message| message.content == "REMOTE_CORE_GUIDANCE")
+            {
+                break guide;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(guide.status, MessageStatus::Queued);
+    assert_eq!(worker_model.requests.lock().len(), 1);
+    worker_gate.notify_one();
     assert_eq!(
         wait_completed(&b, &target.id).await.reply.as_deref(),
-        Some("Remote task and guidance handled")
+        Some("Remote task handled")
     );
-    let guides = b.store().messages("root", None, 10).unwrap().items;
-    let guide = guides
-        .iter()
-        .find(|message| message.content == "REMOTE_CORE_GUIDANCE")
-        .unwrap();
-    assert_eq!(guide.status, MessageStatus::Completed);
+    assert_eq!(
+        wait_completed(&b, &guide.id).await.reply.as_deref(),
+        Some("Remote guidance handled")
+    );
     assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
-    assert!(worker_model.dropped.load(Ordering::Acquire));
+    assert!(!worker_model.dropped.load(Ordering::Acquire));
     assert!(worker_model.requests.lock()[1].messages.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("REMOTE_CORE_GUIDANCE") && content.as_text().contains("Source: Actor core"))));
     assert_eq!(b.execution_actor(&target).unwrap().config, policy);
     let result = a
@@ -2935,30 +2908,24 @@ async fn three_device_core_preserves_resources_context_and_effects_across_sequen
             None,
         )
         .unwrap();
-    // A fresh input enters inference while the original request remains open.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !model_a.requests.lock().iter().any(|request| {
-            request.messages.iter().any(|message| matches!(message,
-                AgentMessage::User { content }
-                    if content.as_text().contains("Keep the original request and answer in Chinese.")
-            ))
-        }) {
+        while a.store().message(&guidance.id).is_err() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("the new Core input did not supersede speculative inference");
+    .unwrap();
+    assert!(!model_a.requests.lock().iter().any(|request| request.messages.iter().any(|message| matches!(message,
+        AgentMessage::User { content } if content.as_text().contains("Keep the original request and answer in Chinese.")
+    ))));
     let original = a.store().message(&input.id).unwrap();
     assert_eq!(original.status, MessageStatus::Running);
     assert!(original.reply.is_none());
     assert!(original.error.is_none());
     let active = a.store().message(&guidance.id).unwrap();
-    assert!(matches!(
-        active.status,
-        MessageStatus::Queued | MessageStatus::Running
-    ));
+    assert_eq!(active.status, MessageStatus::Queued);
     assert_eq!(active.kind, MessageKind::Request);
-    assert!(model_a.dropped.load(Ordering::Acquire));
+    assert!(!model_a.dropped.load(Ordering::Acquire));
     net_a.stop().await;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -3252,7 +3219,6 @@ async fn remote_delegation_retains_readonly_authority() {
         reply_to: super::super::ReplyTarget::User,
         kind: super::super::MessageKind::Request,
         in_reply_to: None,
-        input_batch: None,
 
         remote_authority: None,
         content: "Delegate a read-only investigation".into(),
@@ -3479,9 +3445,9 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         MockReply::Calls(vec![AgentToolCall {
             id: "remote-progress".into(),
             name: "actors__reply".into(),
-            arguments: json!({"finish_turn":false,"content":"The file is written; checking the result."}),
+            arguments: json!({"content":"The file is written; checking the result."}),
         }]),
-        MockReply::Answer("Remote work is complete."),
+        MockReply::Answer(""),
     ]));
     let (_peer_dir, b) = runtime(peer_model.clone()).await;
     let b_id = b.store().public_stage_id().unwrap();
@@ -3493,7 +3459,6 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
         }]),
         MockReply::Answer("The task is delegated."),
         MockReply::Answer("The collaborator reported progress."),
-        MockReply::Answer("The delegated result arrived."),
     ]));
     let (_caller_dir, a) = runtime(caller_model.clone()).await;
     let a_id = a.store().public_stage_id().unwrap();
@@ -3671,36 +3636,29 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     receiver_a
         .prepare_content(&incoming_a, &reply, &manifest)
         .unwrap();
-    let bytes = ContentStore::new(b.store())
-        .chunk(a_id, "root", content, 0, now)
-        .unwrap();
-    receiver_a
-        .receive_content_chunk(&incoming_a, &reply, 0, &bytes)
-        .unwrap();
+    assert_eq!(content.size, 0);
     receiver_a.accept_cached_reply(&incoming_a, &reply).unwrap();
     receiver_a.accept_cached_reply(&incoming_a, &reply).unwrap();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let messages = a.store().messages("root", None, 100).unwrap().items;
-        if messages.iter().any(|message| {
-            message.kind == super::super::MessageKind::Result
-                && message.status == MessageStatus::Completed
-        }) {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(caller_model.requests.lock().len(), 4);
-    let reply_input = a
-        .store()
-        .messages("root", None, 100)
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|message| message.kind == super::super::MessageKind::Result)
-        .unwrap();
-    assert_eq!(reply_input.in_reply_to, Some(original.id));
+    assert_eq!(caller_model.requests.lock().len(), 3);
+    assert!(
+        !a.store()
+            .messages("root", None, 100)
+            .unwrap()
+            .items
+            .iter()
+            .any(|message| message.kind == MessageKind::Result)
+    );
+    assert!(
+        a.store()
+            .stage_transaction(|tx| {
+                Ok(tx.query_row(
+                    "SELECT completed FROM stage_outbox WHERE peer=?1 AND invocation=?2",
+                    rusqlite::params![b_id.to_string(), invocation.to_string()],
+                    |row| row.get::<_, bool>(0),
+                )?)
+            })
+            .unwrap()
+    );
     let mut foreign = a.actor("root").unwrap();
     foreign.id = "foreign-root".into();
     foreign.parent_id = None;
@@ -3955,7 +3913,6 @@ fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
                 reply_to: super::super::ReplyTarget::User,
                 kind: super::super::MessageKind::Request,
                 in_reply_to: None,
-                input_batch: None,
 
                 remote_authority: None,
                 content: content.into(),
@@ -4239,17 +4196,14 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         delegated.id
     );
     let routed = system
+        .deliver_from_actor(&child.id, &delegated.id, "report", "Delegated result")
+        .unwrap();
+    system
         .store()
-        .finish_message(
-            &delegated.id,
-            MessageStatus::Completed,
-            Some("Delegated result"),
-            None,
-        )
-        .unwrap()
+        .finish_message(&delegated.id, MessageStatus::Completed, None, None)
         .unwrap();
     assert_eq!(routed.actor_id, "root");
-    assert_eq!(routed.kind, MessageKind::Result);
+    assert_eq!(routed.kind, MessageKind::Progress);
     assert_eq!(routed.content, "Delegated result");
     assert_eq!(routed.in_reply_to.as_deref(), Some(original.id.as_str()));
     assert!(matches!(routed.reply_to, ReplyTarget::User));
@@ -4257,18 +4211,15 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         system.store().claim_next(&child.id).unwrap().unwrap().id,
         direct.id
     );
-    assert!(
-        system
-            .store()
-            .finish_message(
-                &direct.id,
-                MessageStatus::Completed,
-                Some("Direct user result"),
-                None
-            )
-            .unwrap()
-            .is_none()
-    );
+    system
+        .store()
+        .finish_message(
+            &direct.id,
+            MessageStatus::Completed,
+            Some("Direct user result"),
+            None,
+        )
+        .unwrap();
     assert_eq!(
         system.store().message(&direct.id).unwrap().reply.as_deref(),
         Some("Direct user result")
@@ -4623,14 +4574,11 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
         )
         .unwrap();
     let to_parent = system
+        .deliver_from_actor(&deep.id, &request.id, "report", &format!("[Report]({uri})"))
+        .unwrap();
+    system
         .store()
-        .finish_message(
-            &request.id,
-            MessageStatus::Completed,
-            Some(&format!("[Report]({uri})")),
-            None,
-        )
-        .unwrap()
+        .finish_message(&request.id, MessageStatus::Completed, None, None)
         .unwrap();
     assert_eq!(to_parent.attachments.len(), 1);
     assert_eq!(to_parent.actor_id, parent.id);
@@ -4649,14 +4597,11 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
         to_parent.id
     );
     let to_root = system
+        .deliver_from_actor(&parent.id, &to_parent.id, "forward", &to_parent.content)
+        .unwrap();
+    system
         .store()
-        .finish_message(
-            &to_parent.id,
-            MessageStatus::Completed,
-            Some(&to_parent.content),
-            None,
-        )
-        .unwrap()
+        .finish_message(&to_parent.id, MessageStatus::Completed, None, None)
         .unwrap();
     assert_eq!(to_root.actor_id, "root");
     assert_eq!(to_root.in_reply_to.as_deref(), Some(original.id.as_str()));
@@ -5036,6 +4981,7 @@ fn duplicate_calls_are_rejected_before_any_effect() {
         reasoning_signature: None,
         responses_output: None,
         raw_stream_follow_up: true,
+        end_turn: false,
     };
     assert!(validate_response_calls(&response).is_err());
 }
@@ -5187,7 +5133,7 @@ async fn failed_or_invalid_handoff_never_resets_context_or_executes_tools() {
             vec![MockReply::Failure("invalid_request_error: handoff failed")],
             1,
         ),
-        ((0..6).map(|_| MockReply::Answer("")).collect(), 6),
+        (vec![MockReply::Answer("")], 1),
         (vec![MockReply::Calls(vec![call("must-not-execute")])], 1),
     ] {
         let provider = Arc::new(ReplayProvider::new(replies));
@@ -5479,96 +5425,6 @@ async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::
 }
 
 #[tokio::test]
-async fn core_new_user_input_preempts_thinking_without_losing_context_or_completed_effects() {
-    let provider = Arc::new(ReplayProvider::new(vec![]));
-    let (_dir, system) = runtime(provider.clone()).await;
-    let network = start_core_fixture(&system).await;
-    provider.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "create-once-before-new-input".into(),
-            name: "actors__create".into(),
-            arguments: json!({"stage_id":network.host.local,"name":"Retained worker","workspace":null,"instructions":null,"model":"mock","initial_authorization":null}),
-        }]),
-        MockReply::Pending,
-        MockReply::Answer("Both messages are now considered."),
-    ]);
-    let original = system
-        .send_user("core", "Prepare a worker, then think.".into(), vec![], None)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while provider.requests.lock().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("Core did not reach its pending inference");
-    let update = system
-        .send_user(
-            "core",
-            "Consider this new message immediately.".into(),
-            vec![],
-            Some("im-update".into()),
-        )
-        .unwrap();
-    // Acceptance and conversation visibility do not wait for the old model.
-    assert!(
-        system
-            .store()
-            .messages("core", None, 30)
-            .unwrap()
-            .items
-            .iter()
-            .any(|item| item.id == update.id)
-    );
-    let retry = system
-        .send_user(
-            "core",
-            update.content.clone(),
-            vec![],
-            Some("im-update".into()),
-        )
-        .unwrap();
-    assert_eq!(retry.id, update.id);
-    let done = wait_core_completed(&system, &update.id).await;
-    assert_eq!(done.reply, None);
-    let previous = wait_core_completed(&system, &original.id).await;
-    assert_eq!(previous.status, MessageStatus::Completed);
-    assert_eq!(
-        previous.reply.as_deref(),
-        Some("Both messages are now considered.")
-    );
-    assert!(previous.error.is_none() && !previous.cancel_requested);
-    assert!(
-        provider.dropped.load(Ordering::Acquire),
-        "The obsolete model request must be dropped"
-    );
-    {
-        let requests = provider.requests.lock();
-        assert_eq!(requests.len(), 3);
-        let history = &requests[2].messages;
-        for text in [&original.content, &update.content] {
-            assert!(history.iter().any(|row| matches!(row, AgentMessage::User { content } if content.as_text().contains(text.as_str()))));
-        }
-        assert!(history.iter().any(|row| matches!(row, AgentMessage::Tool { tool_call_id, .. } if tool_call_id == "create-once-before-new-input")));
-    }
-    let workers: Vec<_> = system
-        .store()
-        .actors()
-        .unwrap()
-        .into_iter()
-        .filter(|actor| actor.config.name == "Retained worker")
-        .collect();
-    assert_eq!(
-        workers.len(),
-        1,
-        "Completed App effects must not be replayed"
-    );
-    assert_eq!(workers[0].status, ActorStatus::Idle);
-    network.stop().await;
-    system.shutdown().await;
-}
-
-#[tokio::test]
 async fn core_import_routes_through_device_permissions_and_never_starts_the_imported_actor() {
     let provider = Arc::new(ReplayProvider::new(vec![]));
     let (_dir, system) = runtime(provider.clone()).await;
@@ -5656,7 +5512,7 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
         MockReply::Calls(vec![AgentToolCall {
             id: "early".into(),
             name: "actors__reply".into(),
-            arguments: json!({"content":"I have started coordinating.","finish_turn":false}),
+            arguments: json!({"content":"I have started coordinating."}),
         }]),
         MockReply::Pending,
     ]));
@@ -5700,7 +5556,7 @@ async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
     system.cancel("core", &input.id).unwrap();
     assert!(
         system
-            .deliver_from_actor("core", &input.id, "late", "Too late", false)
+            .deliver_from_actor("core", &input.id, "late", "Too late")
             .is_err()
     );
     network.stop().await;
@@ -5720,305 +5576,6 @@ impl ModelFactory for CoordinatorFactory {
         })
     }
 }
-#[tokio::test]
-async fn core_yields_after_delegating_and_silently_receives_progress_while_worker_runs() {
-    let dir = crate::sandbox::test_support::scoped_directory();
-    let workspace = dir.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let core = Arc::new(ReplayProvider::new(vec![]));
-    let worker = Arc::new(ReplayProvider::new(vec![
-        MockReply::Calls(vec![AgentToolCall {
-            id: "progress".into(),
-            name: "actors__reply".into(),
-            arguments: json!({"finish_turn":false,"content":"Found the cause; repair is still running."}),
-        }]),
-        MockReply::Pending,
-    ]));
-    let release_progress = Arc::new(tokio::sync::Notify::new());
-    *worker.inference_gate.lock() = Some(release_progress.clone());
-    let mut config = runtime_config();
-    config
-        .models
-        .insert("worker".into(), config.models["mock"].clone());
-    let system = ActorSystem::open_with_factory(
-        dir.path().join("data"),
-        workspace,
-        config,
-        Arc::new(CoordinatorFactory {
-            core: core.clone(),
-            worker: worker.clone(),
-        }),
-    )
-    .await
-    .unwrap();
-    if system.actor("root").is_err() {
-        system.seed_test_actor("root");
-    }
-    let root = system.actor("root").unwrap();
-
-    system.store().save_actor(&root).unwrap();
-    let network = start_core_fixture(&system).await;
-    let mut child_config = project_config(&system, "Hosted worker");
-    child_config.model = Some("worker".into());
-    let child = system.create_owned("root", child_config).unwrap();
-    let stage = system.store().public_stage_id().unwrap();
-    core.replies.lock().extend([
-        MockReply::Calls(vec![
-            AgentToolCall{id:"delegate".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"stage_id":stage,"actor_id":child.id,"content":"Investigate and repair"})},
-            AgentToolCall{id:"ack".into(),name:"actors__reply".into(),arguments:json!({"content":"The worker is investigating.","finish_turn":true})},
-        ]),
-        MockReply::Answer("Your second message has been handled."),
-        MockReply::Calls(vec![AgentToolCall{id:"absorb-update".into(),name:"actors__yield".into(),arguments:json!({})}]),
-    ]);
-    let first = system
-        .send_user("core", "Investigate".into(), vec![], None)
-        .unwrap();
-    // The second input must arrive after dispatch has actually happened. An
-    // input received during speculative inference now supersedes that inference.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if system
-                .store()
-                .tool_summaries("core", &first.id, None, 10)
-                .unwrap()
-                .items
-                .iter()
-                .any(|tool| tool.call_id == "delegate" && tool.error.is_none())
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("Core did not dispatch the delegated work");
-    let second = system
-        .send_user("core", "Meanwhile, answer this".into(), vec![], None)
-        .unwrap();
-    let done = wait_core_completed(&system, &first.id).await;
-    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
-    assert_eq!(done.reply.as_deref(), Some(""));
-    assert_eq!(
-        wait_core_completed(&system, &second.id)
-            .await
-            .reply
-            .as_deref(),
-        Some("Your second message has been handled.")
-    );
-    // Exercise progress while the worker stays active, after the second Owner
-    // input settles. The mock's three responses describe these three inputs,
-    // rather than depending on scheduler ordering between Owner and progress.
-    release_progress.notify_one();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let messages = system.store().messages("core", None, 100).unwrap().items;
-            if messages
-                .iter()
-                .any(|m| m.kind == MessageKind::Progress && m.status == MessageStatus::Completed)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        core.requests.lock().len(),
-        3,
-        "finish_turn must not make an extra inference"
-    );
-    let task = system
-        .store()
-        .running_message(&child.id)
-        .unwrap()
-        .expect("worker remains active");
-    assert_eq!(
-        task.source,
-        MessageSource::Actor {
-            actor_id: "core".into()
-        }
-    );
-    let progress = system
-        .store()
-        .messages("core", None, 100)
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|m| m.kind == MessageKind::Progress)
-        .unwrap();
-    assert_eq!(progress.in_reply_to.as_deref(), Some(first.id.as_str()));
-    assert_eq!(
-        progress.source,
-        MessageSource::Actor {
-            actor_id: child.id.clone()
-        }
-    );
-    assert!(progress.content.contains("repair is still running"));
-    assert_eq!(progress.reply, None);
-    let messages = system.store().messages("core", None, 100).unwrap().items;
-    let deliveries: Vec<_> = messages
-        .iter()
-        .filter(|m| m.kind == MessageKind::Delivery)
-        .collect();
-    assert_eq!(
-        deliveries.len(),
-        1,
-        "The routine update must not produce a user message"
-    );
-    assert_eq!(
-        deliveries[0].reply.as_deref(),
-        Some("The worker is investigating.")
-    );
-
-    network.stop().await;
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn coordinator_yields_between_required_results_and_routes_only_progress_then_final() {
-    let (_directory, system, provider) = paused_runtime().await;
-    let mut config = project_config(&system, "Argus");
-    config.apps.push("actors".into());
-    let coordinator = system.create_owned("root", config).unwrap();
-    let mut config = coordinator.config.clone();
-    config.name = "First collaborator".into();
-    let first = system
-        .create_owned(&coordinator.id, config.clone())
-        .unwrap();
-    config.name = "Second collaborator".into();
-    let second = system.create_owned(&coordinator.id, config).unwrap();
-    let original = system
-        .send_user(
-            "root",
-            "Analyze both areas, then give one report".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    system.store().claim_next("root").unwrap().unwrap();
-    let request = system
-        .message_from_actor(
-            "root",
-            &original.id,
-            &coordinator.id,
-            "Reconcile both required reviews".into(),
-        )
-        .unwrap();
-    system
-        .store()
-        .finish_message(&original.id, MessageStatus::Completed, None, None)
-        .unwrap();
-    provider.replies.lock().extend([
-        MockReply::Calls(vec![
-            AgentToolCall{id:"first-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":first.id,"stage_id":null,"content":"Review the first area"})},
-            AgentToolCall{id:"second-review".into(),name:"actors__message".into(),arguments:json!({"reply_to":null,"actor_id":second.id,"stage_id":null,"content":"Review the second area"})},
-            AgentToolCall{id:"brief-progress".into(),name:"actors__reply".into(),arguments:json!({"finish_turn":false,"content":"Both reviews are underway."})},
-            AgentToolCall{id:"wait-for-reviews".into(),name:"actors__yield".into(),arguments:json!({})},
-            // Even a call after yield receives its observation before the boundary.
-            AgentToolCall{id:"read-context".into(),name:"actors__read_history".into(),arguments:json!({"cursor":null,"message_id":null,"scope":null,"related_cursor":null,"limit":1})},
-        ]),
-        MockReply::Calls(vec![AgentToolCall{id:"first-review-received".into(),name:"actors__yield".into(),arguments:json!({})}]),
-        MockReply::Answer("Combined report: area one is correct; area two needs a correction."),
-    ]);
-
-    async fn advance(system: &ActorSystem, actor: &str) -> MessageRecord {
-        let input = system.store().claim_next(actor).unwrap().unwrap();
-        let record = system.execution_actor(&input).unwrap();
-        let mut apps =
-            builtin_apps::create_apps(&record, system.clone(), &system.config()).unwrap();
-        let reply = execute_message(system, &record, &input, &ActorControl::default(), &mut apps)
-            .await
-            .unwrap();
-        system
-            .store()
-            .finish_message(&input.id, MessageStatus::Completed, reply.as_deref(), None)
-            .unwrap();
-        apps.shutdown().await.unwrap();
-        system.store().message(&input.id).unwrap()
-    }
-
-    let yielded = advance(&system, &coordinator.id).await;
-    assert_eq!(yielded.id, request.id);
-    assert_eq!(yielded.reply, None);
-    let observations = system
-        .store()
-        .tool_summaries(&coordinator.id, &request.id, None, 10)
-        .unwrap()
-        .items;
-    assert_eq!(observations.len(), 5);
-    assert!(
-        observations.iter().all(|tool| tool.error.is_none()),
-        "{observations:?}"
-    );
-    let updates = system.store().messages("root", None, 100).unwrap().items;
-    assert_eq!(updates.len(), 2);
-    assert_eq!(updates[1].kind, MessageKind::Progress);
-    assert_eq!(updates[1].content, "Both reviews are underway.");
-
-    let input = system.store().claim_next(&first.id).unwrap().unwrap();
-    system
-        .store()
-        .finish_message(
-            &input.id,
-            MessageStatus::Completed,
-            Some("Area one is correct."),
-            None,
-        )
-        .unwrap();
-    assert_eq!(advance(&system, &coordinator.id).await.reply, None);
-    assert_eq!(
-        system
-            .store()
-            .messages("root", None, 100)
-            .unwrap()
-            .items
-            .len(),
-        2,
-        "The first contribution must not trigger a partial final report or acknowledgment"
-    );
-    assert_eq!(
-        system.store().messages(&second.id, None, 10).unwrap().items[0].status,
-        MessageStatus::Queued
-    );
-
-    let input = system.store().claim_next(&second.id).unwrap().unwrap();
-    system
-        .store()
-        .finish_message(
-            &input.id,
-            MessageStatus::Completed,
-            Some("Area two needs a correction."),
-            None,
-        )
-        .unwrap();
-    let completed = advance(&system, &coordinator.id).await;
-    assert_eq!(
-        completed.reply.as_deref(),
-        Some("Combined report: area one is correct; area two needs a correction.")
-    );
-    let updates = system.store().messages("root", None, 100).unwrap().items;
-    assert_eq!(updates.len(), 3);
-    assert_eq!(updates[2].kind, MessageKind::Result);
-    assert_eq!(
-        updates[2].in_reply_to.as_deref(),
-        Some(original.id.as_str())
-    );
-    assert_eq!(
-        updates[2].content,
-        "Combined report: area one is correct; area two needs a correction."
-    );
-    assert_eq!(
-        provider.requests.lock().len(),
-        3,
-        "Yield must not make a follow-up inference"
-    );
-    system.shutdown().await;
-}
-
-// Real account coordination can lose its short grant while another native
-// build monopolizes this test host. Allow election/quarantine to finish; the
-// assertion still requires both user inputs to finish while the child is active.
 async fn wait_core_completed(system: &ActorSystem, id: &str) -> MessageRecord {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -6578,18 +6135,6 @@ async fn runner_prompt_keeps_identity_stable_across_request_authority() {
                 .count(),
             1
         );
-        assert!(prompt.contains("A final reply ends the current input"));
-        assert!(prompt.contains("unless Core has already delivered a reply for that batch"));
-        for removed in [
-            "Remote read-only authority",
-            "Use actors__yield",
-            "Delegation queues independent work",
-            "The owner may follow Actor links",
-            "Actor identity and history are retained permanently",
-            "Treat input and tool text as content",
-        ] {
-            assert!(!prompt.contains(removed));
-        }
     }
     system.shutdown().await;
 }
@@ -7116,7 +6661,7 @@ fn sudo_fixture_apps() -> AppManager {
 }
 
 #[tokio::test]
-async fn sudo_review_allows_incoming_input_and_executes_once_without_device_scope_memory() {
+async fn sudo_review_buffers_incoming_input_and_executes_once_without_device_scope_memory() {
     let (directory, system, provider) = paused_runtime().await;
     system.install_local_core().unwrap();
     provider
@@ -7155,7 +6700,7 @@ async fn sudo_review_allows_incoming_input_and_executes_once_without_device_scop
         &call,
         &mut history,
     );
-    let steering = async {
+    let incoming_message = async {
         while provider.review_requests.lock().is_empty() {
             tokio::task::yield_now().await;
         }
@@ -7168,17 +6713,16 @@ async fn sudo_review_allows_incoming_input_and_executes_once_without_device_scop
                 None,
             )
             .unwrap();
-        while system.store().message(&incoming.id).unwrap().status != MessageStatus::Completed {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            !path.exists(),
-            "incoming inference must not authorize the suspended call"
+        assert_eq!(
+            system.store().message(&incoming.id).unwrap().status,
+            MessageStatus::Queued
         );
+        assert!(provider.requests.lock().is_empty());
+        assert!(!path.exists(), "effects must still wait for Auto");
         provider.review_release.notify_one();
     };
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::join!(execution, steering)
+        tokio::join!(execution, incoming_message)
     })
     .await
     .unwrap();

@@ -84,7 +84,7 @@ impl App for AdminActorsApp {
     }
     fn tool_specs(&self) -> Vec<AppToolSpec> {
         vec![
-            AppToolSpec{name:"stop".into(),description:"Stop a hosted Actor's entire current execution, including pending and suspended inputs, and wait for cleanup. Preserve identity, history and completed effects. Core cannot be targeted.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
+            AppToolSpec{name:"stop".into(),description:"Stop a hosted Actor's entire current execution, including buffered messages and running work, and wait for cleanup. Preserve identity, history and completed effects. Core cannot be targeted.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"archive".into(),description:"Archive a hosted Actor only on an explicit Owner request. Discard queued inputs, leave running work to finish, preserve history and reject new messages. Core cannot be archived.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"unarchive".into(),description:"Unarchive a hosted Actor only on an explicit Owner request, without replaying discarded inputs.".into(),input_schema:model_schema_for::<ActorTargetArgs>()},
             AppToolSpec{name:"resolve_approval_appeal".into(),description:"Resolve an immutable permission appeal from the user's authorization. Ask when authorization is missing or unclear. Approval remembers the original scopes and notifies the Actor without executing its operation.".into(),input_schema:model_schema_for::<ResolveApprovalAppealArgs>()},

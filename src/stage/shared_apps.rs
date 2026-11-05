@@ -59,7 +59,6 @@ impl App for AccountApp {
             "read_history"
                 | "read_resource"
                 | "reply"
-                | "yield"
                 | "appeal_approval"
                 | "resolve_approval_appeal"
                 | "devices"

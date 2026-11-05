@@ -1255,6 +1255,7 @@ struct AnthropicStreamState {
     cache_creation_input_tokens: i64,
     output_tokens: i64,
     completed: bool,
+    stop_reason: Option<String>,
     assistant_char_len: usize,
     reasoning_char_len: usize,
     pending_assistant: String,
@@ -1363,6 +1364,9 @@ impl AnthropicStreamState {
                 }
             }
             "message_delta" => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.stop_reason = Some(reason.into());
+                }
                 if let Some(usage) = value.get("usage") {
                     self.output_tokens = usage
                         .get("output_tokens")
@@ -1531,6 +1535,7 @@ impl AnthropicStreamState {
         AgentTurnStreamResult {
             items,
             raw_stream_follow_up: tool_call_count > 0,
+            end_turn: tool_call_count == 0 && self.stop_reason.as_deref() == Some("end_turn"),
             last_assistant_message: assistant_message,
             last_reasoning_content: non_empty_string(self.reasoning_text()),
             last_reasoning_signature: self.reasoning_signature(),
@@ -1730,11 +1735,18 @@ mod tests {
         let start = json!({"type":"message_start","message":{"id":"msg_empty","usage":{"input_tokens":663}}});
         let stop = json!({"type":"message_stop"});
         let delta = json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}});
+        let response = test_sse_response(&[start.clone(), delta, stop.clone()], false).await;
+        let silent = client
+            .parse_messages_stream(&options, response, false)
+            .await
+            .unwrap();
+        assert!(silent.end_turn);
+        assert!(silent.protocol().final_assistant_message.is_none());
         let cases = [
             (vec![], false, "before message_stop"),
             (vec![], true, "before message_stop"),
             (
-                vec![start.clone(), delta, stop.clone()],
+                vec![start.clone(), stop.clone()],
                 false,
                 "no assistant text",
             ),
@@ -1790,14 +1802,6 @@ mod tests {
             assert_eq!(diagnostics["outcome"], "error");
             if !events.is_empty() {
                 assert_eq!(client.token_usage_info().last_token_usage.input_tokens, 663);
-            }
-            if expected == "no assistant text" {
-                assert_eq!(diagnostics["terminal_event"], "message_stop");
-                assert_eq!(diagnostics["stop_reason"], "end_turn");
-                assert_eq!(diagnostics["upstream_id"], "msg_empty");
-                assert_eq!(diagnostics["events"], 3);
-                assert_eq!(diagnostics["input_tokens"], 663);
-                assert_eq!(diagnostics["output_tokens"], 0);
             }
             assert!(!detail.contains("private-session") && !detail.contains("do-not-log"));
         }

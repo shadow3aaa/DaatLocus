@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn model_wait_has_no_total_deadline_and_keeps_stop_and_cancel_responsive() {
-    for action in ["complete", "cancel", "stop", "steer"] {
+    for action in ["complete", "cancel", "stop", "buffer"] {
         let (_directory, system, provider) = paused_runtime().await;
         let gate = Arc::new(tokio::sync::Notify::new());
         *provider.inference_gate.lock() = Some(gate.clone());
@@ -56,10 +56,13 @@ async fn model_wait_has_no_total_deadline_and_keeps_stop_and_cancel_responsive()
                 system.cancel("root", &input_id).unwrap();
             }
             "stop" => control.stop.store(true, Ordering::Release),
-            "steer" => {
+            "buffer" => {
                 system
                     .send_user("root", "New direction".into(), vec![], None)
                     .unwrap();
+                tokio::task::yield_now().await;
+                assert!(!task.is_finished());
+                gate.notify_one();
             }
             _ => unreachable!(),
         }
@@ -68,7 +71,7 @@ async fn model_wait_has_no_total_deadline_and_keeps_stop_and_cancel_responsive()
             .await
             .unwrap()
             .unwrap();
-        if action == "complete" {
+        if action == "complete" || action == "buffer" {
             assert_eq!(
                 outcome.unwrap().unwrap().last_assistant_message.as_deref(),
                 Some("Long inference completed")

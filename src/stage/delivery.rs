@@ -268,12 +268,12 @@ impl<'a> Deliveries<'a> {
             let previous:Option<(String,Option<String>)>=tx.query_row("SELECT digest,local_message FROM stage_delivery_receipts WHERE peer=?1 AND message=?2",params![peer.to_string(),frame.message_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((previous,message))=previous{if previous!=hash{return Err(StageError::Conflict("Delivery retry changed content"));}return Ok(message);}
             let source=sent(tx,peer,*invocation)?;
-            let message=if let Some(request)=&source.request_id{
+            let message=if let Some(request)=source.request_id.as_ref().filter(|_| !text.trim().is_empty()){
                 let data:String=tx.query_row("SELECT record FROM messages WHERE id=?1 AND actor_id=?2",params![request,source.local_actor],|r|r.get(0)).optional()?.ok_or(StageError::Forbidden("Originating request is unavailable"))?;
                 let original:MessageRecord=parse(data)?;
                 let mut read_only=source.read_only;
                 if matches!(frame.body,Body::Delivery{state:InvocationState::ResultUnknown,..}) {read_only=true;}
-                let input=MessageRecord{skills: Vec::new(),seq:0,id:Uuid::new_v4().to_string(),actor_id:source.local_actor.clone(),source:MessageSource::RemoteActor{stage_id:peer,actor_id:actor.actor_id.clone(),invocation_id:*invocation},reply_to:original.reply_to,kind:if matches!(frame.body,Body::Delivery{state:InvocationState::Running,..}){MessageKind::Progress}else{MessageKind::Result},in_reply_to:Some(original.id),input_batch:None,remote_authority:Some(RemoteAuthority{peer,read_only,origin_actor:source.local_actor,reply_for:Some(*invocation)}),content:text,attachments:vec![],status:MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
+                let input=MessageRecord{skills: Vec::new(),seq:0,id:Uuid::new_v4().to_string(),actor_id:source.local_actor.clone(),source:MessageSource::RemoteActor{stage_id:peer,actor_id:actor.actor_id.clone(),invocation_id:*invocation},reply_to:original.reply_to,kind:if matches!(frame.body,Body::Delivery{state:InvocationState::Running,..}){MessageKind::Progress}else{MessageKind::Result},in_reply_to:Some(original.id),remote_authority:Some(RemoteAuthority{peer,read_only,origin_actor:source.local_actor,reply_for:Some(*invocation)}),content:text,attachments:vec![],status:MessageStatus::Queued,cancel_requested:false,started_at_ms:None,finished_at_ms:None,final_generation:None,reply:None,error:None,created_at_ms:now,updated_at_ms:now};
                 Some(crate::actors::store::insert_message(tx,input).map_err(|_|StageError::Unavailable("Reply inbox could not be persisted"))?.id)
             }else{None};
             tx.execute("INSERT INTO stage_delivery_receipts(peer,message,digest,local_message,expires) VALUES(?1,?2,?3,?4,?5)",params![peer.to_string(),frame.message_id.to_string(),hash,message,frame.expires_at_ms])?;Ok(message)
@@ -301,8 +301,17 @@ pub(crate) fn finished(tx: &Transaction<'_>, message: &MessageRecord) -> Result<
     ) {
         return Ok(());
     }
-    let Some(text) = message.reply.as_deref().or(message.error.as_deref()) else {
-        return Ok(());
+    let text = if message.kind != MessageKind::Delivery
+        && message.status == MessageStatus::Completed
+        && matches!(message.reply_to, ReplyTarget::Remote { user: false, .. })
+    {
+        ""
+    } else {
+        message
+            .reply
+            .as_deref()
+            .or(message.error.as_deref())
+            .unwrap_or_default()
     };
     let local: String =
         tx.query_row("SELECT value FROM stage_meta WHERE key='local'", [], |r| {
@@ -327,7 +336,10 @@ pub(crate) fn finished(tx: &Transaction<'_>, message: &MessageRecord) -> Result<
         version: 1,
     };
     reference.validate()?;
-    tx.execute(
+    if text.is_empty() {
+        super::blob::put(tx, &message.actor_id, b"")?;
+    } else {
+        tx.execute(
         "INSERT OR IGNORE INTO stage_content_sources(actor,hash,message,field) VALUES(?1,?2,?3,?4)",
         params![
             message.actor_id,
@@ -340,6 +352,7 @@ pub(crate) fn finished(tx: &Transaction<'_>, message: &MessageRecord) -> Result<
             }
         ],
     )?;
+    }
     let frame = Envelope {
         version: 1,
         source: local,

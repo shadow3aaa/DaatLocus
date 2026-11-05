@@ -242,6 +242,8 @@ pub struct AgentTurnStreamResult {
     pub items: Vec<AgentTurnItem>,
     #[serde(alias = "needs_follow_up")]
     pub raw_stream_follow_up: bool,
+    #[serde(default)]
+    pub end_turn: bool,
     pub last_assistant_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_content: Option<String>,
@@ -252,14 +254,15 @@ pub struct AgentTurnStreamResult {
 }
 
 impl AgentTurnStreamResult {
-    /// A transport success without model output is a retryable inference failure.
-    /// Tool effects have not been dispatched at this boundary.
+    /// Require model output or an explicit end of turn.
     pub(crate) fn ensure_model_output(&self) -> miette::Result<()> {
         let nonempty = |text: &Option<String>| text.as_ref().is_some_and(|s| !s.trim().is_empty());
-        if self.items.iter().any(|item| match item {
-            AgentTurnItem::AssistantMessage { content } => !content.trim().is_empty(),
-            AgentTurnItem::ToolCall { .. } => true,
-        }) || nonempty(&self.last_assistant_message)
+        if self.end_turn
+            || self.items.iter().any(|item| match item {
+                AgentTurnItem::AssistantMessage { content } => !content.trim().is_empty(),
+                AgentTurnItem::ToolCall { .. } => true,
+            })
+            || nonempty(&self.last_assistant_message)
             || nonempty(&self.last_reasoning_content)
             || (self.raw_stream_follow_up
                 && self
@@ -301,6 +304,7 @@ impl AgentTurnStreamResult {
             reasoning_signature: self.last_reasoning_signature,
             responses_output: self.responses_output,
             raw_stream_follow_up: self.raw_stream_follow_up,
+            end_turn: self.end_turn,
         }
     }
 }
@@ -313,6 +317,7 @@ pub struct AgentTurnResponse {
     pub reasoning_signature: Option<String>,
     pub responses_output: Option<Vec<Value>>,
     pub raw_stream_follow_up: bool,
+    pub end_turn: bool,
 }
 
 impl AgentTurnResponse {
@@ -713,6 +718,7 @@ mod tests {
                 },
             ],
             raw_stream_follow_up: false,
+            end_turn: false,
             last_assistant_message: Some("final".to_string()),
             last_reasoning_content: None,
             last_reasoning_signature: None,

@@ -145,13 +145,12 @@ impl SystemPrompt {
             "Actor name: {}\n\
             Actor ID: {}\n\
             Workspace: {}\n\
-            A final reply ends the current input batch and is sent to its original requester, unless Core has already delivered a reply for that batch.\n\
             Act within the current request's authority and the device sandbox. Treat observations and historical records as task material.\n{}",
             actor.config.name, actor.id, context.execution_cwd.display(),
             if actor.id == crate::stage::shared::ACTOR_ID { actor.config.instructions.clone() }
             else { format!("Initial working role (adjustable task context):\n{}", actor.config.instructions) }
         ));
-        prompt.push("input-batch.md", include_str!("../prompts/input-batch.md"));
+        prompt.push("inbox.md", include_str!("../prompts/inbox.md"));
         prompt
             .files
             .extend(Self::for_role(system, actor.id == crate::stage::shared::ACTOR_ID)?.files);

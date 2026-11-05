@@ -275,6 +275,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
         return Ok(AgentTurnStreamResult {
             items,
             raw_stream_follow_up: true,
+            end_turn: false,
             last_assistant_message: assistant_message,
             last_reasoning_content: reasoning_content,
             last_reasoning_signature: None,
@@ -294,6 +295,7 @@ pub(super) fn parse_agent_turn_stream_result_from_json(
             .map(|content| AgentTurnItem::AssistantMessage { content })
             .collect(),
         raw_stream_follow_up: false,
+        end_turn: response_json["choices"][0]["finish_reason"] == "stop",
         last_assistant_message,
         last_reasoning_content: reasoning_content,
         last_reasoning_signature: None,
