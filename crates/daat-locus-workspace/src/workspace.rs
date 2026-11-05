@@ -133,7 +133,7 @@ impl Store {
         {
             let mut insert =
                 transaction.prepare("INSERT INTO workspace_live_objects VALUES(?1)")?;
-            for id in live {
+            for id in live.into_keys() {
                 insert.execute([id.0])?;
             }
         }
@@ -755,24 +755,54 @@ fn validate_branch(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn reachable(transaction: &Connection, mut pending: Vec<ObjectId>) -> Result<BTreeSet<ObjectId>> {
-    let mut live = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !live.insert(id.clone()) {
+fn reachable(
+    transaction: &Connection,
+    mut pending: Vec<ObjectId>,
+) -> Result<BTreeMap<ObjectId, u64>> {
+    let mut live = BTreeMap::new();
+    while !pending.is_empty() {
+        let mut batch = pending.split_off(pending.len().saturating_sub(256));
+        batch.retain(|id| {
+            if let std::collections::btree_map::Entry::Vacant(entry) = live.entry(id.clone()) {
+                entry.insert(0);
+                true
+            } else {
+                false
+            }
+        });
+        if batch.is_empty() {
             continue;
         }
-        let domain: u8 =
-            transaction.query_row("SELECT domain FROM objects WHERE id=?1", [&id.0], |row| {
-                row.get(0)
-            })?;
-        match domain {
-            0 => {}
-            1 => {
-                let node = Node::load(transaction, &id)?;
-                pending.extend(node.children.into_values());
-                pending.extend(node.blocks);
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let metadata = transaction
+            .prepare_cached(&format!(
+                "SELECT id,domain,length(data) FROM objects WHERE id IN ({placeholders})"
+            ))?
+            .query_map(
+                rusqlite::params_from_iter(batch.iter().map(|id| &id.0)),
+                |row| {
+                    Ok((
+                        ObjectId(row.get(0)?),
+                        row.get::<_, u8>(1)?,
+                        row.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if metadata.len() != batch.len() {
+            return Err(missing("referenced workspace object"));
+        }
+        for (id, domain, size) in metadata {
+            live.insert(id.clone(), size);
+            match domain {
+                0 => {}
+                1 => {
+                    let node = Node::load(transaction, &id)?;
+                    pending.extend(node.children.into_values());
+                    pending.extend(node.blocks);
+                }
+                _ => return Err(Error::Corrupt(id.0)),
             }
-            _ => return Err(Error::Corrupt(id.0)),
         }
     }
     Ok(live)

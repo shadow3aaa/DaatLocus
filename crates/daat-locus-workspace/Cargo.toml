@@ -24,6 +24,9 @@ tempfile = "3.23.0"
 uuid = { version = "1.23.4", features = ["v4"] }
 zstd = { version = "0.13", default-features = false }
 
+[dev-dependencies]
+rusqlite = { version = "0.40.1", features = ["trace"] }
+
 [target.'cfg(windows)'.dependencies]
 dunce = "1.0.5"
 libloading = "0.8.9"
