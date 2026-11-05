@@ -2,8 +2,11 @@
 use std::{
     collections::BTreeMap,
     io,
-    os::windows::{ffi::OsStringExt, process::ExitStatusExt},
-    path::{Path, PathBuf},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        process::ExitStatusExt,
+    },
+    path::{Component, Path, PathBuf, Prefix},
     process::ExitStatus,
     sync::atomic::Ordering,
 };
@@ -423,10 +426,49 @@ fn unicode(path: &Path) -> io::Result<String> {
 }
 
 fn paths(paths: &[PathBuf]) -> io::Result<Vec<String>> {
-    policy_paths_with_resolved(paths)
-        .iter()
-        .map(|path| unicode(path))
-        .collect()
+    let mut result = Vec::new();
+    for path in policy_paths_with_resolved(paths) {
+        if supports_scoped_volume(&path)? {
+            result.push(unicode(&path)?);
+        }
+    }
+    Ok(result)
+}
+
+fn supports_scoped_volume(path: &Path) -> io::Result<bool> {
+    use windows_sys::Win32::{
+        Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW},
+        System::SystemServices::FILE_PERSISTENT_ACLS,
+    };
+    if matches!(path.components().next(), Some(Component::Prefix(prefix))
+        if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)))
+    {
+        return Ok(true);
+    }
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = vec![0u16; 32768];
+    let mut flags = 0;
+    if unsafe {
+        GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) == 0
+            || GetVolumeInformationW(
+                root.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut flags,
+                std::ptr::null_mut(),
+                0,
+            ) == 0
+    } {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(15 | 21 | 53 | 55 | 1201 | 1167) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    // FAT/exFAT path rules make PSEC environment creation fail.
+    Ok(flags & FILE_PERSISTENT_ACLS != 0)
 }
 
 fn volumes() -> io::Result<Vec<PathBuf>> {
@@ -451,7 +493,10 @@ fn expand_volumes(roots: Vec<String>) -> io::Result<Vec<String>> {
                     if matches!(
                         error.kind(),
                         io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) || matches!(error.raw_os_error(), Some(21 | 53 | 55 | 1201 | 1167)) =>
+                    ) || matches!(
+                        error.raw_os_error(),
+                        Some(15 | 21 | 53 | 55 | 1201 | 1167)
+                    ) =>
                 {
                     continue;
                 }
@@ -461,8 +506,10 @@ fn expand_volumes(roots: Vec<String>) -> io::Result<Vec<String>> {
             // level, never recursively enumerate the workspace.
             for entry in entries {
                 let path = entry?.path();
-                if wxc_common::filesystem_object::compare_existing_filesystem_objects(&path, &path)
-                    == wxc_common::filesystem_object::ExistingObjectComparison::Same
+                if supports_scoped_volume(&path)?
+                    && wxc_common::filesystem_object::compare_existing_filesystem_objects(
+                        &path, &path,
+                    ) == wxc_common::filesystem_object::ExistingObjectComparison::Same
                 {
                     result.push(unicode(&path)?);
                 }
@@ -1113,6 +1160,49 @@ mod tests {
         let expanded = expand_volumes(vec![root.clone(), unavailable.clone()]).unwrap();
         assert!(expanded.contains(&root));
         assert!(!expanded.contains(&unavailable));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DAAT_LOCUS_TEST_UNSCOPED_VOLUME pointing to a mounted FAT/exFAT volume"]
+    async fn unsupported_volume_does_not_disable_supported_volume_isolation() {
+        if !crate::test_support::native_sandbox_available() {
+            return;
+        }
+        let volume = PathBuf::from(
+            std::env::var_os("DAAT_LOCUS_TEST_UNSCOPED_VOLUME")
+                .expect("set DAAT_LOCUS_TEST_UNSCOPED_VOLUME to a mounted FAT/exFAT volume"),
+        );
+        std::fs::metadata(&volume).unwrap();
+        assert!(!supports_scoped_volume(&volume).unwrap());
+        let temp = crate::test_support::scoped_directory();
+        let root = temp.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let secret = root.join("secret.txt");
+        let output = root.join("output.txt");
+        let outside = temp.path().join("outside.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let mut policy = policy(&root);
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.readable_roots.push(volume.clone());
+        policy.filesystem.writable_roots.push(WritableRoot {
+            root: volume.clone(),
+            read_only_subpaths: vec![],
+        });
+        policy.filesystem.deny_read_paths = vec![volume.clone(), secret.clone()];
+        policy.filesystem.deny_write_paths = vec![volume];
+        let script = format!(
+            r#"$ErrorActionPreference='Stop'; [IO.File]::WriteAllText({},'ok'); $read=$false; try{{$null=[IO.File]::ReadAllText({});$read=$true}}catch{{}}; if($read){{exit 10}}; $write=$false; try{{[IO.File]::WriteAllText({},'bad');$write=$true}}catch{{}}; if($write){{exit 11}}; 'isolated'"#,
+            quote(&output),
+            quote(&secret),
+            quote(&outside)
+        );
+        let child = launch(&policy, &root, script, SandboxStdio::Null);
+        let (status, out, err) = collect(child).await;
+        assert!(status.success(), "{status}; stdout={out}; stderr={err}");
+        assert_eq!(out.trim(), "isolated");
+        assert_eq!(std::fs::read(output).unwrap(), b"ok");
+        assert_eq!(std::fs::read(secret).unwrap(), b"secret");
+        assert!(!outside.exists());
     }
     #[tokio::test]
     async fn exited_process_output_survives_dropping_the_process_handle() {
