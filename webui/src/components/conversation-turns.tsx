@@ -6,7 +6,7 @@ import { ImportConversationBubble } from "@/components/import-conversation";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import type { Access, MessageRecord } from "@/lib/actor-api";
 import { isUserDelivery, isUserSource, workTranscriptParts, type WorkTranscriptPart } from "@/lib/work-timeline";
-import { forwardRef, Fragment } from "react";
+import { forwardRef, Fragment, useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion, MotionConfig, useReducedMotion } from "motion/react";
 import { readPreferences } from "@/lib/preferences";
 import { SentBubble, type SendOrigin } from "@/components/sent-bubble";
@@ -14,7 +14,7 @@ import type { useActorConversation } from "@/hooks/use-actor-conversation";
 import { AttachmentList, CopyMessage } from "@/components/conversation-content";
 import { Markdown } from "@/components/markdown";
 import { ActorMessageBubble } from "@/components/actor-message-bubble";
-import { WorkActivity } from "@/components/work-activity";
+import { WorkActivity, WorkActivityHistory, type ActivityHistory } from "@/components/work-activity";
 import { MessageOutcomes, messageOutcomeTools } from "@/components/message-outcomes";
 import { cn } from "@/lib/utils";
 import { conversationFailureMessage } from "@/lib/conversation-errors";
@@ -70,6 +70,9 @@ function MessageReceipt({ message }: { message: MessageRecord }) {
   return <small className="dl-message-receipt">{t("conversation_turns.delivered_time", {time:new Date(message.created_at_ms).toLocaleTimeString(getCurrentWebUiLanguage(), { hour: "numeric", minute: "2-digit" })})}</small>;
 }
 export function WorkTranscript({ messages, ...props }: Omit<Props, "message"> & { messages: MessageRecord[] }) {
+  const [history,setHistory] = useState<Record<string,ActivityHistory>>({});
+  const updateHistory = useCallback((id:string,value:ActivityHistory) => setHistory(old => old[id]===value ? old : {...old,[id]:value}), []);
+  useEffect(() => setHistory({}), [props.chat.actorId]);
   const parts = workTranscriptParts(messages, props.chat.messages, props.chat.events).filter(part => {
     const message = part.message;
     if (part.kind === "input") return !isInternalNotification(message) && Boolean(message.content || message.attachments.length) && (!props.searchQuery || matchesConversationText(messageDisplayText(message), props.searchQuery));
@@ -85,14 +88,14 @@ export function WorkTranscript({ messages, ...props }: Omit<Props, "message"> & 
     else turns.push({message:part.message,parts:[part]});
   }
   const anchored = new Set<string>();
-  return <>{turns.map(turn => {
+  return <>{props.searchQuery===undefined && messages.filter(message=>message.kind!=="delivery"&&message.status!=="queued").map(message=><WorkActivityHistory key={message.id} message={message} events={props.chat.events} focus={props.focus?.message_id===message.id?props.focus:null} onChange={updateHistory}/>)}{turns.map(turn => {
     const first = !anchored.has(turn.message.id);
     anchored.add(turn.message.id);
     const key = `${turn.message.id}:${turn.parts[0].kind}:${turn.parts[0].kind === "activity" ? turn.parts[0].range.start : ""}`;
-    return <WorkTurn key={key} {...props} {...turn} anchor={first} />;
+    return <WorkTurn key={key} {...props} {...turn} history={history[turn.message.id]} anchor={first} />;
   })}</>;
 }
-function WorkTurn({ focus, message, parts, anchor, chat, access, onActor, searchQuery }: Props & { parts: WorkTranscriptPart[]; anchor: boolean }) {
+function WorkTurn({ message, parts, anchor, chat, access, onActor, searchQuery, history }: Props & { parts: WorkTranscriptPart[]; anchor: boolean; history?: ActivityHistory }) {
   const user = isUserSource(message);
   const actorReply = message.reply_to.kind === "actor" || message.reply_to.kind === "remote" && !message.reply_to.user;
   const internal = isInternalNotification(message);
@@ -103,7 +106,7 @@ function WorkTurn({ focus, message, parts, anchor, chat, access, onActor, search
   return <article className="dl-message-turn dl-work-turn" id={anchor ? `message-${message.actor_id}-${message.id}` : undefined}>
     {parts.map(part => <Fragment key={`${part.kind}:${part.kind === "activity" ? part.range.start : ""}`}>
     {part.kind === "input" && inputMatches && !internal && (message.content || message.attachments.length > 0) && <MessageContextMenu content={messageDisplayText(message)}><div data-message-id={message.id} data-message-side="input" className={cn("dl-work-input", user ? "dl-work-user-input" : "dl-work-delegated-input")}><MessageBubbleRow {...messageAvatar(message,"input",access,chat.actorId??message.actor_id)} own={user}><ActorMessageBubble message={message} direction="incoming" conversationId={chat.actorId??message.actor_id} messages={chat.messages} onActor={onActor} className={cn("dl-work-prompt", user ? "dl-bubble-user" : "dl-bubble-peer")}>{importedConversation(message) ? <ImportConversationBubble message={message} /> : <>{user ? <p className="dl-user-text">{message.content}</p> : <Markdown content={message.content} onActor={onActor} />}{message.attachments.length > 0 && <AttachmentList items={message.attachments} />}</>}</ActorMessageBubble>{message.content && <div className="dl-work-user-actions"><CopyMessage content={messageDisplayText(message)} /></div>}</MessageBubbleRow></div></MessageContextMenu>}
-    {part.kind === "activity" && !searchMode && <WorkActivity focus={focus?.message_id===message.id?focus:null} message={message} avatarActorId={chat.actorId??message.actor_id} avatarActorName={chat.actor?.config?.name || chat.actor?.name} range={part.range} events={chat.events} tools={tools} onActor={onActor} />}
+    {part.kind === "activity" && !searchMode && <WorkActivity message={message} avatarActorId={chat.actorId??message.actor_id} avatarActorName={chat.actor?.config?.name || chat.actor?.name} range={part.range} history={history} tools={tools} onActor={onActor} />}
     {part.kind === "outcome" && <>
       {replyMatches && message.reply && <MessageContextMenu content={message.reply}><div data-message-id={message.id} data-message-side="reply" className={cn("dl-work-final", actorReply && "dl-work-actor-reply")}><MessageBubbleRow {...messageAvatar(message,"reply",access,chat.actorId??message.actor_id)} name={chat.actor?.config?.name || chat.actor?.name} own={actorReply}><ActorMessageBubble message={message} direction="outgoing" conversationId={chat.actorId??message.actor_id} messages={chat.messages} onActor={onActor} className={actorReply ? "dl-bubble-actor" : "dl-bubble-assistant"}><Markdown content={message.reply} onActor={onActor} /></ActorMessageBubble><CopyMessage content={message.reply} /></MessageBubbleRow></div></MessageContextMenu>}
       {!searchMode && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}

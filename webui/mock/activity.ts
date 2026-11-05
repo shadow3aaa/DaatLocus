@@ -98,16 +98,16 @@ export function seedProseActivityPreview(actor: ActorStore) {
 export function seedGuidanceActivityPreview(actor: ActorStore) {
   seedActivityPreview(actor);
   const state = preview!;
-  const guide = addMessage(actor,{kind:"request",...requestOrigin(actor),in_reply_to:state.input.id,content:"No screenshots needed; report the results directly.",status:"completed"});
+  const guide = addMessage(actor,{kind:"request",...requestOrigin(actor),in_reply_to:state.input.id,content:"No screenshots needed; report the results directly.",status:"running"});
   emitEvent(actor.summary.id,{type:"message_added",message_id:guide.id});
-  emitEvent(actor.summary.id,{type:"message_updated",message_id:guide.id,status:"completed"});
+  emitEvent(actor.summary.id,{type:"message_updated",message_id:guide.id,status:"running"});
   text(state,"assistant","Understood. I will verify and report the results without preparing screenshots.");
   start(state,read("webui/src/layout/result.tsx")); finish(state);
   start(state,read("webui/src/layout/summary.tsx"));
   const beginning = now()-60000;
   actor.events.forEach((record,index) => { record.created_at_ms = beginning+index*100; });
   const sent = actor.events.find(record => record.event.type === "message_added" && record.event.message_id === guide.id)!;
-  touchMessage(guide,{created_at_ms:sent.created_at_ms,finished_at_ms:sent.created_at_ms+100});
+  touchMessage(guide,{created_at_ms:sent.created_at_ms,started_at_ms:sent.created_at_ms});
   touchMessage(state.input,{created_at_ms:beginning-100,started_at_ms:beginning});
 }
 

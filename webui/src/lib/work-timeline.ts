@@ -22,6 +22,7 @@ export function workTimeline(events: EventRecord[], message: MessageRecord, comp
   const lastGeneration = Math.max(0, ...items.flatMap(({event}) => "generation" in event ? [event.generation] : []));
   const output: WorkSegment[] = [];
   const seenCalls = new Set<string>();
+  const started = new Map(settledEvents.flatMap(({seq,event}) => event.type === "tool_started" ? [[event.call_id,seq] as const] : []));
   const communications = new Set(settledEvents.flatMap(({event}) => event.type === "tool_finished" && event.message_id === message.id && !event.error && event.outcome && typeof event.outcome === "object" && !Array.isArray(event.outcome) && event.outcome.sent_message === true ? [event.call_id] : []));
   for (const record of items) {
     const event = record.event;
@@ -38,6 +39,7 @@ export function workTimeline(events: EventRecord[], message: MessageRecord, comp
         }
         continue;
       }
+      if (event.type === "tool_finished" && (started.get(event.call_id) ?? record.seq) < (items[0]?.seq ?? record.seq)) continue;
       if (seenCalls.has(event.call_id)) continue;
       seenCalls.add(event.call_id);
       const previous = output.at(-1);
@@ -116,9 +118,12 @@ function workFinishedAt(message: MessageRecord, events: EventRecord[]) {
   return message.finished_at_ms ?? finished?.created_at_ms ?? message.updated_at_ms;
 }
 export type ActivityRange = { start: number; end: number | null; live: boolean };
+export function activityRecords(history: EventRecord[], message: MessageRecord, range: ActivityRange): EventRecord[] {
+  return history.filter(record => record.actor_id === message.actor_id && "message_id" in record.event && record.event.message_id === message.id && record.created_at_ms >= range.start && (range.end === null || record.created_at_ms < range.end || range.end === message.finished_at_ms && record.created_at_ms === range.end));
+}
 export type WorkTranscriptPart = { message: MessageRecord } & ({ kind: "input" | "outcome" } | { kind: "activity"; range: ActivityRange });
 
-/** Split serial execution around nested inputs, rather than placing resumed work at its original input. */
+/** Incoming messages divide the display, never another message's activity. */
 export function workTranscriptParts(messages: MessageRecord[], allMessages: MessageRecord[], events: EventRecord[] = []): WorkTranscriptPart[] {
   const actor = messages[0]?.actor_id;
   const known = [...new Map([...allMessages, ...messages].filter(message => message.actor_id === actor).map(message => [message.id, message])).values()];
@@ -127,17 +132,15 @@ export function workTranscriptParts(messages: MessageRecord[], allMessages: Mess
     end: message.status === "running" && message.finished_at_ms == null ? Infinity : workFinishedAt(message, events),
   }));
   const deliveries = new Set(known.filter(message => message.kind === "delivery" && message.reply).map(message => message.finished_at_ms ?? message.created_at_ms));
-  const boundaries = [...new Set([...lifetimes.flatMap(item => [item.start, item.end]), ...deliveries].filter(Number.isFinite))].sort((a,b) => a-b);
+  const inputs = messages.filter(message => message.kind !== "delivery" && (message.content || message.attachments.length) && !(message.started_at_ms == null && ["cancelled", "interrupted"].includes(message.status))).map(message => message.created_at_ms);
+  const boundaries = [...new Set([...lifetimes.flatMap(item => [item.start, item.end]), ...inputs, ...deliveries].filter(Number.isFinite))].sort((a,b) => a-b);
   const ranges: { message: MessageRecord; range: ActivityRange }[] = [];
-  for (const [index, start] of boundaries.entries()) {
-    const owner = lifetimes.filter(item => item.start <= start && item.end > start).sort((a,b) => b.message.seq-a.message.seq)[0];
-    if (!owner) continue;
-    const end = boundaries[index+1] ?? null;
-    const previous = ranges.at(-1);
-    if (previous?.message.id === owner.message.id && previous.range.end === start && !deliveries.has(start)) {
-      previous.range.end = end;
-      previous.range.live = end === null;
-    } else ranges.push({message: owner.message, range: {start, end, live: end === null}});
+  for (const {message,start,end} of lifetimes) {
+    const cuts = boundaries.filter(at => at >= start && at < end);
+    for (const [index, at] of cuts.entries()) {
+      const until = cuts[index+1] ?? (Number.isFinite(end) ? end : null);
+      ranges.push({message,range:{start:at,end:until,live:until===null}});
+    }
   }
   // Instant terminal records retain their chronological position.
   for (const item of lifetimes) if (item.end <= item.start) ranges.push({message:item.message,range:{start:item.start,end:item.start,live:false}});
