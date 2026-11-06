@@ -17,7 +17,6 @@ include = [
     "/README.md",
     "/README_zh-CN.md",
     "/AGENTS.md",
-    "/assets/logo.svg",
     "/assets/logo-mark.svg",
     "/assets/wordmark.txt",
     "/build.rs",

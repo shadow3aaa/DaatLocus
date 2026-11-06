@@ -1,48 +1,49 @@
 <WixLocalization Culture="en-US" Language="1033" xmlns="http://wixtoolset.org/schemas/v4/wxl">
   <String Id="Caption" Value="Daat Locus Setup"/>
-  <String Id="Loading" Value="Checking installed components…"/>
-  <String Id="WelcomeStep" Value="1 of 5 · Welcome"/>
-  <String Id="LicenseStep" Value="2 of 5 · License terms"/>
-  <String Id="DisplayStep" Value="3 of 5 · Virtual display"/>
-  <String Id="WinFspStep" Value="4 of 5 · Workspace support"/>
-  <String Id="ReadyStep" Value="5 of 5 · Confirmation"/>
-  <String Id="WelcomeHeading" Value="Welcome to Daat Locus"/>
-  <String Id="WelcomeNotice" Value="This wizard will guide you through the license terms and driver setup. Choose Next to begin."/>
-  <String Id="Next" Value="&amp;Next"/>
-  <String Id="DriverNextNotice" Value="Choose Next to continue. Driver changes begin after you confirm the installation on the final page."/>
-  <String Id="InstallHeading" Value="Ready to install"/>
-  <String Id="InstallLocation" Value="Install for your account:&#10;[LocalAppDataFolder]Daat Locus"/>
-  <String Id="DisplayHeading" Value="Virtual display driver"/>
-  <String Id="AdminRequired" Value="Administrator approval required"/>
-  <String Id="Ready" Value="Ready · reuse installed driver"/>
-  <String Id="Unavailable" Value="Not included on this platform"/>
-  <String Id="DisplayDescription" Value="Enables virtual screens. Adds Daat Locus’s self-signed public certificate to this computer’s Trusted Root and Trusted Publishers stores."/>
-  <String Id="DisplayUnavailable" Value="Virtual display support is not included in this package."/>
-  <String Id="WinFspDescription" Value="Enables isolated workspace branches. Installs the signed WinFsp 2.2 Beta 5 driver and enables UNC working directories for all cmd processes on this computer. Copyright © Bill Zissimopoulos."/>
-  <String Id="PermissionNotice" Value="Setup will install Daat Locus and its missing components. Choose Approve and install, then allow the Windows administrator prompt for driver changes. Setup will ask before restarting."/>
-  <String Id="DriversReadyNotice" Value="Required drivers are ready. Choose Install to install Daat Locus for your account and keep your existing drivers."/>
+  <String Id="Loading" Value="Getting ready…"/>
+  <String Id="VersionLabel" Value="Version [WixBundleVersion]"/>
+  <String Id="WelcomeHeading" Value="Let’s set up Daat Locus"/>
+  <String Id="WelcomeNotice" Value="Daat Locus is an assistant that works with your files, browser and apps. Setup installs it for your account and asks before anything needs administrator approval."/>
+  <String Id="InstallLocation" Value="Installs to [LocalAppDataFolder]Daat Locus"/>
+  <String Id="GetStarted" Value="&amp;Get started"/>
+  <String Id="LicenseHeading" Value="License terms"/>
+  <String Id="LicenseNotice" Value="Read the terms below, then accept them to continue."/>
   <String Id="AcceptLicense" Value="I &amp;accept the license terms"/>
-  <String Id="LicenseButton" Value="License terms"/>
-  <String Id="InstallButton" Value="&amp;Approve and install"/>
-  <String Id="InstallOnlyButton" Value="&amp;Install"/>
+  <String Id="Continue" Value="&amp;Continue"/>
+  <String Id="Back" Value="&amp;Back"/>
   <String Id="Cancel" Value="Cancel"/>
   <String Id="Close" Value="Close"/>
-  <String Id="Back" Value="Back"/>
-  <String Id="ProgressHeading" Value="Installing components"/>
-  <String Id="ProgressNotice" Value="Windows may ask for administrator approval to install drivers. Keep setup open until all components finish."/>
-  <String Id="ModifyHeading" Value="Manage your installation"/>
-  <String Id="ModifyNotice" Value="Repair reinstalls Daat Locus and repairs its virtual display and workspace support. Driver changes require administrator approval.&#10;&#10;Uninstall removes Daat Locus and keeps shared drivers and your data."/>
-  <String Id="Repair" Value="Repair Daat Locus and drivers"/>
+  <String Id="ReviewHeading" Value="Here’s what Setup will do"/>
+  <String Id="AppItem" Value="Daat Locus"/>
+  <String Id="AppDetail" Value="Installs for your account, along with Microsoft Edge WebView2 if it’s missing."/>
+  <String Id="WorkspaceItem" Value="Workspace branches"/>
+  <String Id="WorkspaceDetail" Value="Lets Actors try changes in isolated copies of your projects. Installs the signed WinFsp 2.2 Beta 5 driver (© Bill Zissimopoulos) and lets cmd start in network folders on this computer."/>
+  <String Id="DisplayItem" Value="Virtual displays"/>
+  <String Id="DisplayDetail" Value="Lets Actors use apps on screens you don’t need to watch. Adds Daat Locus’s self-signed certificate to this computer’s Trusted Root and Trusted Publishers stores."/>
+  <String Id="ItemReady" Value="Already installed"/>
+  <String Id="ItemApproval" Value="Needs administrator approval"/>
+  <String Id="ApprovalNotice" Value="Windows will ask you once to approve the driver changes. Setup asks before restarting."/>
+  <String Id="NoApprovalNotice" Value="Everything else is already in place, so no administrator approval is needed."/>
+  <String Id="InstallButton" Value="Approve and install"/>
+  <String Id="InstallOnlyButton" Value="Install"/>
+  <String Id="ProgressHeading" Value="Setting up Daat Locus"/>
+  <String Id="ProgressNotice" Value="If Windows asks for permission, choose Yes so Setup can install the drivers. Keep this window open until it finishes."/>
+  <String Id="ModifyHeading" Value="Daat Locus is installed"/>
+  <String Id="ModifyNotice" Value="Repair reinstalls the app and its drivers if something isn’t working. Driver changes need administrator approval.&#10;&#10;Uninstall removes the app and keeps your data and the shared drivers."/>
+  <String Id="Repair" Value="Repair Daat Locus"/>
   <String Id="Uninstall" Value="Uninstall Daat Locus"/>
-  <String Id="SuccessHeading" Value="Setup complete"/>
-  <String Id="LayoutSuccess" Value="Installation files ready"/>
-  <String Id="UninstallSuccess" Value="Daat Locus uninstalled"/>
-  <String Id="SuccessNotice" Value="Daat Locus and its required components are installed."/>
-  <String Id="RestartNotice" Value="Restart Windows to finish driver changes. Save your work, then choose Restart now or close setup and restart later."/>
-  <String Id="Launch" Value="Open Daat Locus"/>
-  <String Id="Restart" Value="Restart now"/>
-  <String Id="FailureHeading" Value="Setup could not finish"/>
-  <String Id="LogLink" Value="&lt;a href=&quot;#&quot;&gt;Open setup log&lt;/a&gt;"/>
+  <String Id="SuccessHeading" Value="Daat Locus is ready"/>
+  <String Id="RepairSuccess" Value="Repair complete"/>
+  <String Id="LayoutSuccess" Value="Installation files are ready"/>
+  <String Id="UninstallSuccess" Value="Daat Locus was uninstalled"/>
+  <String Id="SuccessNotice" Value="Open Daat Locus to get started. You can also find it in the Start menu."/>
+  <String Id="UninstallNotice" Value="Your data and the shared drivers stay on this computer."/>
+  <String Id="RestartNotice" Value="Restart Windows to finish the driver changes. Save your work first, then restart now or later."/>
+  <String Id="Launch" Value="&amp;Open Daat Locus"/>
+  <String Id="Restart" Value="&amp;Restart now"/>
+  <String Id="FailureHeading" Value="Setup couldn’t finish"/>
+  <String Id="FailureNotice" Value="You can run Setup again at any time."/>
+  <String Id="LogLink" Value="&lt;a href=&quot;#&quot;&gt;Open the setup log&lt;/a&gt;"/>
   <String Id="HelpHeading" Value="Setup options"/>
   <String Id="HelpText" Value="/install · Install or upgrade&#10;/repair · Repair this installation&#10;/uninstall · Uninstall Daat Locus&#10;/layout [directory] · Extract installation files&#10;&#10;/passive · Show progress only&#10;/quiet · Install without a setup window&#10;/norestart · Restart later&#10;/log [file] · Save the setup log"/>
   <String Id="ConfirmCancelMessage" Value="Cancel setup?"/>

@@ -1,175 +1,166 @@
 <Theme xmlns="http://wixtoolset.org/schemas/v4/thmutil">
-  <Font Id="body" Height="-15" Weight="400" Foreground="windowtext" Background="window">Segoe UI</Font>
-  <Font Id="title" Height="-28" Weight="600" Foreground="windowtext">Segoe UI</Font>
-  <Font Id="heading" Height="-18" Weight="600" Foreground="windowtext">Segoe UI</Font>
-  <Font Id="muted" Height="-14" Weight="400" Foreground="graytext">Segoe UI</Font>
+  <!-- Colors are BGR hex. Ink, muted and accent match the WebUI light palette. -->
+  <Font Id="body" Height="-15" Weight="400" Foreground="0d0d0d" Background="ffffff">Segoe UI</Font>
+  <Font Id="title" Height="-26" Weight="600" Foreground="0d0d0d">Segoe UI</Font>
+  <Font Id="brand" Height="-15" Weight="600" Foreground="0d0d0d">Segoe UI</Font>
+  <Font Id="item" Height="-15" Weight="600" Foreground="0d0d0d">Segoe UI</Font>
+  <Font Id="muted" Height="-14" Weight="400" Foreground="737373">Segoe UI</Font>
+  <Font Id="small" Height="-13" Weight="400" Foreground="8c8c8c">Segoe UI</Font>
+  <Font Id="ready" Height="-13" Weight="600" Foreground="3d8016">Segoe UI</Font>
+  <Font Id="approval" Height="-13" Weight="600" Foreground="f06635">Segoe UI</Font>
   <Window Width="640" Height="560" HexStyle="100a0000" FontId="body" IconFile="app.ico" Caption="#(loc.Caption)">
-    <Label X="90" Y="28" Width="-32" Height="30" FontId="heading" Visible="yes" DisablePrefix="yes">Daat Locus</Label>
-    <ImageControl X="32" Y="28" Width="44" Height="44" ImageFile="logo.png" Visible="yes" />
-    <Label X="90" Y="57" Width="-32" Height="22" FontId="muted" Visible="yes" DisablePrefix="yes">[WixBundleVersion]</Label>
     <Page Name="Loading">
-      <Label X="32" Y="112" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.Loading)</Label>
+      <ImageControl X="280" Y="150" Width="80" Height="80" ImageFile="logo.png" />
+      <Label X="48" Y="254" Width="-48" Height="30" FontId="muted" Center="yes" DisablePrefix="yes">#(loc.Loading)</Label>
     </Page>
+    <!-- WixStdBA opens on Install: a welcome before the terms are accepted, then the review. -->
     <Page Name="Install">
       <Panel X="0" Y="0" Width="640" Height="560" VisibleCondition="NOT LicenseAccepted">
-        <Label X="32" Y="110" Width="576" Height="24" FontId="muted" DisablePrefix="yes">#(loc.WelcomeStep)</Label>
-        <Label X="32" Y="150" Width="576" Height="40" FontId="title" DisablePrefix="yes">#(loc.WelcomeHeading)</Label>
-        <Label X="32" Y="214" Width="576" Height="78" FontId="body" DisablePrefix="yes">#(loc.WelcomeNotice)</Label>
-        <Label X="32" Y="330" Width="576" Height="62" FontId="muted" DisablePrefix="yes">#(loc.InstallLocation)</Label>
+        <ImageControl X="272" Y="64" Width="96" Height="96" ImageFile="logo.png" />
+        <Label X="48" Y="186" Width="-48" Height="40" FontId="title" Center="yes" DisablePrefix="yes">#(loc.WelcomeHeading)</Label>
+        <Label X="72" Y="240" Width="-72" Height="72" FontId="body" Center="yes" DisablePrefix="yes">#(loc.WelcomeNotice)</Label>
+        <Label X="48" Y="330" Width="-48" Height="22" FontId="muted" Center="yes" DisablePrefix="yes">#(loc.InstallLocation)</Label>
+        <Label X="48" Y="354" Width="-48" Height="22" FontId="small" Center="yes" DisablePrefix="yes">#(loc.VersionLabel)</Label>
       </Panel>
       <Panel X="0" Y="0" Width="640" Height="560" VisibleCondition="LicenseAccepted">
-        <Label X="32" Y="110" Width="576" Height="24" FontId="muted" DisablePrefix="yes">#(loc.ReadyStep)</Label>
-        <Label X="32" Y="150" Width="576" Height="40" FontId="title" DisablePrefix="yes">#(loc.InstallHeading)</Label>
-        <Label X="32" Y="214" Width="576" Height="78" FontId="body" DisablePrefix="yes">
-          <Text>#(loc.PermissionNotice)</Text>
-          <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1 AND (NOT HasVirtualDisplay OR (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher))">#(loc.DriversReadyNotice)</Text>
+        <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+        <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+        <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+        <Label X="32" Y="84" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.ReviewHeading)</Label>
+        <Label X="32" Y="140" Width="-32" Height="22" FontId="item" DisablePrefix="yes">#(loc.AppItem)</Label>
+        <Label X="32" Y="164" Width="-32" Height="40" FontId="muted" DisablePrefix="yes">#(loc.AppDetail)</Label>
+        <Label X="32" Y="222" Width="172" Height="22" FontId="item" DisablePrefix="yes">#(loc.WorkspaceItem)</Label>
+        <Label X="212" Y="224" Width="-32" Height="20" FontId="ready" DisablePrefix="yes" VisibleCondition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1">#(loc.ItemReady)</Label>
+        <Label X="212" Y="224" Width="-32" Height="20" FontId="approval" DisablePrefix="yes" VisibleCondition="NOT (WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1)">#(loc.ItemApproval)</Label>
+        <Label X="32" Y="246" Width="-32" Height="60" FontId="muted" DisablePrefix="yes">#(loc.WorkspaceDetail)</Label>
+        <Label X="32" Y="322" Width="172" Height="22" FontId="item" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay">#(loc.DisplayItem)</Label>
+        <Label X="212" Y="324" Width="-32" Height="20" FontId="ready" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay AND VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher">#(loc.ItemReady)</Label>
+        <Label X="212" Y="324" Width="-32" Height="20" FontId="approval" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay AND NOT (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher)">#(loc.ItemApproval)</Label>
+        <Label X="32" Y="346" Width="-32" Height="60" FontId="muted" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay">#(loc.DisplayDetail)</Label>
+        <Label X="32" Y="424" Width="-32" Height="44" FontId="body" DisablePrefix="yes">
+          <Text>#(loc.ApprovalNotice)</Text>
+          <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1 AND (NOT HasVirtualDisplay OR (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher))">#(loc.NoApprovalNotice)</Text>
         </Label>
-        <Label X="32" Y="330" Width="576" Height="62" FontId="muted" DisablePrefix="yes">#(loc.InstallLocation)</Label>
       </Panel>
-      <Button X="32" Y="500" Width="100" Height="36" TabStop="yes" FontId="body">
+      <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Cancel)</Text>
         <CloseWindowAction />
       </Button>
-      <Button X="476" Y="500" Width="132" Height="36" HexStyle="00000001" TabStop="yes" FontId="body" VisibleCondition="NOT LicenseAccepted">
-        <Text>#(loc.Next)</Text>
+      <Button X="-32" Y="-24" Width="150" Height="36" HexStyle="00000001" TabStop="yes" FontId="body" VisibleCondition="NOT LicenseAccepted">
+        <Text>#(loc.GetStarted)</Text>
         <ChangePageAction Page="License" />
       </Button>
-      <Button X="242" Y="500" Width="120" Height="36" TabStop="yes" FontId="body" VisibleCondition="LicenseAccepted">
+      <Button X="-276" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body" VisibleCondition="LicenseAccepted">
         <Text>#(loc.Back)</Text>
-        <ChangePageAction Page="WinFsp" />
+        <ChangePageAction Page="License" />
       </Button>
-      <Button Name="InstallButton" X="378" Y="500" Width="230" Height="36" TabStop="yes" FontId="body" VisibleCondition="LicenseAccepted">
+      <!-- No mnemonic: this button stays on the welcome view while hidden, so a
+           keyboard accelerator must never reach it before the terms are accepted. -->
+      <Button Name="InstallButton" X="-32" Y="-24" Width="220" Height="36" HexStyle="00000001" TabStop="yes" FontId="body" VisibleCondition="LicenseAccepted" EnableCondition="LicenseAccepted">
         <Text>#(loc.InstallButton)</Text>
         <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1 AND (NOT HasVirtualDisplay OR (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher))">#(loc.InstallOnlyButton)</Text>
       </Button>
     </Page>
+    <!-- The Back target from the terms, independent of whether they were accepted. -->
     <Page Name="Welcome">
-      <Label X="32" Y="110" Width="-32" Height="24" FontId="muted" DisablePrefix="yes">#(loc.WelcomeStep)</Label>
-      <Label X="32" Y="150" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.WelcomeHeading)</Label>
-      <Label X="32" Y="214" Width="-32" Height="78" FontId="body" DisablePrefix="yes">#(loc.WelcomeNotice)</Label>
-      <Label X="32" Y="330" Width="-32" Height="62" FontId="muted" DisablePrefix="yes">#(loc.InstallLocation)</Label>
+      <ImageControl X="272" Y="64" Width="96" Height="96" ImageFile="logo.png" />
+      <Label X="48" Y="186" Width="-48" Height="40" FontId="title" Center="yes" DisablePrefix="yes">#(loc.WelcomeHeading)</Label>
+      <Label X="72" Y="240" Width="-72" Height="72" FontId="body" Center="yes" DisablePrefix="yes">#(loc.WelcomeNotice)</Label>
+      <Label X="48" Y="330" Width="-48" Height="22" FontId="muted" Center="yes" DisablePrefix="yes">#(loc.InstallLocation)</Label>
+      <Label X="48" Y="354" Width="-48" Height="22" FontId="small" Center="yes" DisablePrefix="yes">#(loc.VersionLabel)</Label>
       <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Cancel)</Text>
         <CloseWindowAction />
       </Button>
-      <Button X="-32" Y="-24" Width="132" Height="36" HexStyle="00000001" TabStop="yes" FontId="body">
-        <Text>#(loc.Next)</Text>
+      <Button X="-32" Y="-24" Width="150" Height="36" HexStyle="00000001" TabStop="yes" FontId="body">
+        <Text>#(loc.GetStarted)</Text>
         <ChangePageAction Page="License" />
       </Button>
     </Page>
     <Page Name="License">
-      <Label X="32" Y="110" Width="-32" Height="24" FontId="muted" DisablePrefix="yes">#(loc.LicenseStep)</Label>
-      <Label X="32" Y="150" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.LicenseButton)</Label>
-      <Richedit Name="EulaRichedit" X="32" Y="210" Width="-32" Height="230" TabStop="yes" FontId="body" />
-      <Checkbox Name="LicenseAccepted" X="32" Y="462" Width="-32" Height="26" TabStop="yes" FontId="body">#(loc.AcceptLicense)</Checkbox>
+      <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+      <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+      <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+      <Label X="32" Y="84" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.LicenseHeading)</Label>
+      <Label X="32" Y="126" Width="-32" Height="22" FontId="muted" DisablePrefix="yes">#(loc.LicenseNotice)</Label>
+      <Richedit Name="EulaRichedit" X="32" Y="160" Width="-32" Height="272" TabStop="yes" FontId="body" />
+      <Checkbox Name="LicenseAccepted" X="32" Y="446" Width="-32" Height="26" TabStop="yes" FontId="body">#(loc.AcceptLicense)</Checkbox>
       <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Cancel)</Text>
         <CloseWindowAction />
       </Button>
-      <Button X="-176" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
+      <Button X="-180" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Back)</Text>
         <ChangePageAction Page="Welcome" />
       </Button>
-      <Button X="-32" Y="-24" Width="132" Height="36" TabStop="yes" FontId="body" EnableCondition="LicenseAccepted">
-        <Text>#(loc.Next)</Text>
-        <ChangePageAction Page="Display" />
-      </Button>
-    </Page>
-    <Page Name="Display">
-      <Label X="32" Y="110" Width="-32" Height="24" FontId="muted" DisablePrefix="yes">#(loc.DisplayStep)</Label>
-      <Label X="32" Y="150" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.DisplayHeading)</Label>
-      <Label X="32" Y="214" Width="-32" Height="30" FontId="heading" DisablePrefix="yes">
-        <Text>#(loc.AdminRequired)</Text>
-        <Text Condition="NOT HasVirtualDisplay">#(loc.Unavailable)</Text>
-        <Text Condition="HasVirtualDisplay AND VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher">#(loc.Ready)</Text>
-      </Label>
-      <Label X="32" Y="266" Width="-32" Height="100" FontId="body" DisablePrefix="yes">
-        <Text>#(loc.DisplayDescription)</Text>
-        <Text Condition="NOT HasVirtualDisplay">#(loc.DisplayUnavailable)</Text>
-      </Label>
-      <Label X="32" Y="400" Width="-32" Height="58" FontId="muted" DisablePrefix="yes">#(loc.DriverNextNotice)</Label>
-      <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Cancel)</Text>
-        <CloseWindowAction />
-      </Button>
-      <Button X="-176" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Back)</Text>
-        <ChangePageAction Page="License" />
-      </Button>
-      <Button X="-32" Y="-24" Width="132" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Next)</Text>
-        <ChangePageAction Page="WinFsp" />
-      </Button>
-    </Page>
-    <Page Name="WinFsp">
-      <Label X="32" Y="110" Width="-32" Height="24" FontId="muted" DisablePrefix="yes">#(loc.WinFspStep)</Label>
-      <Label X="32" Y="150" Width="-32" Height="40" FontId="title" DisablePrefix="yes">WinFsp</Label>
-      <Label X="32" Y="214" Width="-32" Height="30" FontId="heading" DisablePrefix="yes">
-        <Text>#(loc.AdminRequired)</Text>
-        <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1">#(loc.Ready)</Text>
-      </Label>
-      <Label X="32" Y="266" Width="-32" Height="100" FontId="body" DisablePrefix="yes">#(loc.WinFspDescription)</Label>
-      <Label X="32" Y="400" Width="-32" Height="58" FontId="muted" DisablePrefix="yes">#(loc.DriverNextNotice)</Label>
-      <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Cancel)</Text>
-        <CloseWindowAction />
-      </Button>
-      <Button X="-176" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Back)</Text>
-        <ChangePageAction Page="Display" />
-      </Button>
-      <Button X="-32" Y="-24" Width="132" Height="36" TabStop="yes" FontId="body">
-        <Text>#(loc.Next)</Text>
+      <Button X="-32" Y="-24" Width="132" Height="36" HexStyle="00000001" TabStop="yes" FontId="body" EnableCondition="LicenseAccepted">
+        <Text>#(loc.Continue)</Text>
         <ChangePageAction Page="Install" />
       </Button>
     </Page>
     <Page Name="Progress">
-      <Label X="32" Y="110" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.ProgressHeading)</Label>
-      <Label X="32" Y="176" Width="-32" Height="46" FontId="muted" DisablePrefix="yes">#(loc.ProgressNotice)</Label>
-      <Label Name="OverallProgressPackageText" X="32" Y="258" Width="-32" Height="42" DisablePrefix="yes" FontId="body">#(loc.Loading)</Label>
-      <Progressbar Name="OverallCalculatedProgressbar" X="32" Y="310" Width="-32" Height="10" />
-      <Button Name="ProgressCancelButton" X="-32" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">#(loc.Cancel)</Button>
+      <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+      <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+      <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+      <Label X="32" Y="96" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.ProgressHeading)</Label>
+      <Label X="32" Y="144" Width="-32" Height="44" FontId="muted" DisablePrefix="yes">#(loc.ProgressNotice)</Label>
+      <Label Name="OverallProgressPackageText" X="32" Y="230" Width="-32" Height="24" DisablePrefix="yes" FontId="body">#(loc.Loading)</Label>
+      <Progressbar Name="OverallCalculatedProgressbar" X="32" Y="262" Width="-32" Height="8" />
+      <Button Name="ProgressCancelButton" X="-32" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">#(loc.Cancel)</Button>
     </Page>
     <Page Name="Modify">
-      <Label X="32" Y="110" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.ModifyHeading)</Label>
-      <Label X="32" Y="176" Width="-32" Height="92" DisablePrefix="yes" FontId="body">#(loc.ModifyNotice)</Label>
-      <Button Name="RepairButton" X="32" Y="290" Width="-32" Height="52" HexStyle="0000000e" TabStop="yes" FontId="body">#(loc.Repair)</Button>
-      <Button Name="UninstallButton" X="32" Y="358" Width="-32" Height="52" HexStyle="0000000e" TabStop="yes" FontId="body">#(loc.Uninstall)</Button>
-      <Button Name="ModifyCancelButton" X="-32" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
+      <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+      <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+      <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+      <Label X="32" Y="96" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.ModifyHeading)</Label>
+      <Label X="32" Y="144" Width="-32" Height="100" DisablePrefix="yes" FontId="muted">#(loc.ModifyNotice)</Label>
+      <Button Name="RepairButton" X="32" Y="262" Width="-32" Height="52" HexStyle="0000000e" TabStop="yes" FontId="body">#(loc.Repair)</Button>
+      <Button Name="UninstallButton" X="32" Y="326" Width="-32" Height="52" HexStyle="0000000e" TabStop="yes" FontId="body">#(loc.Uninstall)</Button>
+      <Button Name="ModifyCancelButton" X="-32" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Close)</Text>
         <CloseWindowAction />
       </Button>
     </Page>
     <Page Name="Success">
-      <Label X="32" Y="110" Width="-32" Height="40" FontId="title" DisablePrefix="yes">
+      <ImageControl X="280" Y="84" Width="80" Height="80" ImageFile="logo.png" />
+      <Label X="48" Y="188" Width="-48" Height="40" FontId="title" Center="yes" DisablePrefix="yes">
         <Text>#(loc.SuccessHeading)</Text>
+        <Text Condition="WixBundleAction = 8">#(loc.RepairSuccess)</Text>
         <Text Condition="WixBundleAction = 2">#(loc.LayoutSuccess)</Text>
         <Text Condition="WixBundleAction = 3 OR WixBundleAction = 4">#(loc.UninstallSuccess)</Text>
       </Label>
-      <Label X="32" Y="176" Width="-32" Height="62" DisablePrefix="yes" VisibleCondition="WixBundleAction &gt;= 6" FontId="body">#(loc.SuccessNotice)</Label>
-      <Label X="32" Y="276" Width="-32" Height="62" DisablePrefix="yes" VisibleCondition="WixStdBARestartRequired" FontId="body">#(loc.RestartNotice)</Label>
-      <Button Name="LaunchButton" X="-32" Y="-24" Width="200" Height="36" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.Launch)</Button>
+      <Label X="72" Y="240" Width="-72" Height="48" DisablePrefix="yes" Center="yes" VisibleCondition="WixBundleAction &gt;= 6" FontId="muted">#(loc.SuccessNotice)</Label>
+      <Label X="72" Y="240" Width="-72" Height="48" DisablePrefix="yes" Center="yes" VisibleCondition="WixBundleAction = 3 OR WixBundleAction = 4" FontId="muted">#(loc.UninstallNotice)</Label>
+      <Label X="72" Y="304" Width="-72" Height="48" DisablePrefix="yes" Center="yes" VisibleCondition="WixStdBARestartRequired" FontId="body">#(loc.RestartNotice)</Label>
+      <Button Name="LaunchButton" X="-32" Y="-24" Width="200" Height="36" HexStyle="00000001" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.Launch)</Button>
       <Button Name="SuccessRestartButton" X="-32" Y="-24" Width="200" Height="36" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.Restart)</Button>
-      <Button Name="SuccessCloseButton" X="32" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
+      <Button Name="SuccessCloseButton" X="32" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Close)</Text>
         <CloseWindowAction />
       </Button>
     </Page>
     <Page Name="Failure">
-      <Label X="32" Y="110" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.FailureHeading)</Label>
-      <Hypertext Name="FailureMessageText" X="32" Y="176" Width="-32" Height="150" TabStop="yes" HideWhenDisabled="yes" FontId="body" />
-      <Hypertext Name="FailureLogFileLink" X="32" Y="344" Width="-32" Height="44" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.LogLink)</Hypertext>
-      <Label X="32" Y="410" Width="-32" Height="60" DisablePrefix="yes" VisibleCondition="WixStdBARestartRequired" FontId="body">#(loc.RestartNotice)</Label>
+      <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+      <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+      <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+      <Label X="32" Y="96" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.FailureHeading)</Label>
+      <Hypertext Name="FailureMessageText" X="32" Y="144" Width="-32" Height="150" TabStop="yes" HideWhenDisabled="yes" FontId="body" />
+      <Label X="32" Y="306" Width="-32" Height="22" DisablePrefix="yes" FontId="muted">#(loc.FailureNotice)</Label>
+      <Hypertext Name="FailureLogFileLink" X="32" Y="336" Width="-32" Height="26" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.LogLink)</Hypertext>
+      <Label X="32" Y="380" Width="-32" Height="60" DisablePrefix="yes" VisibleCondition="WixStdBARestartRequired" FontId="body">#(loc.RestartNotice)</Label>
       <Button Name="FailureRestartButton" X="-32" Y="-24" Width="200" Height="36" TabStop="yes" HideWhenDisabled="yes" FontId="body">#(loc.Restart)</Button>
-      <Button Name="FailureCloseButton" X="32" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
+      <Button Name="FailureCloseButton" X="32" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Close)</Text>
         <CloseWindowAction />
       </Button>
     </Page>
     <Page Name="Help">
-      <Label X="32" Y="110" Width="-32" Height="40" FontId="title" DisablePrefix="yes">#(loc.HelpHeading)</Label>
-      <Label X="32" Y="176" Width="-32" Height="-88" DisablePrefix="yes" FontId="body">#(loc.HelpText)</Label>
-      <Button X="-32" Y="-24" Width="120" Height="36" TabStop="yes" FontId="body">
+      <ImageControl X="32" Y="26" Width="32" Height="32" ImageFile="logo.png" />
+      <Label X="74" Y="24" Width="-32" Height="20" FontId="brand" DisablePrefix="yes">Daat Locus</Label>
+      <Label X="74" Y="44" Width="-32" Height="18" FontId="small" DisablePrefix="yes">#(loc.VersionLabel)</Label>
+      <Label X="32" Y="96" Width="-32" Height="38" FontId="title" DisablePrefix="yes">#(loc.HelpHeading)</Label>
+      <Label X="32" Y="150" Width="-32" Height="-88" DisablePrefix="yes" FontId="body">#(loc.HelpText)</Label>
+      <Button X="-32" Y="-24" Width="110" Height="36" TabStop="yes" FontId="body">
         <Text>#(loc.Close)</Text>
         <CloseWindowAction />
       </Button>

@@ -45,7 +45,7 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
         directory.add_entry(ico::IconDirEntry::encode(&ico::IconImage::from_rgba_data(
             size,
             size,
-            raster(&context.root.join("assets/logo.svg"), size, false)?,
+            raster(&context.root.join("assets/logo-mark.svg"), size, false)?,
         ))?);
     }
     directory.write(fs::File::create(&icon)?)?;
@@ -132,7 +132,12 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
         ),
     )?;
     let logo = work.join("logo.png");
-    png_file(&context.root.join("assets/logo.svg"), &logo, 128, false)?;
+    png_file(
+        &context.root.join("assets/logo-mark.svg"),
+        &logo,
+        128,
+        false,
+    )?;
     let webview = work.join("MicrosoftEdgeWebview2Setup.exe");
     download_installer(
         "https://go.microsoft.com/fwlink/p/?LinkId=2124703",

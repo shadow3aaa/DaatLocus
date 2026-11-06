@@ -18,11 +18,8 @@ fn main() {
             "Build the shared WebUI before the native client: bun scripts/build-webui.ts"
         );
     }
-    let logo = root.join(if android || macos {
-        "assets/logo-mark.svg"
-    } else {
-        "assets/logo.svg"
-    });
+    // Every platform uses the launcher mark: a white disk with the black glyph.
+    let logo = root.join("assets/logo-mark.svg");
     println!("cargo:rerun-if-changed={}", logo.display());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let tree = resvg::usvg::Tree::from_data(&fs::read(logo).unwrap(), &Default::default()).unwrap();
