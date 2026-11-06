@@ -21,12 +21,14 @@ import { useConversationSearch } from "@/hooks/use-conversation-search";
 import { matchingConversationMessages, matchesConversationText } from "@/lib/conversation-search";
 import { FloatingSearchBar } from "@/components/floating-search";
 import { LazyPage } from "@/components/lazy-page";
+import { ActiveWork } from "@/components/delegation-cards";
+import type { ActiveActor } from "@/hooks/use-active-actors";
 
-export function ConversationPane({ focus, connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels }: {
+export function ConversationPane({ focus, connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels, activeActors = [], onActivity }: {
   focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null;
   actorId: string; access: Access; onActor(id: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
   compact?: boolean; refreshVersion?: number; searchOpen?: boolean; onSearchOpenChange?(open: boolean): void; onActorLoaded?(actor: ActorDetail): void;
-  onConfigureModels?(): void;
+  onConfigureModels?(): void; activeActors?: ActiveActor[]; onActivity?(): void;
 }) {
   const primaryView = isPrimaryActor(actorId);
   const openActor = (id: string) => onActor(actorId.includes("~") && !id.includes("~") ? `${actorId.split("~")[0]}~${id}` : id);
@@ -66,6 +68,8 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
   const receiptMessageId = primaryView ? [...chat.messages].reverse().find(message => isUserSource(message) && !(message.status === "cancelled" && message.started_at_ms == null))?.id : undefined;
   useEffect(() => { follow.current = true; olderAnchor.current = null; setAtBottom(true); setLocalError(""); filePreparation.current = { actorId, busy: false }; setPreparingFiles(false); }, [actorId]);
   useEffect(() => { if (actor) onActorLoaded?.(actor); }, [actor, onActorLoaded]);
+  const latestActivity = primaryView ? `${chat.messages.length}:${chat.messages.at(-1)?.updated_at_ms ?? 0}` : "";
+  useEffect(() => { if (latestActivity) onActivity?.(); }, [latestActivity, onActivity]);
   useEffect(() => {
     if (!refreshVersion) return;
     let live = true;
@@ -268,6 +272,7 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
         {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
+        {primaryView && !searchOpen && <ActiveWork actors={activeActors} onActor={openActor} />}
         {primaryView && <Composer key={`${actorId}:${accessKey(access)}`} value={chat.draft} onValueChange={chat.setDraft} skills={chat.skills} onSkillsChange={chat.setSkills} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
       </div>
   </section>;

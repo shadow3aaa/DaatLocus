@@ -90,5 +90,105 @@ pub(super) fn finish_message_tx(
             save_actor(tx, &actor)?;
         }
     }
+    notify_requester(tx, &message)?;
+    Ok(())
+}
+
+/// A delegated request that ends without an explicit answer leaves its requester
+/// waiting. Queue a runtime notice with the outcome only, never final model text.
+fn notify_requester(tx: &Transaction<'_>, message: &MessageRecord) -> Result<()> {
+    let ReplyTarget::Actor {
+        actor_id: requester,
+        request_id,
+    } = &message.reply_to
+    else {
+        return Ok(());
+    };
+    let MessageSource::Actor { actor_id: sender } = &message.source else {
+        return Ok(());
+    };
+    if message.kind != MessageKind::Request
+        || sender != requester
+        || is_appeal_notice(&message.content)
+    {
+        return Ok(());
+    }
+    let kinds: &[&str] = match message.status {
+        MessageStatus::Failed | MessageStatus::Interrupted => &["result"],
+        // Core may defer its answer until the user decides.
+        MessageStatus::Completed if message.actor_id != crate::stage::shared::ACTOR_ID => {
+            &["progress", "result"]
+        }
+        _ => return Ok(()),
+    };
+    let Ok(requester_record) = actor_tx(tx, requester) else {
+        return Ok(());
+    };
+    let Ok(original) = message_tx(tx, request_id) else {
+        return Ok(());
+    };
+    if requester_record.status == ActorStatus::Archived || original.actor_id != *requester {
+        return Ok(());
+    }
+    // One answer or notice since this input started covers coalesced inputs.
+    let since = message.started_at_ms.unwrap_or(message.created_at_ms);
+    let answered: bool = sql(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE actor_id=?1
+            AND json_extract(record,'$.source.kind')='actor' AND json_extract(record,'$.source.actor_id')=?2
+            AND json_extract(record,'$.kind') IN (SELECT value FROM json_each(?3))
+            AND json_extract(record,'$.created_at_ms')>=?4)",
+        params![requester, message.actor_id, encode(&kinds)?, since],
+        |row| row.get(0),
+    ))?;
+    if answered {
+        return Ok(());
+    }
+    let name = actor_tx(tx, &message.actor_id)?.config.name;
+    let error: String = message
+        .error
+        .as_deref()
+        .unwrap_or("unknown error")
+        .chars()
+        .take(300)
+        .collect();
+    let content = match message.status {
+        MessageStatus::Failed => format!(
+            "Runtime notice: {name} could not finish your request ({error}). Read its conversation for completed work before deciding next steps."
+        ),
+        MessageStatus::Interrupted => format!(
+            "Runtime notice: {name}'s work on your request was interrupted ({error}). Completed effects remain and the work was not resumed. Read its conversation before deciding next steps."
+        ),
+        _ => format!(
+            "Runtime notice: {name} finished your request without replying. Read its conversation for the outcome."
+        ),
+    };
+    let at = now();
+    insert_message(
+        tx,
+        MessageRecord {
+            skills: Vec::new(),
+            seq: 0,
+            id: Uuid::new_v4().to_string(),
+            actor_id: requester.clone(),
+            source: MessageSource::Actor {
+                actor_id: message.actor_id.clone(),
+            },
+            reply_to: original.reply_to,
+            kind: MessageKind::Result,
+            in_reply_to: Some(original.id),
+            remote_authority: original.remote_authority,
+            content,
+            attachments: vec![],
+            status: MessageStatus::Queued,
+            cancel_requested: false,
+            started_at_ms: None,
+            finished_at_ms: None,
+            final_generation: None,
+            reply: None,
+            error: None,
+            created_at_ms: at,
+            updated_at_ms: at,
+        },
+    )?;
     Ok(())
 }

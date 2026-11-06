@@ -5576,6 +5576,107 @@ impl ModelFactory for CoordinatorFactory {
         })
     }
 }
+
+#[tokio::test]
+async fn forwarded_delegation_without_a_reply_wakes_the_requester_with_one_runtime_notice() {
+    let requester = Arc::new(ReplayProvider::new(vec![]));
+    let worker_gate = Arc::new(tokio::sync::Notify::new());
+    let worker = Arc::new(ReplayProvider::new(vec![MockReply::Gated(
+        Box::new(MockReply::Answer("Finished without using reply")),
+        worker_gate.clone(),
+    )]));
+    let dir = crate::sandbox::test_support::scoped_directory();
+    let mut config = runtime_config();
+    config
+        .models
+        .insert("worker".into(), config.models["mock"].clone());
+    let system = ActorSystem::open_with_factory(
+        dir.path().join("data"),
+        dir.path().join("work"),
+        config,
+        Arc::new(CoordinatorFactory {
+            core: requester.clone(),
+            worker: worker.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    system.seed_test_actor("root");
+    let mut child_config = project_config(&system, "worker");
+    child_config.model = Some("worker".into());
+    let child = system.create_owned("root", child_config).unwrap();
+    requester.replies.lock().extend([
+        MockReply::Calls(vec![AgentToolCall {
+            id: "delegate".into(),
+            name: "actors__message".into(),
+            arguments: json!({"actor_id":child.id,"stage_id":null,"reply_to":null,
+                "content":"Route note","title":"  Inspect   the cache  ","forward_input":true}),
+        }]),
+        MockReply::Answer("Delegated"),
+        MockReply::Answer("Reported the silent finish"),
+    ]);
+    let input = system
+        .send_user("root", "ORIGINAL USER REQUEST".into(), vec![], None)
+        .unwrap();
+    assert_eq!(
+        wait_completed(&system, &input.id).await.status,
+        MessageStatus::Completed
+    );
+    let delegated = system
+        .store()
+        .messages(&child.id, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|message| message.kind == MessageKind::Request)
+        .unwrap();
+    assert!(delegated.content.starts_with("Route note"));
+    assert!(delegated.content.contains("ORIGINAL USER REQUEST"));
+    let outcome = system
+        .store()
+        .tool_summaries("root", &input.id, None, 10)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|tool| tool.name == "actors__message")
+        .and_then(|tool| tool.outcome)
+        .unwrap();
+    assert_eq!(outcome["title"], "Inspect the cache");
+    assert_eq!(outcome["message_id"], delegated.id.as_str());
+    assert_eq!(outcome["sent_message"], true);
+
+    worker_gate.notify_one();
+    assert_eq!(
+        wait_completed(&system, &delegated.id).await.status,
+        MessageStatus::Completed
+    );
+    let notices = || {
+        system
+            .store()
+            .messages("root", None, 20)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect::<Vec<_>>()
+    };
+    let notice = notices().pop().expect("requester was not notified");
+    assert_eq!(notice.in_reply_to.as_deref(), Some(input.id.as_str()));
+    assert!(matches!(&notice.source, MessageSource::Actor { actor_id } if *actor_id == child.id));
+    assert!(!notice.content.contains("Finished without using reply"));
+    assert_eq!(
+        wait_completed(&system, &notice.id).await.status,
+        MessageStatus::Completed
+    );
+    assert_eq!(notices().len(), 1);
+    {
+        let requests = requester.requests.lock();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].messages.iter().any(|message| matches!(message,
+            AgentMessage::User { content } if content.as_text().contains("without replying"))));
+    }
+    system.shutdown().await;
+}
 async fn wait_core_completed(system: &ActorSystem, id: &str) -> MessageRecord {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -5652,6 +5753,8 @@ async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hos
         );
         let prompt = assembled.render();
         assert_shared_actor_instructions(&prompt);
+        assert!(prompt.contains("Default workspace for new Actors:"));
+        assert!(!prompt.contains("\nWorkspace: ") && !prompt.contains("device sandbox"));
         assert!(!prompt.contains("Device project instructions must stay out of Core."));
         assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
         let role = include_str!("../prompts/core.md").replace("{{account_name}}", "alice");

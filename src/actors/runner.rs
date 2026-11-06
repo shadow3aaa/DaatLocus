@@ -985,6 +985,16 @@ fn finish_input(
     result: Result<Option<String>>,
 ) -> Result<MessageStatus> {
     let active = system.store().active_input(&message.id)?;
+    // Runtime notices may be queued for local requesters while finishing.
+    let requesters: std::collections::BTreeSet<String> = system
+        .store()
+        .execution_inputs(&message.id)?
+        .into_iter()
+        .filter_map(|input| match input.reply_to {
+            super::ReplyTarget::Actor { actor_id, .. } => Some(actor_id),
+            _ => None,
+        })
+        .collect();
     let (status, reply, error) = match (interruption(control, &active), result) {
         (Some(status), _) => (
             status,
@@ -1009,6 +1019,9 @@ fn finish_input(
         .store()
         .finish_execution(&message.id, status, reply.as_deref(), error.as_deref())?;
     control.cancelled.lock().clear();
+    for requester in requesters {
+        system.wake(&requester);
+    }
     Ok(status)
 }
 

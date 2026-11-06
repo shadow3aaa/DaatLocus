@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod approval_appeals;
+pub(crate) use approval_appeals::is_appeal_notice;
 mod completion;
 mod contacts;
 use completion::finish_message_tx;
@@ -179,6 +180,7 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
             "kind",
             "reply_to",
             "cancelled_count",
+            "title",
         ],
         "files__write_file" | "files__edit_file" | "files__copy_file" => {
             &["path", "created", "byte_count"]
@@ -1318,6 +1320,13 @@ impl ActorStore {
     pub fn current_message(&self, actor_id: &str) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let row=sql(self.db.lock().query_row("SELECT record FROM messages WHERE actor_id=?1 AND status='\"running\"' ORDER BY seq DESC LIMIT 1",[actor_id],|r|r.get::<_,String>(0)).optional())?;
+            row.map(decode).transpose()
+        })
+    }
+    /// The newest assigned request, for routing follow-ups to the Actor holding a task.
+    pub(crate) fn latest_request(&self, actor_id: &str) -> Result<Option<MessageRecord>> {
+        database_io(|| {
+            let row=sql(self.db.lock().query_row("SELECT record FROM messages WHERE actor_id=?1 AND json_extract(record,'$.kind')='request' AND NOT COALESCE(CASE WHEN json_valid(json_extract(record,'$.content')) THEN json_extract(json_extract(record,'$.content'),'$.type')='approval_appeal_decision' ELSE 0 END,0) ORDER BY seq DESC LIMIT 1",[actor_id],|r|r.get::<_,String>(0)).optional())?;
             row.map(decode).transpose()
         })
     }

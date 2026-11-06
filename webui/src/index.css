@@ -865,6 +865,30 @@ button.dl-activity-heading:hover { color: var(--foreground); }
 .dl-operation-note { overflow-wrap: anywhere; color: var(--muted-foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); line-height: 1.6; margin: 8px 0 20px; }
 .dl-message-outcomes { margin: 16px 0 22px; display: flex; flex-direction: column; gap: 13px; }
 .dl-message-outcomes:empty { display: none; }
+/* Delegated tasks are compact navigation into the working Actor, not message bubbles. */
+.dl-delegations { list-style: none; margin: 4px 0 0 40px; padding: 0; display: flex; flex-direction: column; gap: 6px; width: min(420px, calc(100% - 40px)); }
+.dl-delegation { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px 8px 8px; border: 1px solid var(--border); border-radius: 14px; background: var(--background); color: var(--foreground); text-align: left; transition: background .15s, border-color .15s; }
+.dl-delegation:hover { background: var(--muted); }
+.dl-delegation:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.dl-delegation-avatar { width: 28px; height: 28px; flex: none; }
+.dl-delegation-text { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.dl-delegation-text strong { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-delegation-text small { display: flex; gap: 8px; min-width: 0; color: var(--muted-foreground); font-size: 12px; }
+.dl-delegation-text small>span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-delegation-state { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.dl-delegation[data-state=done] .dl-delegation-state { color: var(--change-added); }
+.dl-delegation:is([data-state=failed],[data-state=interrupted]) .dl-delegation-state { color: var(--destructive); }
+.dl-delegation>svg { width: 15px; height: 15px; flex: none; color: var(--muted-foreground); }
+.dl-active-work { display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 0 2px 8px; }
+.dl-active-work-label { display: inline-flex; align-items: center; gap: 6px; flex: none; padding-right: 2px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
+.dl-active-work-actor { display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 180px; height: 30px; padding: 0 10px 0 3px; border-radius: 15px; background: var(--card); box-shadow: var(--chat-shadow); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); transition: background .15s; }
+.dl-active-work-actor:hover { background: var(--muted); }
+.dl-active-work-actor:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.dl-active-work-actor>[data-slot=avatar] { width: 24px; height: 24px; }
+.dl-active-work-actor>span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-actor-dialog-status { display: flex; align-items: center; gap: 6px; margin-top: 2px; color: var(--muted-foreground); font-size: 12px; }
+.dl-rail-contacts { position: relative; }
+.dl-rail-badge { position: absolute; top: 2px; right: 1px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--chat-user); color: #fff; font-size: 10px; font-weight: 600; line-height: 15px; text-align: center; pointer-events: none; }
 .dl-outcome-artifact { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 13px; padding: 13px 15px; color: var(--foreground); font-size: calc(var(--ui-font-size, 14px) * 13 / 14); text-decoration: none; max-width: 580px; }
 .dl-outcome-artifact>svg { width: 17px; height: 17px; flex-shrink: 0; }.dl-outcome-artifact>svg:last-child { width: 13px; height: 13px; margin-left: auto; color: var(--muted-foreground); }
 .dl-outcome-artifact span { min-width: 0; overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 3px; }.dl-outcome-artifact small { font-size: calc(var(--ui-font-size, 14px) * 13 / 14); color: var(--muted-foreground); }

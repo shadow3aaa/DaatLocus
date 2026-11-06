@@ -19,6 +19,81 @@ fn core_stop_context(system: &ActorSystem, template: &MessageRecord) -> AppToolE
 }
 
 #[tokio::test]
+async fn delegated_request_outcomes_notify_the_requester_only_when_it_has_no_answer() {
+    let (_directory, system, _) = paused_runtime().await;
+    let child = system
+        .create_owned("root", project_config(&system, "collaborator"))
+        .unwrap();
+    let source = system
+        .send_user("root", "Coordinate".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("root").unwrap().unwrap();
+    let results = |system: &ActorSystem| {
+        system
+            .store()
+            .messages("root", None, 100)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect::<Vec<_>>()
+    };
+    // (final status, worker replied first, expected notice wording)
+    for (status, replied, expected) in [
+        (MessageStatus::Completed, true, None),
+        (MessageStatus::Completed, false, Some("without replying")),
+        (MessageStatus::Failed, true, Some("could not finish")),
+        (MessageStatus::Interrupted, false, Some("interrupted")),
+        (MessageStatus::Cancelled, false, None),
+    ] {
+        // Keep each case's start strictly after earlier notices.
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let delegated = system
+            .message_from_actor("root", &source.id, &child.id, "Work".into())
+            .unwrap();
+        assert_eq!(
+            system.store().claim_next(&child.id).unwrap().unwrap().id,
+            delegated.id
+        );
+        if replied {
+            system
+                .deliver_from_actor(&child.id, &delegated.id, "reply", "Explicit answer")
+                .unwrap();
+        }
+        let before = results(&system).len();
+        system
+            .store()
+            .finish_message(&delegated.id, status, None, Some("model_request_failed"))
+            .unwrap();
+        let after = results(&system);
+        match expected {
+            None => assert_eq!(after.len(), before, "{status:?} must not notify"),
+            Some(wording) => {
+                assert_eq!(after.len(), before + 1, "{status:?} must notify once");
+                let notice = after.last().unwrap();
+                assert!(notice.content.contains(wording), "{}", notice.content);
+                assert_eq!(notice.in_reply_to.as_deref(), Some(source.id.as_str()));
+                assert_eq!(notice.status, MessageStatus::Queued);
+            }
+        }
+    }
+    // A requester archived meanwhile receives nothing, and finishing still succeeds.
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    let delegated = system
+        .message_from_actor("root", &source.id, &child.id, "Late work".into())
+        .unwrap();
+    system.store().claim_next(&child.id).unwrap().unwrap();
+    system.store().set_archived("root", true).unwrap();
+    let before = results(&system).len();
+    system
+        .store()
+        .finish_message(&delegated.id, MessageStatus::Failed, None, Some("failed"))
+        .unwrap();
+    assert_eq!(results(&system).len(), before);
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn interrupt_actor_repairs_all_received_inputs() {
     let (_directory, system, _) = paused_runtime().await;
     let first = system

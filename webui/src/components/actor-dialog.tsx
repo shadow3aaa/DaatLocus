@@ -10,6 +10,7 @@ import type { Access, ActorDetail } from "@/lib/actor-api";
 import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { GeneratedAvatar } from "@/components/generated-avatar";
 import { actorAvatarSeed } from "@/lib/conversation-avatars";
+import { cn } from "@/lib/utils";
 
 export function ActorDialog({ returnLabel, focus, connectionMessage, actorId, open, onClose, onActor, onBack, access, models, ready, onAccessRevoked, refreshVersion }: { returnLabel?:string; focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null; actorId: string | null; open: boolean; onClose(): void; onActor(id: string): void; onBack?: () => void; access: Access; models: ComposerModel[]; ready: boolean; onAccessRevoked(): void; refreshVersion: number }) {
   const [actor, setActor] = useState<ActorDetail | null>(null); const [searching, setSearching] = useState(false);
@@ -34,9 +35,10 @@ export function ActorDialog({ returnLabel, focus, connectionMessage, actorId, op
     return () => window.removeEventListener("keydown", shortcut);
   }, [open]);
   const loaded = useCallback((value: ActorDetail) => setActor(value), []);
-  const title = actor?.id === actorId ? actor.config?.name || actor.name || t("actor_dialog.actor_conversation") : t("actor_dialog.actor_conversation");
+  const current = actor?.id === actorId ? actor : null;
+  const title = current ? current.config?.name || current.name || t("actor_dialog.actor_conversation") : t("actor_dialog.actor_conversation");
   return <Dialog open={open} onOpenChange={value => { if (!value) onClose(); }}><DialogContent className="dl-actor-dialog" showCloseButton aria-describedby={undefined} onEscapeKeyDown={event => { if (searchingRef.current) { event.preventDefault(); setSearching(false); } }}>
-    <DialogHeader className="dl-actor-dialog-heading" data-window-drag-region><div className="dl-actor-dialog-title"><Button size="icon-sm" variant="ghost" className={onBack ? undefined : "dl-actor-mobile-back"} onClick={onBack || onClose} aria-label={onBack?t("actor_dialog.back_to_previous_actor"):returnLabel??t("app.back_to_main_conversation")}><ArrowLeftIcon /></Button>{actorId && <GeneratedAvatar seed={actorAvatarSeed(actorId)} />}<div><DialogTitle>{title}</DialogTitle></div></div>
+    <DialogHeader className="dl-actor-dialog-heading" data-window-drag-region><div className="dl-actor-dialog-title"><Button size="icon-sm" variant="ghost" className={onBack ? undefined : "dl-actor-mobile-back"} onClick={onBack || onClose} aria-label={onBack?t("actor_dialog.back_to_previous_actor"):returnLabel??t("app.back_to_main_conversation")}><ArrowLeftIcon /></Button>{actorId && <GeneratedAvatar seed={actorAvatarSeed(actorId)} />}<div><DialogTitle>{title}</DialogTitle>{current && <small className="dl-actor-dialog-status" role="status"><span className={cn("dl-status-dot", current.status === "running" && "dl-status-working")} aria-hidden="true" />{t(`contacts.${current.status}`)}</small>}</div></div>
       {actorId && <div className="dl-actor-dialog-actions"><Button variant="ghost" size="icon-sm" aria-label={t("actor_dialog.search_this_conversation")} aria-keyshortcuts="Control+f Meta+f Control+k Meta+k" title={t("app.search_conversation_shortcut")} disabled={actor?.id !== actorId} onClick={() => setSearching(true)}><SearchIcon /></Button></div>}
     </DialogHeader>
     {actorId && <ConversationPane focus={focus} key={actorId} actorId={actorId} connectionMessage={connectionMessage} access={access} onActor={onActor} onAccessRevoked={onAccessRevoked} models={models} ready={ready} compact refreshVersion={refreshVersion} searchOpen={searching} onSearchOpenChange={setSearching} onActorLoaded={loaded} />}

@@ -723,6 +723,7 @@ impl ActorSystem {
     pub fn infrastructure_dir(&self) -> PathBuf {
         self.inner.data_dir.clone()
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn message_stage_from_actor(
         &self,
         sender: &str,
@@ -731,6 +732,7 @@ impl ActorSystem {
         content: String,
         call_id: &str,
         related: Option<&str>,
+        forwarded: &[Attachment],
     ) -> Result<crate::stage::protocol::Envelope> {
         let current = self.store().message(current_id)?;
         if current.actor_id != sender
@@ -741,6 +743,11 @@ impl ActorSystem {
         }
         let source = self.execution_actor(&current)?;
         self.ensure_delegation_authority(&current)?;
+        let attachments = forwarded
+            .iter()
+            .map(|attachment| crate::resources::export(self, sender, &attachment.id))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| miette::miette!("{error}"))?;
         let local = self
             .store()
             .stage_local_id()
@@ -750,7 +757,7 @@ impl ActorSystem {
                 &source,
                 Some(&current),
                 target,
-                (content, Vec::new()),
+                (content, attachments),
                 now(),
                 call_id,
                 related,
@@ -1671,8 +1678,9 @@ impl ActorSystem {
         target: &str,
         content: String,
     ) -> Result<MessageRecord> {
-        self.message_from_actor_with_context(sender, current_id, target, content, None, None)
+        self.message_from_actor_with_context(sender, current_id, target, content, None, None, &[])
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn message_from_actor_with_context(
         &self,
         sender: &str,
@@ -1681,6 +1689,7 @@ impl ActorSystem {
         content: String,
         context: Option<&AppToolExecutionContext>,
         related: Option<&str>,
+        forwarded: &[Attachment],
     ) -> Result<MessageRecord> {
         if self.inner.reconfiguring.load(Ordering::Acquire)
             || self.inner.stopping.load(Ordering::Acquire)
@@ -1746,8 +1755,13 @@ impl ActorSystem {
                 authority.read_only |= source.remote_read_only;
             }
         }
-        let (content, attachments) =
+        let (content, mut attachments) =
             crate::resources::share_references(self, sender, target, &message.content)?;
+        for attachment in crate::resources::share_attachments(self, sender, target, forwarded)? {
+            if !attachments.iter().any(|known| known.id == attachment.id) {
+                attachments.push(attachment);
+            }
+        }
         message.content = content;
         message.attachments = attachments;
         let message = self.store().enqueue(message, None)?;
@@ -3375,7 +3389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_creation_requires_an_explicit_model_instead_of_inheriting_core() {
+    async fn actor_creation_uses_the_account_default_instead_of_inheriting_core() {
         use crate::{app::App, model_protocol::AgentToolCall};
         let (_directory, system) = fixture().await;
         let mut config = system.config();
@@ -3383,6 +3397,10 @@ mod tests {
             .models
             .insert("motion".into(), config.models["mock"].clone());
         system.update_config(config).await.unwrap();
+        // Core's own conversation preference must never become the child's model.
+        let mut core = system.actor("core").unwrap();
+        core.config.model = Some("motion".into());
+        system.store().save_actor(&core).unwrap();
         let input = system
             .send_user("core", "Create an animation worker".into(), vec![], None)
             .unwrap();
@@ -3395,15 +3413,24 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             name: "create".into(),
             arguments: serde_json::json!({"stage_id":null,"name":"Iris","workspace":null,
-                "instructions":null,"initial_authorization":null}),
+                "instructions":null,"initial_authorization":null,"model":"unknown"}),
         };
         let count = system.store().actor_count().unwrap();
         assert!(app.execute_tool(&call, &context).await.is_err());
-        call.arguments["model"] = serde_json::Value::Null;
-        assert!(app.execute_tool(&call, &context).await.is_err());
-        call.arguments["model"] = serde_json::json!("unknown");
-        assert!(app.execute_tool(&call, &context).await.is_err());
         assert_eq!(system.store().actor_count().unwrap(), count);
+        call.arguments["model"] = serde_json::Value::Null;
+        let result = app.execute_tool(&call, &context).await.unwrap();
+        let child = system
+            .actor(result.payload["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(child.config.model, None);
+        assert_eq!(
+            system
+                .config()
+                .actor_model_name(child.config.model.as_deref()),
+            "mock"
+        );
+        call.arguments["name"] = serde_json::json!("Pan");
         call.arguments["model"] = serde_json::json!("motion");
         let result = app.execute_tool(&call, &context).await.unwrap();
         let child = system

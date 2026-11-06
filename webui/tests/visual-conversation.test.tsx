@@ -35,19 +35,22 @@ describe("fixed presentation and chronological source", () => {
       expect(html).toContain("RESULT");
     }
   });
-  test("Core hides Actor communications and tool cards while retaining user deliveries", () => {
+  test("Core shows delegated tasks as cards without exposing Actor communications", () => {
     const initial = {...message,actor_id:"core",id:"initial",content:"Delegate work",status:"completed" as const};
     const internal = {...initial,id:"followup",source:{kind:"actor" as const,actor_id:"research"},reply_to:{kind:"user" as const},content:"Internal evidence"};
-    const tool = (messageId: string) => ({id:`tool-${messageId}`,message_id:messageId,call_id:messageId,name:"actors__message",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",name:"TASK_REFERENCE",message_id:messageId}});
-    const chat = {messages:[initial,internal],tools:[tool(initial.id),tool(internal.id)],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
+    const sent = {id:"tool-initial",message_id:initial.id,call_id:"send",name:"actors__message",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",name:"Atlas",message_id:"delegated",conversation_url:"/actors/research",sent_message:true,title:"TASK_TITLE"}};
+    const status = {id:"tool-followup",message_id:internal.id,call_id:"status",name:"actors__status",summary:"",error:null,status:"completed" as const,outcome:{actor_id:"research",message_id:"delegated"}};
+    const chat = {messages:[initial,internal],tools:[sent,status],approvals:[],events:[]} as unknown as Parameters<typeof PrimaryTranscript>[0]["chat"];
     const html = renderToStaticMarkup(<PrimaryTranscript messages={[initial,internal]} working={false} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
-    expect(html).not.toContain("TASK_REFERENCE");
-    expect(html).not.toContain("dl-actor-reference");
+    expect(html.match(/class="dl-delegation"/g)).toHaveLength(1);
+    expect(html).toContain(`aria-label="${i18n.t("delegation.open",{name:"Atlas",task:"TASK_TITLE"})}"`);
     expect(html).not.toContain("Internal evidence");
     expect(renderToStaticMarkup(<PrimaryTurn message={internal} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).toBe("");
     const reply = renderToStaticMarkup(<PrimaryTurn message={{...internal,reply:"Meaningful user update"}} chat={chat} access={{kind:"owner",manage:true}} onActor={()=>{}} />);
     expect(reply).toContain("Meaningful user update");
-    expect(reply).not.toContain("TASK_REFERENCE");
+    expect(reply).not.toContain("dl-delegation");
+    const failed = {...chat,tools:[{...sent,error:"Actor archived"}]} as typeof chat;
+    expect(renderToStaticMarkup(<PrimaryTurn message={initial} chat={failed} access={{kind:"owner",manage:true}} onActor={()=>{}} />)).not.toContain("dl-delegation");
   });
   test("Core has one conversation status after new inputs even while an older input is running", () => {
     const old = {...message,actor_id:"core",content:"OLDER_INPUT"};

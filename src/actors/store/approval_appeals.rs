@@ -4,6 +4,11 @@ use super::*;
 /// The runtime control envelope, delivered verbatim when inserted at a boundary.
 pub(crate) const APPEAL_NOTICE_TYPE: &str = "approval_appeal_decision";
 
+pub(crate) fn is_appeal_notice(content: &str) -> bool {
+    serde_json::from_str::<Value>(content)
+        .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some(APPEAL_NOTICE_TYPE))
+}
+
 fn approval_tx(tx: &Transaction<'_>, id: &str) -> Result<ApprovalRecord> {
     decode(
         sql(tx

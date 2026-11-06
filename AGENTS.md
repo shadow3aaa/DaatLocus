@@ -114,7 +114,9 @@ client are connected.
   Actor models through AdminActors, never its own. Changes preserve live App
   resources and apply before the next inference at a settled tool-group boundary. There is no account or Actor
   Full access / Ask / Auto selector. Actor creation happens through the Actors App,
-  without permission inheritance. Actors have no individual deletion operation.
+  without permission inheritance, and may send the new Actor's first task in the
+  same call; a null model selects the account default. Name conflicts fail
+  without side effects. Actors have no individual deletion operation.
   Creation accepts an initial authorization group which always includes recursive
   read/write access to the working directory and may include other explicit roots.
   Core grants this group to the execution device without review; ordinary Actors
@@ -152,7 +154,11 @@ client are connected.
   public server; it is transport infrastructure, not an execution authority.
 - Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
   decisions and outcomes; it excludes intermediate model
-  text and tool pipelines. Other Actors interleave message bubbles, compact
+  text and tool pipelines. Each request Core delegates appears there as a compact
+  task card with the recipient request's live status that opens the Actor
+  conversation. While hosted Actors work, a compact strip above the Core composer
+  and a count on Contacts open them; neither takes space when no Actor works.
+  Other Actors interleave message bubbles, compact
   collapsible groups of consecutive tools and independent outcomes in chronological
   order. There is no elapsed-time bar or outer per-input activity disclosure.
   Activity lists flow in the conversation, without a nested scrolling box
@@ -210,15 +216,23 @@ Sandbox expansion uses the unified review/application path.
   reply references and hard authority, isolating incompatible authorities.
   End inference naturally when the provider ends its turn. Send collaboration
   updates and results explicitly through messaging; final model text does not
-  automatically reply to collaborators. Keep delivery receipts and operation
+  automatically reply to collaborators. When a local delegated request fails, is
+  interrupted or completes without any answer to its requester, queue one runtime
+  notice to that requester carrying the outcome and error code, never final model
+  text. Keep delivery receipts and operation
   recovery separate from inference scheduling. Related-message IDs express
   correlation only, never authorization. Never promote Actor prose to Owner
   approval or let a restricted input borrow another input's authority.
   Actor communications use clickable bubbles with sender avatars and names above
   the bubble; outgoing bubbles
   retain recipient captions with a small recipient avatar. Creation
-  and status queries use ordinary tool rows. Core hides Actor communications and tools.
-- Core handles short coordination turns. Explicit durable deliveries can precede
+  and status queries use ordinary tool rows. Core hides Actor communications and
+  tool rows; its delegations appear only as task cards.
+- Core is a router with coordination tools only; it never executes device, web or
+  code work itself. Its prompt states that structure, and it delegates such work
+  without asking first, forwarding the user's original request and attachments
+  with routing facts only; Actors own plans and technical choices. Core handles
+  short coordination turns. Explicit durable deliveries can precede
   natural turn completion.
   Completing an input does not complete its delegated work. Progress and results
   return as correlated inputs; Core chooses meaningful user updates without polling

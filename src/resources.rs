@@ -186,20 +186,43 @@ pub(crate) fn share_references(
     let mut content = text.to_owned();
     let mut attachments = Vec::new();
     for id in ids.into_iter().rev() {
-        let resource = export(system, sender, &id)?;
-        bytes(system, sender, &resource)?;
-        install(system, recipient, &resource)?;
-        let uri = resource.uri(recipient);
-        content = content.replace(&resource.uri(sender), &uri);
-        attachments.push(crate::actors::Attachment {
-            id: resource.id,
-            name: resource.name,
-            media_type: resource.media_type,
-            size_bytes: resource.content.size,
-            uri,
-        });
+        let (resource, attachment) = share(system, sender, recipient, &id)?;
+        content = content.replace(&resource.uri(sender), &attachment.uri);
+        attachments.push(attachment);
     }
     Ok((content, attachments))
+}
+
+/// Copy the sender's own attachments into the recipient's ledger without new authority.
+pub(crate) fn share_attachments(
+    system: &ActorSystem,
+    sender: &str,
+    recipient: &str,
+    attachments: &[crate::actors::Attachment],
+) -> Result<Vec<crate::actors::Attachment>> {
+    attachments
+        .iter()
+        .map(|attachment| Ok(share(system, sender, recipient, &attachment.id)?.1))
+        .collect()
+}
+
+fn share(
+    system: &ActorSystem,
+    sender: &str,
+    recipient: &str,
+    id: &str,
+) -> Result<(Resource, crate::actors::Attachment)> {
+    let resource = export(system, sender, id)?;
+    bytes(system, sender, &resource)?;
+    install(system, recipient, &resource)?;
+    let attachment = crate::actors::Attachment {
+        id: resource.id.clone(),
+        name: resource.name.clone(),
+        media_type: resource.media_type.clone(),
+        size_bytes: resource.content.size,
+        uri: resource.uri(recipient),
+    };
+    Ok((resource, attachment))
 }
 
 pub fn bytes(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<Vec<u8>> {

@@ -106,16 +106,19 @@ async fn messages_during_inference_wait_for_tools_then_settle_without_unwinding_
             );
         }
     }
+    let root = system.store().messages("root", None, 20).unwrap().items;
+    let notices: Vec<_> = root
+        .iter()
+        .filter(|message| message.kind == MessageKind::Result)
+        .collect();
     assert_eq!(
-        system
-            .store()
-            .messages("root", None, 20)
-            .unwrap()
-            .items
-            .len(),
-        3,
-        "natural completion sends no automatic collaborator result"
+        root.len(),
+        4,
+        "natural completion sends no final text, only a runtime notice"
     );
+    assert_eq!(notices.len(), 1, "coalesced inputs share one notice");
+    assert!(notices[0].content.contains("without replying"));
+    assert_eq!(notices[0].in_reply_to.as_deref(), Some(parent.id.as_str()));
     system.shutdown().await;
 }
 

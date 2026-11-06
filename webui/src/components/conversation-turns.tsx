@@ -16,6 +16,8 @@ import { Markdown } from "@/components/markdown";
 import { ActorMessageBubble } from "@/components/actor-message-bubble";
 import { WorkActivity, WorkActivityHistory, type ActivityHistory } from "@/components/work-activity";
 import { MessageOutcomes, messageOutcomeTools } from "@/components/message-outcomes";
+import { DelegationCards } from "@/components/delegation-cards";
+import { delegationsOf } from "@/lib/delegations";
 import { cn } from "@/lib/utils";
 import { conversationFailureMessage } from "@/lib/conversation-errors";
 import { matchesConversationText } from "@/lib/conversation-search";
@@ -51,7 +53,8 @@ export const PrimaryTurn = forwardRef<HTMLElement, Props & { receiptMessageId?: 
   const input = (user && (!filtering || matchesConversationText(messageDisplayText(message), searchQuery!)));
   const reply = isUserDelivery(message) && (!filtering || matchesConversationText(message.reply || "", searchQuery!));
   const outcomes = messageOutcomeTools(tools);
-  const response = reply || (!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || (user && ["failed", "cancelled", "interrupted"].includes(message.status))));
+  const delegations = filtering ? [] : delegationsOf(tools);
+  const response = reply || delegations.length > 0 || (!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0 || (user && ["failed", "cancelled", "interrupted"].includes(message.status))));
   if (!input && !response) return null;
   return <motion.article ref={ref} layout="position" {...bubbleMotion} initial={sendOrigin ? false : bubbleMotion.initial} className="dl-message-turn dl-primary-turn" data-first-side={input ? "user" : "assistant"} data-last-side={response ? "assistant" : "user"} id={`message-${message.actor_id}-${message.id}`}>
     <AnimatePresence initial={false}>
@@ -60,6 +63,7 @@ export const PrimaryTurn = forwardRef<HTMLElement, Props & { receiptMessageId?: 
     </motion.div>}
     {response && <motion.div key="response" {...disclosureMotion} className="dl-primary-response">
     {reply && <div className="dl-message dl-message-assistant" data-message-side="reply"><MessageContextMenu content={message.reply || ""}><MessageBubbleRow {...messageAvatar(message,"reply",access,chat.actorId??message.actor_id)} name={chat.actor?.config?.name || chat.actor?.name} className="dl-primary-bubble-row"><div className="dl-bubble dl-bubble-assistant"><Markdown content={message.reply || ""} onActor={onActor} /></div><CopyMessage content={message.reply || ""} /></MessageBubbleRow></MessageContextMenu></div>}
+    {delegations.length > 0 && <DelegationCards items={delegations} onActor={onActor} />}
     {!filtering && (outcomes.artifacts.length > 0 || outcomes.changes.length > 0) && <MessageOutcomes actorId={message.actor_id} tools={tools} onActor={onActor} />}
     {!filtering && user && <OutcomeStatus message={message} />}
     </motion.div>}

@@ -8,6 +8,7 @@ import type { MessageRecord } from "../src/lib/actor-api";
 import { registerRunClearer } from "./fixtures";
 import { CODEX_IMPORT_MEDIA_TYPE } from "../src/lib/import-types";
 import {
+  addMessage,
   addTool,
   createActor,
   emitEvent,
@@ -171,12 +172,18 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
         return;
       }
       const callId = newId(), resultId = newId();
-      const targetName = getActor("research")!.summary.name;
+      const target = getActor("research")!;
+      const targetName = target.summary.name;
+      const title = user.content.trim().replace(/\s+/g, " ").slice(0, 48) || "Task";
       const text = `Assigned to ${targetName}. I will share progress here.`;
       emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__message" });
       if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
-      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: `Message sent to ${targetName}`, error: null, arguments: { actor_id: "research", content: user.content }, model_content: "Request delivered.", outcome: { actor_id: "research", name: targetName }, payload: {sent_message:{conversation_url:"/actors/research",content:user.content}} });
-      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: `Message sent to ${targetName}`, error: null, outcome: { actor_id: "research", name: targetName } });
+      const delegated = addMessage(target, { kind: "request", source: { kind: "actor", actor_id: ROOT_ACTOR_ID }, reply_to: { kind: "actor", actor_id: ROOT_ACTOR_ID, request_id: user.id }, content: user.content, attachments: user.attachments, status: isActorBusy(target.summary.id) ? "queued" : "running" });
+      emitEvent(target.summary.id, { type: "message_added", message_id: delegated.id });
+      const outcome = { actor_id: "research", name: targetName, message_id: delegated.id, conversation_url: "/actors/research", status: delegated.status, title, sent_message: true };
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: `Message sent to ${targetName}`, error: null, arguments: { actor_id: "research", content: user.content, title }, model_content: "Request delivered.", outcome, payload: {...outcome, sent_message:{conversation_url:"/actors/research",content:user.content}} });
+      emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: `Message sent to ${targetName}`, error: null, outcome });
+      submitTurn(target, delegated);
       completeRun(actor, user, reply, text);
       return;
     }
