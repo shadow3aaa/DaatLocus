@@ -574,6 +574,23 @@ pub(super) fn platform_roots() -> io::Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
+/// A volume read grant expands into that volume's children under the volume's
+/// own spelling, so a writable root directly below a volume root reappears in
+/// the read-only list under another spelling of the same object. Object
+/// conflict resolution would then tighten the write grant to read-only, so the
+/// redundant read-only entries are dropped before reconciliation.
+fn drop_writable_duplicates(container: &mut ContainerPolicy) {
+    let writable = container.readwrite_paths.clone();
+    container.readonly_paths.retain(|path| {
+        !writable.iter().any(|root| {
+            wxc_common::filesystem_object::compare_existing_filesystem_objects(
+                Path::new(path),
+                Path::new(root),
+            ) == wxc_common::filesystem_object::ExistingObjectComparison::Same
+        })
+    });
+}
+
 fn build_request(
     policy: &SandboxPolicy,
     program: &Path,
@@ -659,6 +676,7 @@ fn build_request(
             .iter()
             .any(|w| w.eq_ignore_ascii_case(path))
     });
+    drop_writable_duplicates(&mut container);
     // Reconcile object aliases, including hardlinks, rather than trusting strings.
     if let Some(normalized) = normalize_object_conflicts(&container, &mut Logger::new(Mode::Buffer))
         .map_err(io::Error::other)?
@@ -1160,6 +1178,45 @@ mod tests {
         let expanded = expand_volumes(vec![root.clone(), unavailable.clone()]).unwrap();
         assert!(expanded.contains(&root));
         assert!(!expanded.contains(&unavailable));
+    }
+
+    #[test]
+    fn writable_root_below_a_volume_root_survives_read_expansion() {
+        // A volume read grant is expanded one level, so a writable root that is
+        // a direct child of a volume root reappears there under the volume's own
+        // spelling (`C:\Windows` beside `\\?\C:\Windows`). Object conflict
+        // resolution would then tighten the write grant to read-only.
+        let root = platform_roots().unwrap().remove(0);
+        let writable = root.canonicalize().unwrap();
+        let mut policy = policy(&writable);
+        policy.filesystem.full_disk_read = true;
+        policy.filesystem.readable_roots = vec![];
+        let request = build_request(
+            &policy,
+            Path::new("cmd.exe"),
+            vec![],
+            &SandboxProcessOptions::default(),
+        )
+        .unwrap();
+        let container = request.policy;
+        assert!(
+            container
+                .readwrite_paths
+                .iter()
+                .any(|path| path == &writable.to_string_lossy()),
+            "the writable root must stay read-write: {:?}",
+            container.readwrite_paths
+        );
+        for readonly in &container.readonly_paths {
+            assert_ne!(
+                wxc_common::filesystem_object::compare_existing_filesystem_objects(
+                    Path::new(readonly),
+                    &writable,
+                ),
+                wxc_common::filesystem_object::ExistingObjectComparison::Same,
+                "read expansion must not shadow an explicit writable root: {readonly}"
+            );
+        }
     }
 
     #[tokio::test]
