@@ -118,6 +118,6 @@ pub(super) async fn list(
         .map_err(ApiError::from_report)?
         .map(|cursor| URL_SAFE_NO_PAD.encode(cursor));
     let mut page = json!({"items":items,"next_cursor":next,"unavailable_devices":unavailable,"event_cursor":event_cursor});
-    redact(&mut page, &state.system.config());
+    redact(&mut page, &state.system);
     Ok(Json(page))
 }

@@ -65,6 +65,7 @@ struct Inner {
     resource_cleanup: Mutex<Option<JoinHandle<()>>>,
     builtin_resources: Vec<crate::builtin_resources::BuiltinResource>,
     app_registry: Arc<crate::mcp::Registry>,
+    websearch_settings: crate::websearch_app::settings::Store,
     instructions: crate::instruction_layers::InstructionStore,
     #[cfg(windows)]
     computer_workspace: Mutex<Option<Arc<crate::computer_use_app::Workspace>>>,
@@ -414,6 +415,9 @@ impl ActorSystem {
                 #[cfg(windows)]
                 computer_workspace: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
+                websearch_settings: crate::websearch_app::settings::Store::open(
+                    data_dir.join("websearch.json"),
+                )?,
                 instructions: crate::instruction_layers::InstructionStore::open(
                     &data_dir.join("account"),
                     store
@@ -563,6 +567,9 @@ impl ActorSystem {
             apps.push("workspace".into());
         }
         Ok(apps)
+    }
+    pub fn websearch_settings(&self) -> &crate::websearch_app::settings::Store {
+        &self.inner.websearch_settings
     }
     #[cfg(test)]
     pub(crate) fn set_workspace_backend_for_test(&self, available: bool) {
@@ -2416,6 +2423,9 @@ impl ActorSystem {
     }
     pub fn redact_secrets(&self, detail: &str) -> String {
         let mut message = detail.to_owned();
+        for key in self.websearch_settings().get().keys.values() {
+            message = redact_secret_text(&message, &resolve_env_reference(key));
+        }
         for provider in self.config().providers.values() {
             match provider {
                 ProviderConfig::Openai { api_key, .. }

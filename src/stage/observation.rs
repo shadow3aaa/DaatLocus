@@ -199,7 +199,7 @@ pub fn read(
             .map_err(|_| StageError::Invalid("Invalid conversation cursor"))?;
     }
     // The service redactor also removes private tool protocol transcripts and credentials.
-    crate::service::redact(&mut value, &system.config());
+    crate::service::redact(&mut value, system);
     Ok(value)
 }
 pub fn reference(

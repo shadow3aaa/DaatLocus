@@ -1,4 +1,5 @@
 {
+  "websearch": {"title":"网页搜索","provider":"搜索提供商","action":"搜索网页","empty":"未找到搜索结果","console_login":"使用提供商设置中的 OpenCode Console 登录。需在该工作区启用托管网页搜索。","key_saved":"已保存 API 密钥","clear_key":"移除 API 密钥"},
   "contacts": {"sort":"通讯录排序","alphabetical":"按字母","recent":"最近活跃","model":"模型：{{model}}","no_model":"未配置模型","back":"返回通讯录","title": "通讯录", "search": "搜索 Actor 或消息", "empty": "暂无 Actor", "no_results": "没有匹配的 Actor 或消息", "idle": "空闲", "running": "正在工作", "archived": "已归档", "input": "收到的消息", "reply": "回复", "sent": "发送的消息", "assistant": "消息", "unavailable": "{{count}} 台设备暂时无法读取"},
   "delegation": {"tasks":"委派的任务","task":"任务","follow_up":"追加要求","open":"打开 {{name}}：{{task}}","open_actor":"打开 {{name}}","working_now":"{{count}} 个正在工作","sent":"已发送","waiting":"等待开始","working":"进行中","done":"已完成","failed":"失败","stopped":"已停止","interrupted":"已中断"},
   "lazy_page": {"load_failed": "暂时无法加载，请重试。"},

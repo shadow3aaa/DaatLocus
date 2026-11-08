@@ -15,6 +15,7 @@ pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/v1/access", get(access))
         .route("/v1/config/readiness", get(readiness))
+        .route("/v1/config/websearch", get(websearch).patch(save_websearch))
         .route("/v1/config", get(config).put(save_config))
         .route("/v1/config/preview", post(preview_config))
         .route("/v1/config/models/discover", post(discover_models))
@@ -23,6 +24,31 @@ pub(super) fn routes() -> Router<ServiceState> {
         .route("/v1/config/auth/complete", post(auth_complete))
         .route("/v1/logs", get(logs))
         .route("/v1/actors/{actor}/usage", get(usage))
+}
+fn websearch_view(state: &ServiceState) -> Value {
+    use crate::websearch_app::settings::Provider;
+    let settings = state.system.websearch_settings().get();
+    json!({"provider":settings.provider,"providers":Provider::ALL.into_iter().map(|id|json!({"id":id,"credential_configured":settings.keys.get(&id).is_some_and(|key|!key.is_empty())})).collect::<Vec<_>>()})
+}
+async fn websearch(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    Ok(Json(websearch_view(&state)))
+}
+async fn save_websearch(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(patch): Json<crate::websearch_app::settings::Patch>,
+) -> ApiResult<Json<Value>> {
+    manage(&state, &headers).await?;
+    state
+        .system
+        .websearch_settings()
+        .update(patch)
+        .map_err(|_| ApiError::invalid())?;
+    Ok(Json(websearch_view(&state)))
 }
 async fn access(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     owner(&state, &headers).await?;
@@ -236,7 +262,7 @@ async fn logs(
     .await
     .map_err(|_| ApiError::not_found())?;
     let mut value = serde_json::to_value(read).map_err(|_| ApiError::internal())?;
-    super::redact(&mut value, &state.system.config());
+    super::redact(&mut value, &state.system);
     Ok(Json(value))
 }
 

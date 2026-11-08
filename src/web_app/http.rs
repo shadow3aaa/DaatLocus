@@ -229,7 +229,7 @@ fn validate_public_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<Socke
     Ok(addresses)
 }
 
-async fn resolve_public_addresses(target: &url::Url) -> Result<Vec<SocketAddr>> {
+pub(crate) async fn resolve_public_addresses(target: &url::Url) -> Result<Vec<SocketAddr>> {
     validate_public_url(target.as_str())?;
     let port = target
         .port_or_known_default()

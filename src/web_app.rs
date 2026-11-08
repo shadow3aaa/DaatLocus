@@ -1,6 +1,6 @@
 //! Actor-scoped immutable Web documents over HTTP or the device's native WebView.
 mod document;
-mod http;
+pub(crate) mod http;
 
 use crate::{
     actors::ActorSystem,

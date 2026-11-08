@@ -54,7 +54,7 @@ async fn list(
         .approvals(Some(&actor), query.before, limit)
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -79,7 +79,7 @@ async fn global_list(
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
     value["event_cursor"] = Value::from(cursor);
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -98,7 +98,7 @@ async fn global_detail(
         .approval(&id)
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -139,7 +139,7 @@ async fn detail(
         }
         serde_json::to_value(record).map_err(|_| ApiError::internal())?
     };
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -172,6 +172,6 @@ async fn device_approval(
     };
     let mut value = serde_json::to_value(&record).map_err(|_| ApiError::internal())?;
     value["id"] = format!("{stage}~{}", record.id).into();
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(value)
 }

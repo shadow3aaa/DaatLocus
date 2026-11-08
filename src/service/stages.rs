@@ -112,7 +112,7 @@ async fn recovery_messages(
     let page = crate::stage::recovery::messages(state.system.store(), &archive, query.after, limit)
         .map_err(failure)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
-    super::redact(&mut value, &state.system.config());
+    super::redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn save_settings(

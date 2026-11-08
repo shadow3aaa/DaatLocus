@@ -27,11 +27,13 @@ import { isMacDesktop } from "@/lib/macos-computer-use";
 import { MacComputerUseSettings } from "@/components/settings/macos-computer-use-settings";
 
 import { BrowserSettings } from "@/components/settings/browser-settings";
+import { WebSearchSettings } from "@/components/settings/websearch-settings";
+import { WebSearchPreferences } from "@/lib/websearch";
 import { browserSupported } from "@/lib/browser-workspace";
 
-export type SettingsTab = "general" | "personal" | "account" | "usage" | "models" | "import" | "gui" | "browser" | "context";
+export type SettingsTab = "general" | "personal" | "account" | "usage" | "models" | "import" | "gui" | "browser" | "websearch" | "context";
 export type SettingsPageHandle = { close(): void };
-const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser", context:"context"};
+const paths: Record<SettingsTab, string> = {general: "general", personal: "appearance", account: "devices", usage: "usage", models: "providers", import: "import", gui: "gui", browser:"browser", websearch:"websearch", context:"context"};
 export function settingsPath(tab: SettingsTab) { return `/settings/${paths[tab]}`; }
 export function settingsTabFromPath(path: string): SettingsTab | null {
   return (Object.keys(paths) as SettingsTab[]).find(tab => path === settingsPath(tab)) ?? null;
@@ -56,6 +58,8 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   const [mobileDetail, setMobileDetail] = useState(false);
   const [accountVisited, setAccountVisited] = useState(initialTab === "account");
   const [guiVisited, setGuiVisited] = useState(initialTab === "gui");
+  const [websearchVisited, setWebsearchVisited] = useState(initialTab === "websearch");
+  const [searchPreferences] = useState(() => new WebSearchPreferences());
   const [query, setQuery] = useState("");
   const [importsSupported, setImportsSupported] = useState(false);
   const [computerUseSupported, setComputerUseSupported] = useState(false);
@@ -87,7 +91,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     if (!open) return;
     setError(null); setNotice(null);setConfig(null);setDirty(false);setLoading(false);setConfirmClose(false);setQuery("");setMobileDetail(initialTab !== "general");setAccountVisited(initialTab === "account");
   }, [open]);
-  useEffect(() => { setTab(canManage ? initialTab : "personal"); if (initialTab === "account") setAccountVisited(true); }, [initialTab, canManage]);
+  useEffect(() => { setTab(canManage ? initialTab : "personal"); if (initialTab === "account") setAccountVisited(true); if (initialTab === "websearch") setWebsearchVisited(true); }, [initialTab, canManage]);
   useEffect(() => {
     if (!open || !canManage || tab !== "models" || config !== null) return;
     const controller = new AbortController();
@@ -128,6 +132,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     {id: "personal" as const, label: t("settings_dialog.appearance"), icon: SunIcon, keywords: [t("settings_dialog.theme"), t("settings_dialog.light"), t("settings_dialog.dark"), t("settings_dialog.system"), t("appearance.code_theme"), t("appearance.accent"), t("appearance.interface_size"), t("appearance.content_size"), t("appearance.full_width")].join(" ")},
     ...(canManage ? [
       {id:"context" as const, label:t("context_composition.title"), icon:LayersIcon, keywords:"system prompt AGENTS.md Skills"},
+      {id:"websearch" as const, label:t("websearch.title"), icon:SearchIcon, keywords:"OpenCode Tavily Exa Brave Serper Firecrawl Parallel"},
       ...(browserSupported()?[{id:"browser" as const,label:t("browser_settings.title"),icon:GlobeIcon,keywords:[t("browser_use.search_engine"),t("browser_settings.language"),t("browser_settings.zoom")].join(" ")}]:[]),
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
@@ -137,7 +142,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
     ] : []),
   ];
   const filtered = categories.filter(category => `${category.label} ${category.keywords}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  function selectTab(next: SettingsTab) {setTab(next);setNotice(null);setError(null);setLoading(false);setMobileDetail(true);if(next === "account")setAccountVisited(true);if(next === "gui")setGuiVisited(true);onTabChange(next);}
+  function selectTab(next: SettingsTab) {setTab(next);setNotice(null);setError(null);setLoading(false);setMobileDetail(true);if(next === "account")setAccountVisited(true);if(next === "gui")setGuiVisited(true);if(next === "websearch")setWebsearchVisited(true);onTabChange(next);}
   if (!open) return null;
 
   return <section className="dl-settings-page" data-mobile-detail={mobileDetail} data-category={tab} aria-label={t("app.settings")}>
@@ -156,6 +161,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         </SettingsGroup><details className="mt-6 text-xs text-muted-foreground"><summary>{t("settings_page.third_party_notices")}</summary><p className="mt-2"><a href="https://github.com/winfsp/winfsp" target="_blank" rel="noreferrer">{t("settings_page.winfsp_notice")}</a></p></details></div>
         <div hidden={tab !== "personal"}><AppearanceSettings preferences={preferences} onChange={onPreferencesChanged} /></div>
         {canManage && tab === "context" && <ContextSettings />}
+        {canManage && <div hidden={tab !== "websearch"}>{websearchVisited && <WebSearchSettings preferences={searchPreferences} />}</div>}
         {canManage && browserSupported() && tab==="browser" && <BrowserSettings/>}
         {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}

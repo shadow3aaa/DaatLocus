@@ -102,3 +102,19 @@ test("Sudo wrapping an installed external tool preserves its generic result rend
   expect(isBuiltinTool(result)).toBe(false);
   expect(renderToStaticMarkup(<ToolDetail result={result}/>)).toContain("First block of tool output.");
 });
+
+test("WebSearch renders sources, escapes excerpts and never exposes raw envelopes through local, remote or Sudo routing",()=>{
+  for (const name of ["websearch__search","d_abcdef123456_websearch__search","sudo__execute"]) {
+    const result={...toolExampleResult(toolExamples.find(item=>item.id==="websearch-results")!),name,outcome:name==="sudo__execute"?{operation:"websearch__search"}:{},payload:{query:"Rust releases",results:[{title:"Release <notes>",url:"https://example.com/releases",content:"<script>original excerpt</script>",published_at:"2026-11-08"},{title:"Unsafe link",url:"javascript:alert(1)",content:"Plain text"}],opaque_id:"PRIVATE_IDENTIFIER"},model_content:"PRIVATE_MODEL_TRANSCRIPT"};
+    expect(toolResultTitle(result)).toBe("Rust releases");
+    const html=renderToStaticMarkup(<ToolDetail result={result}/>);
+    expect(html).toContain('href="https://example.com/releases"');
+    expect(html).toContain("Release &lt;notes&gt;");
+    expect(html).toContain("&lt;script&gt;original excerpt&lt;/script&gt;");
+    expect(html).toContain("2026-11-08");
+    for(const hidden of ["javascript:","PRIVATE_IDENTIFIER","PRIVATE_MODEL_TRANSCRIPT","opaque_id","published_at"])expect(html).not.toContain(hidden);
+  }
+  expect(renderToStaticMarkup(<ToolDetail result={toolExampleResult(toolExamples.find(item=>item.id==="websearch-empty")!)}/>)).toContain(t("websearch.empty"));
+  const failure=renderToStaticMarkup(<ToolDetail result={toolExampleResult(toolExamples.find(item=>item.id==="websearch-error")!)}/>);
+  expect(failure).toContain("HTTP 429"); expect(failure).not.toContain(t("websearch.empty"));
+});

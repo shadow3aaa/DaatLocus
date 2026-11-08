@@ -17,7 +17,7 @@ function ResultList({items,render}:{items:Record<string,JsonValue>[];render(item
 }
 function DocumentLink({title,url}:{title:string;url?:string}) {
   const href=url&&(safeLink(url)||resourceActorId(url,typeof location==="undefined"?"http://localhost":location.href)&&url);
-  return href?<a className="dl-result-link" href={href} target="_blank" rel="noreferrer">{title||url}</a>:title?<span>{title}</span>:null;
+  return href?<a className="dl-result-link" href={href} target="_blank" rel="noreferrer">{title.trim()?title:url}</a>:title.trim()?<span>{title}</span>:null;
 }
 export function TerminalContent({value,live=false}:{value:Record<string,JsonValue>;live?:boolean}) {
   const text=terminalText(value),session=asObject(value.session);
@@ -52,6 +52,11 @@ export function ToolDomainContent({kind,value,live}:{kind:string|undefined;value
         {asRows(document.matches).map((match,index)=><pre className="dl-search-match" key={index}>{asText(match.content)}</pre>)}
       </>;
     }}/>;
+    case "websearch":return !Array.isArray(value.results)?null:items.length ? <ResultList items={items} render={entry=><>
+      <DocumentLink title={asText(entry.title)} url={asText(entry.url)}/>
+      {asText(entry.published_at)&&<small className="dl-tool-note">{asText(entry.published_at)}</small>}
+      {asText(entry.content)&&<p className="whitespace-pre-wrap break-words">{asText(entry.content)}</p>}
+    </>}/> : <p className="dl-tool-note">{t("websearch.empty")}</p>;
     case "workspace":return <>
       {workspaceText(value).trim()&&<CodeBlock code={workspaceText(value)} language="text"/>}
       {items.length>0&&<ResultList items={items} render={entry=>asText(entry.path)?<span className="dl-result-path">{entry.kind==="added"?"+ ":entry.kind==="deleted"?"− ":""}{asText(entry.path)}</span>:<span>{asText(entry.message)}</span>}/>}

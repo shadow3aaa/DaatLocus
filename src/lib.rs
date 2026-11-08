@@ -54,4 +54,5 @@ pub mod terminal_app;
 pub mod tool_output_spill;
 pub mod web_app;
 pub mod web_host;
+pub mod websearch_app;
 pub mod workspace_app;

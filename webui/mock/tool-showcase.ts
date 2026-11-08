@@ -83,6 +83,9 @@ export const toolSections = [
     sample("skills-error","Unavailable skill","super_skills__read_file",{},{error:"This skill document is unavailable."}),
   ]},
   {id:"tools-web",label:"Tools · Web text and structured results",examples:[
+    sample("websearch-results","Web search sources","websearch__search",{provider:"opencode",query:"Rust releases",results:[{title:"Rust release notes",url:"https://example.com/releases",content:"Release highlights and source references.",published_at:"2026-11-08"}]},{schema:{"x-dl-content":"websearch"},outcome:{query:"Rust releases"}}),
+    sample("websearch-empty","No search results","websearch__search",{provider:"tavily",query:"No matches",results:[]},{schema:{"x-dl-content":"websearch"}}),
+    sample("websearch-error","Search provider unavailable","websearch__search",{},{error:"WebSearch provider returned HTTP 429"}),
     sample("web-text","Page text, links and pagination","web__run",{results:[{operation:"open",result:{title:"Example documentation",url:"https://example.com/docs",content:"# Documentation\n\nThis is the original text extracted from the page.\n"+"A long paragraph that should wrap naturally.".repeat(30),offset:0,next_offset:100,notices:["The page returns readable text only."]}}]}),
     sample("web-json","Structured JSON fields","web__run",{results:[{operation:"open",result:{media_type:"application/json",offset:0,next_offset:null,content:JSON.stringify({name:"Example API",ok:true,count:0,optional:null,items:[{name:"First item",value:42}]})}}]}),
     sample("web-json-invalid","Preserve malformed JSON as text","web__run",{results:[{operation:"open",result:{media_type:"application/json",offset:0,next_offset:null,content:'{"incomplete":'}}]}),

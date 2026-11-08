@@ -82,7 +82,7 @@ async fn queue(
             .map_err(ApiError::from_report)?,
     )
     .map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn edit(
@@ -163,7 +163,7 @@ async fn edit(
             .await
             .map_err(|_| ApiError::unavailable())?;
         let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-        redact(&mut value, &state.system.config());
+        redact(&mut value, &state.system);
         return Ok(Json(value));
     }
     let record = state
@@ -179,7 +179,7 @@ async fn edit(
         )
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 fn reject_import_edit(state: &ServiceState, actor: &str, message: &str) -> ApiResult<()> {
@@ -210,7 +210,7 @@ async fn withdraw(
             .await
             .map_err(|_| ApiError::unavailable())?;
         let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-        redact(&mut value, &state.system.config());
+        redact(&mut value, &state.system);
         return Ok(Json(value));
     }
     let record = state
@@ -226,7 +226,7 @@ async fn withdraw(
         )
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn clear(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
@@ -295,6 +295,6 @@ async fn activity(
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
     value["event_cursor"] = Value::from(cursor);
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }

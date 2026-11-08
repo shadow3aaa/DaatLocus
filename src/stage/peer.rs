@@ -1509,7 +1509,7 @@ impl PeerLink {
                         let record = record
                             .map_err(|_| StageError::Conflict("Actor preferences rejected"))?;
                         let mut value = crate::service::public_actor(&record);
-                        crate::service::redact(&mut value, &host.system.config());
+                        crate::service::redact(&mut value, &host.system);
                         let content = Some(
                             ContentStore::new(host.system.store())
                                 .store_source(

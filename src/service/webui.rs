@@ -45,6 +45,7 @@ fn app_route(path: &str) -> bool {
             | "/settings/devices"
             | "/settings/permissions"
             | "/settings/providers"
+            | "/settings/websearch"
     ) {
         return true;
     }
@@ -225,6 +226,7 @@ mod tests {
             "/settings/devices",
             "/settings/permissions",
             "/settings/providers",
+            "/settings/websearch",
         ] {
             assert!(app_route(path));
         }

@@ -75,7 +75,7 @@ fn batch(
         if let Some(actor) = value.pointer_mut("/event/actor") {
             super::actor_conversation_link(actor);
         }
-        redact(&mut value, &state.system.config());
+        redact(&mut value, &state.system);
         values.push(value);
     }
     Ok((values, next))

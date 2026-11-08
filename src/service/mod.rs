@@ -20,7 +20,7 @@ pub(crate) use auth::native_bootstrap;
 
 use crate::{
     actors::{ActorRecord, ActorSystem, Attachment, MessageRecord, Page},
-    config::{Config, ProviderConfig, resolve_env_reference},
+    config::{ProviderConfig, resolve_env_reference},
     config_setup::PendingSetupProviderAuthFlow,
 };
 use axum::{
@@ -344,8 +344,16 @@ pub(crate) fn actor_conversation_link(value: &mut Value) {
     }
 }
 
-pub(crate) fn redact(value: &mut Value, config: &Config) {
-    let mut secrets = Vec::new();
+pub(crate) fn redact(value: &mut Value, system: &ActorSystem) {
+    let config = system.config();
+    let mut secrets: Vec<String> = system
+        .websearch_settings()
+        .get()
+        .keys
+        .values()
+        .map(|key| resolve_env_reference(key))
+        .filter(|key| !key.is_empty())
+        .collect();
     for provider in config.providers.values() {
         let key = match provider {
             ProviderConfig::Openai { api_key, .. }
@@ -429,7 +437,7 @@ async fn list_actors(
             actor_conversation_link(actor);
         }
     }
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 pub(crate) fn bounded(value: Option<usize>, maximum: usize) -> ApiResult<usize> {
@@ -453,7 +461,7 @@ async fn get_actor(
     }
     let record = state.system.actor(&actor).map_err(ApiError::from_report)?;
     let mut value = public_actor(&record);
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 #[derive(Deserialize)]
@@ -485,7 +493,7 @@ async fn patch_actor_preferences(
         .await
         .map_err(ApiError::from_report)?;
     let mut value = public_actor(&record);
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 #[derive(Deserialize)]
@@ -538,7 +546,7 @@ async fn search_messages(
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
     value["event_cursor"] = Value::from(cursor);
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn messages(
@@ -584,7 +592,7 @@ async fn messages(
         )
         .map_err(|_| ApiError::internal())?;
     }
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn message(
@@ -612,7 +620,7 @@ async fn message(
         return Err(ApiError::not_found());
     }
     let mut value = serde_json::to_value(message).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn tool_result(
@@ -640,7 +648,7 @@ async fn tool_result(
         return Err(ApiError::not_found());
     }
     let mut value = serde_json::to_value(result).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -682,7 +690,7 @@ async fn tool_results(
         .tool_summaries(&actor, &id, query.before, bounded(query.limit, 100)?)
         .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(results).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 #[derive(Deserialize)]
@@ -764,7 +772,7 @@ async fn send_core_message(
         }
     }
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok((StatusCode::ACCEPTED, Json(value)))
 }
 async fn cancel_message(

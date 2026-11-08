@@ -25,6 +25,7 @@ pub const DEVICE_APPS: &[&str] = &[
     #[cfg(not(target_os = "android"))]
     "sudo",
     "web",
+    "websearch",
     #[cfg(any(windows, target_os = "macos", target_os = "android"))]
     "browser_use",
     "artifacts",
@@ -42,6 +43,7 @@ pub(crate) const ALL_APPS: &[&str] = &[
     "terminal",
     "sudo",
     "web",
+    "websearch",
     "browser_use",
     "artifacts",
     "apps_manager",
@@ -125,6 +127,10 @@ pub fn create_apps(
                 actor.id.clone(),
                 system.clone(),
                 actor.remote_read_only,
+            )),
+            "websearch" => Box::new(crate::websearch_app::WebSearchApp::new(
+                actor.id.clone(),
+                system.clone(),
             )),
             "browser_use" => Box::new(crate::browser_use_app::BrowserUseApp::new(
                 actor.id.clone(),

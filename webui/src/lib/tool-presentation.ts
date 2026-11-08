@@ -28,6 +28,7 @@ const labels: Record<string, string> = {
   files__read_file: "tool_presentation.read_file", files__write_file: "tool_presentation.write_file", files__edit_file: "tool_presentation.edit_file", files__copy_file: "tool_presentation.copy_file", files__list_directory: "tool_presentation.browse_folder", files__search_text: "tool_presentation.search_files", files__read_skill: "tool_presentation.read_skill", files__list_skills: "tool_presentation.view_skills", files__view_image: "tool_presentation.view_image",
   terminal__terminal_exec: "tool_presentation.run_command", terminal__terminal_write_stdin: "tool_presentation.terminal_input", terminal__terminal_terminate: "tool_presentation.stop_process",
   web__run: "tool_presentation.read_page", web__close: "tool_presentation.close_page",
+  websearch__search: "websearch.action",
   browser_use__move_pointer:"browser_use.move",browser_use__drag:"browser_use.drag",browser_use__open_page:"browser_use.open",browser_use__observe:"browser_use.observe",browser_use__list_pages:"browser_use.list",browser_use__click:"browser_use.click",browser_use__scroll:"browser_use.scroll",browser_use__type_text:"browser_use.type",browser_use__press_key:"browser_use.key",browser_use__navigate:"browser_use.navigate",browser_use__back:"browser_use.back",browser_use__forward:"browser_use.forward",browser_use__reload:"browser_use.reload",browser_use__close_page:"tool_presentation.close_page",
   apps_manager__list: "apps.list_action", apps_manager__inspect: "apps.inspect_action", apps_manager__refresh: "apps.refresh_action", apps_manager__install: "apps.install_action", apps_manager__enable: "apps.enable", apps_manager__close: "apps.close", apps_manager__configure_timeouts: "tool_presentation.update_app_settings",
   artifacts__present: "tool_details.deliver_result",
@@ -94,7 +95,7 @@ export function activityLabel(tool: ToolSummary & { status?: "running" | "comple
   const app = asObject(outcome.app);
   if (tool.status === "running" && name.startsWith("terminal__")) return { label: t("tool_presentation.running"), detail: asText(outcome.command) };
   const label = asText(app.name) || toolLabel(name);
-  const fact = [outcome.command, outcome.path, outcome.title, asObject(outcome.observation).title, ...(!isBuiltinTool(tool)?[app.tool]:[])].map(asText).find(Boolean);
+   const fact = [outcome.command, outcome.path, outcome.title, ...(name.startsWith("websearch__")?[outcome.query]:[]), asObject(outcome.observation).title, ...(!isBuiltinTool(tool)?[app.tool]:[])].map(asText).find(Boolean);
   const detail = fact || (tool.status === "running" ? t("tool_presentation.running_2") : isBuiltinTool(tool) || tool.error ? "" : readableSummary(tool.summary));
   return { label, detail: detail === label ? "" : detail };
 

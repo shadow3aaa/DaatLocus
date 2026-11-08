@@ -21,6 +21,7 @@ export function toolContentKind(result:ToolResult):string|undefined {
   const name=wrapped&&!wrapped.startsWith("sudo__")?domainToolName(wrapped):operationToolName(result);
   if(name.startsWith("terminal__"))return "terminal";
   if(name.startsWith("web__"))return "web";
+  if(name.startsWith("websearch__"))return "websearch";
   if(/^(browser_use|computer_use|phone_use)__/.test(name))return "gui";
   if(name.startsWith("apps_manager__"))return "apps";
   if((name.startsWith("actors__")||name.startsWith("admin_actors__")))return "actor";
@@ -68,6 +69,7 @@ export function workspaceText(value:Record<string,JsonValue>) {
 export function contentItems(kind:string|undefined,value:Record<string,JsonValue>) {
   switch(kind) {
     case "directory":return asRows(value.entries).filter(entry=>asText(entry.name).trim()||asText(entry.path).trim());
+    case "websearch":return asRows(value.results).filter(entry=>asText(entry.title).trim()||safeLink(asText(entry.url))||asText(entry.content).trim());
     case "search":return asRows(value.matches).filter(entry=>asText(entry.text).trim()||asText(entry.content).trim());
     case "skills":return asRows(value.skills).filter(entry=>asText(entry.name).trim()||asText(entry.description).trim());
     case "apps":return (Array.isArray(value.apps)?asRows(value.apps):[asObject(value.app)]).filter(entry=>asText(entry.name).trim()||asText(entry.description).trim());
@@ -89,6 +91,7 @@ export function toolHasContent(result:ToolResult):boolean {
     case "file-change": return asRows(asObject(value.change).lines).length>0;
     case "status":return value.status==="submitted";
     case "image":case "actor":return false;
+    case "websearch":return Array.isArray(value.results);
     case "gui":return guiNeedsAttention(value)||contentItems(kind,value).length>0;
     case "directory":case "search":case "skills":case "apps":case "web":return contentItems(kind,value).length>0;
     case "workspace":return Boolean(workspaceText(value).trim()||asText(value.error)||asText(value.uncertain)||contentItems(kind,value).length||Array.isArray(value.conflicts)&&value.conflicts.some(entry=>asText(entry).trim()));
@@ -104,6 +107,7 @@ export function toolResultTitle(result:ToolResult) {
   if(kind==="gui")return asText(asObject(value.observation).title)||asText(asObject(value.observation).url);
   if(kind==="web") { const document=asObject(asRows(value.results)[0]?.result);return asText(document.title)||asText(document.url); }
   if(kind==="apps")return asText(asObject(value.app).name)||asText(value.name);
+  if(kind==="websearch")return asText(value.query);
   if(kind==="workspace")return asText(value.path)||asText(value.message);
   if(["source","file-change","image"].includes(kind??""))return asText(value.path);
   return "";

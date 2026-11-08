@@ -83,6 +83,10 @@ fn command_outcome(arguments: &Value, payload: &Value) -> Option<Value> {
     // Bounded source fact only; full commands and other arguments remain in scoped details.
     (command.len() <= 2048).then(|| serde_json::json!({"command": command}))
 }
+fn query_outcome(arguments: &Value) -> Option<Value> {
+    let query = arguments.get("query").and_then(Value::as_str)?;
+    (query.len() <= 2048).then(|| serde_json::json!({"query":query}))
+}
 fn sudo_target(name: &str, arguments: &Value) -> Option<AgentToolCall> {
     let name = tool_domain_name(name);
     if !matches!(name, "sudo__execute" | "sudo__execute_as_admin") {
@@ -109,9 +113,11 @@ fn operation_outcome(outcome: Option<Value>, target: Option<&AgentToolCall>) -> 
 fn tool_started_outcome(call: &AgentToolCall) -> Option<Value> {
     let target = sudo_target(&call.name, &call.arguments);
     let source = target.as_ref().unwrap_or(call);
-    let outcome = (tool_domain_name(&source.name) == "terminal__terminal_exec")
-        .then(|| command_outcome(&source.arguments, &Value::Null))
-        .flatten();
+    let outcome = match tool_domain_name(&source.name) {
+        "terminal__terminal_exec" => command_outcome(&source.arguments, &Value::Null),
+        "websearch__search" => query_outcome(&source.arguments),
+        _ => None,
+    };
     operation_outcome(outcome, target.as_ref())
 }
 fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
@@ -127,9 +133,11 @@ fn tool_outcome(result: &ToolResultRecord) -> Option<Value> {
 }
 fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) -> Option<Value> {
     if failed {
-        return (tool_domain_name(name) == "terminal__terminal_exec")
-            .then(|| command_outcome(arguments, value))
-            .flatten();
+        return match tool_domain_name(name) {
+            "terminal__terminal_exec" => command_outcome(arguments, value),
+            "websearch__search" => query_outcome(arguments),
+            _ => None,
+        };
     }
     let payload = value.as_object()?;
     if payload
@@ -141,6 +149,9 @@ fn source_outcome(name: &str, arguments: &Value, value: &Value, failed: bool) ->
         return Some(serde_json::json!({"approval": payload["approval"]}));
     }
     let domain_name = tool_domain_name(name);
+    if domain_name == "websearch__search" {
+        return query_outcome(arguments);
+    }
     if domain_name
         .split_once("__")
         .is_some_and(|(app, _)| crate::mcp::is_mcp_id(app))
@@ -2472,6 +2483,40 @@ impl ActorStore {
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
+
+    #[test]
+    fn websearch_summaries_stream_only_a_bounded_query_and_preserve_approval_facts() {
+        let arguments = serde_json::json!({"query":"Rust releases","limit":8});
+        let result = serde_json::json!({"provider":"tavily","query":"Rust releases","results":[{"content":"HEAVY_EXCERPT"}]});
+        assert_eq!(
+            source_outcome("websearch__search", &arguments, &result, false),
+            Some(serde_json::json!({"query":"Rust releases"}))
+        );
+        assert_eq!(
+            source_outcome(
+                "d_abcdef123456_websearch__search",
+                &arguments,
+                &Value::Null,
+                true
+            ),
+            Some(serde_json::json!({"query":"Rust releases"}))
+        );
+        let approval =
+            serde_json::json!({"approval":{"decision":"denied","reason":"Not authorized"}});
+        assert_eq!(
+            source_outcome("websearch__search", &arguments, &approval, false),
+            Some(approval)
+        );
+        assert!(
+            source_outcome(
+                "websearch__search",
+                &serde_json::json!({"query":"x".repeat(2049)}),
+                &result,
+                false
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn sudo_observations_keep_target_identity_and_domain_facts_without_changing_the_effect_record()

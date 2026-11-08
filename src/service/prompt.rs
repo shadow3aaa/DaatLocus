@@ -123,7 +123,7 @@ async fn files(
         "items": prompt.files.iter().enumerate().skip(start).take(limit).map(|(index, file)| json!({"index":index,"name":file.name,"bytes":file.content.len(),"tokens":approx_token_count(&file.content),"layer_id":file.layer_id})).collect::<Vec<_>>(),
         "next_cursor": (start.saturating_add(limit) < prompt.files.len()).then(|| start.saturating_add(limit))
     });
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -155,7 +155,7 @@ async fn file(
     let file = prompt.files.get(index).ok_or_else(ApiError::not_found)?;
     // Redact before paging so credentials cannot straddle a chunk boundary.
     let mut content = Value::String(file.content.clone());
-    redact(&mut content, &state.system.config());
+    redact(&mut content, &state.system);
     let content = content.as_str().ok_or_else(ApiError::internal)?;
     let start = query.offset.unwrap_or(0);
     if !content.is_char_boundary(start) {
@@ -166,7 +166,7 @@ async fn file(
         end -= 1;
     }
     let mut value = json!({"content": &content[start..end], "next_offset": (end < content.len()).then_some(end)});
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 
@@ -210,7 +210,7 @@ async fn layers(
     });
     let start = query.after.unwrap_or(0);
     let mut value = json!({"items":files.iter().skip(start).take(limit).map(|file|metadata(file,&library)).collect::<Vec<_>>(),"next_cursor":(start.saturating_add(limit)<files.len()).then(||start.saturating_add(limit))});
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn layer(
@@ -227,7 +227,7 @@ async fn layer(
         .ok_or_else(ApiError::not_found)?;
     let mut value = metadata(file, &library);
     value["content"] = file.content.clone().into();
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 #[derive(Deserialize)]
@@ -259,7 +259,7 @@ async fn write_layer(
         .map_err(ApiError::from_report)?;
     let mut value = metadata(&file, &state.system.instructions().snapshot());
     value["content"] = file.content.into();
-    redact(&mut value, &state.system.config());
+    redact(&mut value, &state.system);
     Ok(Json(value))
 }
 async fn create_layer(
