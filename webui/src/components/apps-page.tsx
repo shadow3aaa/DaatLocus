@@ -23,6 +23,7 @@ import {
   type AppDetail,
   type InstalledApp,
 } from "@/lib/apps-api";
+import { mcpPresets, mcpPresetDraft } from "@/lib/mcp-presets";
 import { LazyPage } from "@/components/lazy-page";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -468,6 +469,7 @@ function AddAppDialog({
     ),
     [pending, setPending] = useState(false),
     [error, setError] = useState("");
+  const [preset, setPreset] = useState("");
   const alive = useRef(true);
   const installation = useRef<string | null>(null);
   const [timeoutInputs, setTimeoutInputs] = useState(() => timeoutValues());
@@ -525,6 +527,7 @@ function AddAppDialog({
       if (!alive.current) return;
       onOpenChange(false);
       setName("");
+      setPreset("");
       setDescription("");
       setUrl("");
       setToken("");
@@ -565,6 +568,36 @@ function AddAppDialog({
           onSubmit={(event) => void submit(event)}
         >
           <FieldGroup>
+            <Field>
+              <FieldLabel>{t("apps.presets")}</FieldLabel>
+              <ToggleGroup
+                type="single"
+                value={preset}
+                disabled={pending}
+                aria-label={t("apps.presets")}
+                onValueChange={(id) => {
+                  const draft = mcpPresetDraft(id);
+                  if (!draft) return;
+                  setPreset(id);
+                  setName(draft.name);
+                  setTransport(draft.transport);
+                  setUrl(draft.url);
+                  setAuth(draft.auth);
+                  setToken(draft.token);
+                  setCommand(draft.command);
+                  setArguments(draft.argumentsText);
+                  setEnvironment(draft.environment);
+                  setError("");
+                }}
+              >
+                {mcpPresets.map((item) => (
+                  <ToggleGroupItem key={item.id} value={item.id}>
+                    {item.name}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+              <FieldDescription>{t("apps.presets_hint")}</FieldDescription>
+            </Field>
             <Field>
               <FieldLabel htmlFor="app-name">{t("apps.name")}</FieldLabel>
               <Input

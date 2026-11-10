@@ -794,6 +794,8 @@
     "no_results": "No apps found",
     "try_search": "Try another name.",
     "add_mcp": "Add custom MCP server",
+    "presets": "Quick setup",
+    "presets_hint": "Choose a server to fill its URL and authentication. Enter your token below; Microsoft Learn needs no token.",
     "name": "Name",
     "name_placeholder": "App name",
     "description": "Description (optional)",

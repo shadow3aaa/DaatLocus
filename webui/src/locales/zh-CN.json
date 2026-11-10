@@ -794,6 +794,8 @@
     "no_results": "未找到应用",
     "try_search": "试试其他名称。",
     "add_mcp": "添加自定义 MCP 服务器",
+    "presets": "快速配置",
+    "presets_hint": "选择服务器以填入地址与认证方式。请在下方输入令牌；Microsoft Learn 无需令牌。",
     "name": "名称",
     "name_placeholder": "应用名称",
     "description": "描述（可选）",
