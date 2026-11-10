@@ -31,6 +31,9 @@ struct InstallArgs {
     description: Option<String>,
     transport: TransportKind,
     url: Option<String>,
+    /// Device environment variable name for an HTTP Bearer token.
+    /// Never pass the token itself as a tool argument.
+    bearer_token_env: Option<String>,
     command: Option<String>,
     arguments: Vec<String>,
     /// KEY=value entries added to the inherited environment; names must not start with DAAT_LOCUS.
@@ -40,6 +43,27 @@ struct InstallArgs {
     timeouts: Option<Timeouts>,
 }
 impl InstallArgs {
+    fn bearer_token(&self) -> Result<Option<String>> {
+        let Some(name) = self.bearer_token_env.as_deref() else {
+            return Ok(None);
+        };
+        if name.is_empty()
+            || !name
+                .bytes()
+                .enumerate()
+                .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+        {
+            return Err(miette!(
+                "Invalid MCP bearer token environment variable name"
+            ));
+        }
+        let token = std::env::var(name)
+            .map_err(|_| miette!("MCP bearer token environment variable is unavailable"))?;
+        if token.is_empty() {
+            return Err(miette!("MCP bearer token environment variable is empty"));
+        }
+        Ok(Some(token))
+    }
     fn environment_map(&self) -> Result<BTreeMap<String, String>> {
         let mut environment = BTreeMap::new();
         for entry in &self.environment {
@@ -72,19 +96,21 @@ impl InstallArgs {
                         .url
                         .clone()
                         .ok_or_else(|| miette!("MCP URL is required"))?,
-                    bearer_token: None,
+                    bearer_token: self.bearer_token()?,
                     timeouts: self.timeouts.clone().unwrap_or_default(),
                 }
             }
-            TransportKind::Stdio if self.url.is_none() => Source::Stdio {
-                command: self
-                    .command
-                    .clone()
-                    .ok_or_else(|| miette!("MCP command is required"))?,
-                arguments: self.arguments.clone(),
-                environment,
-                timeouts: self.timeouts.clone().unwrap_or_default(),
-            },
+            TransportKind::Stdio if self.url.is_none() && self.bearer_token_env.is_none() => {
+                Source::Stdio {
+                    command: self
+                        .command
+                        .clone()
+                        .ok_or_else(|| miette!("MCP command is required"))?,
+                    arguments: self.arguments.clone(),
+                    environment,
+                    timeouts: self.timeouts.clone().unwrap_or_default(),
+                }
+            }
             _ => {
                 return Err(miette!(
                     "Choose http or stdio and provide only its connection fields"
@@ -164,7 +190,7 @@ impl App for AppsManager {
             ),
             spec::<InstallArgs>(
                 "install",
-                "Install an MCP App on this device. Local servers run as the OS user outside the device sandbox. List environment as KEY=value entries; names must not start with DAAT_LOCUS. Never put credentials in the name or command arguments.",
+                "Install an MCP App on this device. For HTTP Bearer authentication, pass only bearer_token_env (the name of an existing device environment variable), never the token in tool arguments. On Android, use the Owner Apps page to enter credentials. Local stdio servers run as the OS user outside the sandbox; their environment is KEY=value entries, with names not starting with DAAT_LOCUS. Never put credentials in the name or command arguments.",
             ),
             spec::<ChangeArgs>(
                 "enable",

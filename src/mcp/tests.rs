@@ -84,6 +84,7 @@ fn installed_connection_public_view_hides_query_fragment_and_credentials() {
 #[derive(Default)]
 struct Fake {
     calls: AtomicUsize,
+    http_authorizations: parking_lot::Mutex<Vec<String>>,
     requests: parking_lot::Mutex<Vec<Value>>,
     hold_initialize: std::sync::atomic::AtomicBool,
     hold_list: std::sync::atomic::AtomicBool,
@@ -102,7 +103,17 @@ impl Drop for Server {
         self.task.abort();
     }
 }
-async fn rpc(State(state): State<Arc<Fake>>, Json(request): Json<Value>) -> Response {
+async fn rpc(
+    State(state): State<Arc<Fake>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<Value>,
+) -> Response {
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        state
+            .http_authorizations
+            .lock()
+            .push(value.to_str().unwrap().to_string());
+    }
     let id = &request["id"];
     let result = match request["method"].as_str().unwrap_or_default() {
         "initialize" => {
@@ -519,6 +530,115 @@ async fn a_failed_remote_effect_is_not_replayed_by_the_transport() {
     );
     assert_eq!(server.state.calls.load(Ordering::SeqCst), 1);
     app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn apps_manager_installs_generic_authenticated_http_without_exposing_token() {
+    const VAR: &str = "DL_MCP_HTTP_FIXTURE_TOKEN";
+    const TOKEN: &str = "generic-http-fixture-token";
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(previous) => std::env::set_var(VAR, previous),
+                    None => std::env::remove_var(VAR),
+                }
+            }
+        }
+    }
+    let _restore = RestoreEnv(std::env::var_os(VAR));
+    unsafe { std::env::set_var(VAR, TOKEN) };
+    let server = server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("apps.json");
+    let registry = Registry::open(path.clone()).unwrap();
+    let mut manager = AppsManager::new(registry.clone(), "test-actor".into());
+    let spec = manager
+        .tool_specs()
+        .into_iter()
+        .find(|tool| tool.name == "install")
+        .unwrap();
+    assert!(
+        spec.input_schema["properties"]
+            .get("bearer_token_env")
+            .is_some()
+    );
+    assert!(
+        spec.input_schema["properties"]
+            .get("bearer_token")
+            .is_none()
+    );
+    let arguments = json!({
+        "name": "Generic remote MCP",
+        "transport": "http",
+        "url": server.url,
+        "arguments": [],
+        "bearer_token_env": VAR,
+    });
+    // The official GitHub URL also takes the same generic HTTP transport.
+    let github_source: Source = serde_json::from_value(json!({
+        "transport": "http", "url": "https://api.githubcopilot.com/mcp/",
+        "bearer_token": TOKEN
+    }))
+    .unwrap();
+    github_source.validate().unwrap();
+    assert!(!arguments.to_string().contains(TOKEN));
+    let result = manager
+        .execute_tool(&call("install", arguments), &context(directory.path()))
+        .await
+        .unwrap();
+    assert_eq!(result.payload["source"]["credential_configured"], true);
+    assert!(!result.payload.to_string().contains(TOKEN));
+    let saved = Registry::open(path).unwrap().entries();
+    assert_eq!(saved.len(), 1);
+    assert!(
+        matches!(&saved[0].source, Source::Http { bearer_token: Some(token), .. } if token == TOKEN)
+    );
+    let headers = server.state.http_authorizations.lock();
+    assert!(!headers.is_empty());
+    assert!(
+        headers
+            .iter()
+            .all(|value| value == &format!("Bearer {TOKEN}"))
+    );
+}
+
+#[tokio::test]
+async fn apps_manager_rejects_invalid_http_auth_and_transport_mix_without_installing() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = Registry::open(directory.path().join("apps.json")).unwrap();
+    let mut manager = AppsManager::new(registry.clone(), "test-actor".into());
+    let base = json!({"name":"Generic remote MCP","transport":"http","url":"https://example.invalid/mcp","arguments":[]});
+    for (key, value) in [
+        (
+            "bearer_token_env",
+            json!("DOES_NOT_EXIST_MCP_TEST_3E42B75A"),
+        ),
+        ("bearer_token_env", json!("INVALID-NAME")),
+        (
+            "bearer_token",
+            json!("do-not-send-tokens-in-tool-arguments"),
+        ),
+        ("command", json!("run-server")),
+    ] {
+        let mut input = base.clone();
+        input[key] = value;
+        assert!(
+            manager
+                .execute_tool(&call("install", input), &context(directory.path()))
+                .await
+                .is_err()
+        );
+    }
+    let stdio = json!({"name":"local","transport":"stdio","command":"run-server","arguments":[],"bearer_token_env":"ANY_VARIABLE"});
+    assert!(
+        manager
+            .execute_tool(&call("install", stdio), &context(directory.path()))
+            .await
+            .is_err()
+    );
+    assert!(registry.entries().is_empty());
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ description: Install, configure or troubleshoot a standard MCP server as a devic
 
 1. Follow the server's official setup requirements for the target device, including dependencies, command or address, and authentication.
 2. Inspect existing installations before adding another.
-3. Install through App management. Store credentials in environment variables or dedicated credential fields; HTTP bearer credentials require the Apps page.
+3. Prefer a server's official remote HTTP endpoint when available, especially on Android, where MCP stdio is unavailable. Install through App management. For HTTP Bearer authentication, enter the token privately in the Owner Apps page on any platform, or use `bearer_token_env` in `apps_manager__install` with only the name of an existing device environment variable. Never put a secret in chat, model tool arguments, a URL, the App name or command arguments. Do not assume OAuth is supported unless this client has a configured OAuth integration.
 4. Let changes take effect at the next settled execution boundary, preserving active work.
 5. Verify discovery and, when available, a relevant read-only operation.
 
