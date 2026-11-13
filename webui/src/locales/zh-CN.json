@@ -1,6 +1,7 @@
 {
-  "websearch": {"title":"网页搜索","provider":"搜索提供商","action":"搜索网页","empty":"未找到搜索结果","console_login":"使用提供商设置中的 OpenCode Console 登录。需在该工作区启用托管网页搜索。","key_saved":"已保存 API 密钥","clear_key":"移除 API 密钥"},
-  "contacts": {"sort":"通讯录排序","alphabetical":"按字母","recent":"最近活跃","model":"模型：{{model}}","no_model":"未配置模型","back":"返回通讯录","title": "通讯录", "search": "搜索 Actor 或消息", "empty": "暂无 Actor", "no_results": "没有匹配的 Actor 或消息", "idle": "空闲", "running": "正在工作", "archived": "已归档", "input": "收到的消息", "reply": "回复", "sent": "发送的消息", "assistant": "消息", "unavailable": "{{count}} 台设备暂时无法读取"},
+  "websearch": {"title":"网页搜索","provider":"外部搜索提供商","native_priority":"自动模式会在首次搜索时尝试提供商内置搜索，包括兼容的中转接口。明确不支持或手动关闭时使用此处的外部搜索提供商。","action":"搜索网页","empty":"未找到搜索结果","console_login":"使用提供商设置中的 OpenCode Console 登录。需在该工作区启用托管网页搜索。","key_saved":"已保存 API 密钥","clear_key":"移除 API 密钥"},
+  "sessions": {"title":"会话","untitled":"新会话","action_failed":"无法更新会话，请重试。","rename":"重命名","name":"名称","archive":"归档","unarchive":"取消归档","delete":"删除","delete_title":"删除此会话？","delete_description":"{{title}} 及其所有 Actor、历史和附件将被永久删除。","filter":"显示会话","active":"进行中","archived":"已归档","other_device":"其他设备","working_count":"{{count}} 个正在工作","actions":"{{title}} 的操作","empty":"还没有会话","no_archived":"没有已归档的会话","unavailable":"{{count}} 台设备暂时无法访问","create_failed":"无法开始会话，草稿已保留。","open_failed":"无法打开此会话。","missing":"此会话已不存在"},
+  "actor_status": {"idle":"空闲","running":"正在工作","archived":"已归档"},
   "delegation": {"tasks":"委派的任务","task":"任务","follow_up":"追加要求","open":"打开 {{name}}：{{task}}","open_actor":"打开 {{name}}","working_now":"{{count}} 个正在工作","sent":"已发送","waiting":"等待开始","working":"进行中","done":"已完成","failed":"失败","stopped":"已停止","interrupted":"已中断"},
   "lazy_page": {"load_failed": "暂时无法加载，请重试。"},
   "observation_fields": {"status":"状态","output":"输出","stdout":"标准输出","stderr":"错误输出","session":"终端","windows":"窗口","pages":"网页","apps":"应用","actors":"协作者","results":"结果","matches":"匹配结果","entries":"条目","enabled":"已启用","observation":"观察","structuredContent":"结构化结果","structured_content":"结构化结果","resources":"资源","notices":"提示","next_offset":"下一位置"},
@@ -141,16 +142,7 @@
     "copy_failed": "复制失败，请重试"
   },
   "conversation_pane": {
-    "actor_archived": "Actor 已归档",
-    "preparing": "正在准备本机执行…",
-    "service_unavailable": "暂时无法获取执行状态。",
-    "recovery_blocked": "恢复暂时无法完成，对话记录和草稿已保留。",
-    "local_recovery": "连接中断，已在此设备继续运行。",
-    "offline": "另一台设备已离线，草稿已保留。",
-    "reconciling": "正在恢复共享对话…",
-    "recovering": "正在此设备恢复运行…",
-    "synchronizing": "正在同步对话…",
-    "could_not_open_this_record": "这条记录暂时无法打开。",
+    "session_archived": "此会话已归档，取消归档后才能发送消息。",
     "settings_were_not_saved_try_again": "设置未保存，请重试。",
     "attachment_upload_failed_try_again": "附件上传失败，请重试。",
     "value0_conversation": "{{value0}} 对话",
@@ -280,6 +272,8 @@
     "maximum_output": "最大输出",
     "reasoning": "思考等级",
     "vision": "视觉",
+    "native_web_search": "提供商内置网页搜索",
+    "native_web_search_hint": "自动模式在首次搜索时尝试提供商接口（包括中转）；明确不支持时使用已配置的外部搜索。关闭后始终使用外部搜索。",
     "auto": "自动",
     "supported": "支持",
     "unsupported": "不支持",
@@ -349,6 +343,9 @@
     "unsaved_changes": "未保存的更改"
   },
   "computer_use": {
+    "observation": "GUI 画面",
+    "window_view": "窗口视图",
+    "desktop_fallback": "完整桌面",
     "list_apps": "查找应用",
     "list_windows": "查找窗口",
     "launch_app": "启动应用",
@@ -666,7 +663,6 @@
     "login_failed": "登录失败，请重试。",
     "login_password_mismatch": "两次密码不一致。",
     "login_password_too_short": "密码至少需要 12 个字符。",
-    "core_not_ready": "对话正在连接或同步，草稿已保留。",
     "unauthorized": "请先登录。",
     "forbidden": "无权执行此操作。",
     "not_found": "内容不存在。",
@@ -725,7 +721,7 @@
   },
   "navigation": {
     "app_navigation": "应用导航",
-    "home": "首页",
+    "new_session": "新会话",
     "profile_menu": "打开个人资料菜单",
     "close_sidebar": "收起侧栏",
     "open_sidebar": "展开侧栏"
@@ -840,12 +836,13 @@
     "title": "导入",
     "intro": "将其他 AI 应用中的会话导入 Daat Locus。",
     "sources": "从其他 AI 应用导入",
-    "import": "导入",
+    "start_session": "开始新会话",
+    "add_to_session": "添加到会话",
     "message_count": "{{count}} 条消息",
-    "idle_note": "Core 会根据会话创建 Actor，等待你继续。",
+    "idle_note": "一个 Actor 会接手这段对话，并等待你继续。",
     "sending": "正在发送…",
-    "submitted": "已交给 Core。打开对话即可查看导入进展和创建的 Actor。",
-    "view_core": "在 Core 中查看",
+    "submitted": "导入已提交，打开会话即可查看进展。",
+    "view_session": "查看会话",
     "bubble_title": "导入 Codex 会话",
     "status_queued": "等待导入",
     "status_running": "正在准备 Actor",
@@ -859,20 +856,22 @@
     "refresh": "刷新列表",
     "archived": "已归档",
     "loading": "正在读取会话…",
+    "loading_sessions": "正在加载会话…",
+    "no_sessions": "此设备上没有进行中的会话。",
     "empty": "此设备上没有找到 Codex 会话。",
     "no_results": "没有匹配的会话。"
   },
   "gui_use": {
     "title": "GUI 操作",
     "enable": "启用 GUI 操作",
-    "scope": "允许在虚拟屏幕中操作 GUI 应用",
+    "scope": "允许在独立桌面会话中操作 GUI 应用",
     "advanced": "高级",
     "apply": "应用"
   },
   "computer_use_settings": {
     "resolution": "分辨率（像素）",
-    "unavailable": "虚拟屏幕不可用",
-    "display_effect": "应用新分辨率时，将正在操作的窗口交还到你的桌面。"
+    "unavailable": "GUI 桌面不可用",
+    "display_effect": "应用新分辨率会重新创建虚拟显示器，其中未保存的内容可能丢失。"
   },
   "phone_use": {
     "method": "授权方式",
@@ -913,15 +912,18 @@
     "restart_hint": "在系统设置中启用 Daat Locus。若已开启但仍未生效，请移除后重新添加应用，再退出并重新打开。"
   },
   "virtual_displays": {
-    "title": "虚拟屏幕",
-    "display": "虚拟屏幕 {{number}}",
+    "title": "GUI 画面",
+    "display": "GUI 画面 {{number}}",
     "select": "选择屏幕",
     "read_only": "仅供查看",
+    "actual_size": "原始大小",
+    "fit_view": "适应窗口",
+    "fullscreen": "全屏查看",
     "disabled": "GUI 操作已关闭",
-    "connecting": "正在连接虚拟屏幕",
-    "unavailable": "虚拟屏幕暂不可用",
-    "unsupported": "此设备不支持虚拟屏幕",
-    "empty": "暂无虚拟屏幕",
+    "connecting": "正在连接 GUI 画面",
+    "unavailable": "GUI 画面暂不可用",
+    "unsupported": "此设备不支持 GUI 画面",
+    "empty": "暂无运行中的 GUI 画面",
     "waiting": "等待屏幕画面"
   },
   "usage_page": {

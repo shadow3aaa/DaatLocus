@@ -43,15 +43,13 @@ members = [
     "crates/daat-locus-bash",
     "crates/daat-locus-uutils",
     "crates/daat-locus-client-protocol",
-    "crates/daat-locus-virtual-workspace",
-    "crates/daat-locus-virtual-workspace/hook",
     "crates/daat-locus-computer-use",
     "crates/daat-locus-workspace",
     "clients/app/src-tauri",
     "xtask",
 ]
 default-members = ["."]
-exclude = ["crates/daat-locus-virtual-workspace/driver", "vendor/wry"]
+exclude = ["vendor/wry"]
 resolver = "3"
 
 [features]
@@ -73,6 +71,7 @@ ignore = "0.4.24"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 async-trait = "0.1.89"
 axum = "0.8.4"
+tower = { version = "0.5", features = ["util"] }
 base64 = "0.23.1"
 chrono = "0.4.45"
 clap = { version = "4.5.38", features = ["derive"] }
@@ -112,7 +111,6 @@ jsonschema = { version = "0.59", default-features = false }
 url = "2.5.8"
 zeroize = "1"
 zstd = { version = "0.13", default-features = false }
-openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
 daat-locus-macros = { version = "0.2.1", path = "crates/daat-locus-macros" }
 daat-locus-auth = { path = "crates/daat-locus-auth" }
 daat-locus-sandbox = { path = "crates/daat-locus-sandbox" }
@@ -163,6 +161,7 @@ features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Shutdown",
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
@@ -177,9 +176,7 @@ features = [
 ]
 
 [target.'cfg(windows)'.dependencies]
-daat-locus-virtual-workspace = { path = "crates/daat-locus-virtual-workspace" }
-png = "0.18"
-windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_System_Com", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_Foundation"] }
 
 [profile.release]
 codegen-units = 1

@@ -1,6 +1,7 @@
 {
-  "websearch": {"title":"Web search","provider":"Search provider","action":"Search the web","empty":"No results found","console_login":"Uses the OpenCode Console sign-in from provider settings. Hosted Web Search must be enabled in that workspace.","key_saved":"API key saved","clear_key":"Remove API key"},
-  "contacts": {"sort":"Sort contacts","alphabetical":"Alphabetical","recent":"Recently active","model":"Model: {{model}}","no_model":"No model configured","back":"Back to contacts","title": "Contacts", "search": "Search Actors or messages", "empty": "No Actors yet", "no_results": "No matching Actors or messages", "idle": "Idle", "running": "Working", "archived": "Archived", "input": "Received message", "reply": "Reply", "sent": "Sent message", "assistant": "Message", "unavailable": "{{count}} devices are unavailable"},
+  "websearch": {"title":"Web search","provider":"External search provider","native_priority":"Auto tries provider-native search, including compatible gateways, on the first search. Configure an external provider for confirmed unsupported interfaces or when native search is off.","action":"Search the web","empty":"No results found","console_login":"Uses the OpenCode Console sign-in from provider settings. Hosted Web Search must be enabled in that workspace.","key_saved":"API key saved","clear_key":"Remove API key"},
+  "sessions": {"title":"Sessions","untitled":"New session","action_failed":"Could not update the session. Try again.","rename":"Rename","name":"Name","archive":"Archive","unarchive":"Unarchive","delete":"Delete","delete_title":"Delete this session?","delete_description":"{{title}} and all of its Actors, history and attachments will be permanently deleted.","filter":"Show sessions","active":"Active","archived":"Archived","other_device":"Other device","working_count":"{{count}} working","actions":"Actions for {{title}}","empty":"No sessions yet","no_archived":"No archived sessions","unavailable":"{{count}} devices are unavailable","create_failed":"Could not start the session. Your draft is retained.","open_failed":"Could not open this session.","missing":"This session no longer exists"},
+  "actor_status": {"idle":"Idle","running":"Working","archived":"Archived"},
   "delegation": {"tasks":"Delegated tasks","task":"Task","follow_up":"Follow-up","open":"Open {{name}}: {{task}}","open_actor":"Open {{name}}","working_now":"{{count}} working","sent":"Sent","waiting":"Waiting to start","working":"Working","done":"Done","failed":"Failed","stopped":"Stopped","interrupted":"Interrupted"},
   "lazy_page": {"load_failed": "Could not load this page. Try again."},
   "observation_fields": {"status":"Status","output":"Output","stdout":"Standard output","stderr":"Error output","session":"Terminal","windows":"Windows","pages":"Pages","apps":"Apps","actors":"Actors","results":"Results","matches":"Matches","entries":"Entries","enabled":"Enabled","observation":"Observation","structuredContent":"Structured result","structured_content":"Structured result","resources":"Resources","notices":"Notices","next_offset":"Next position"},
@@ -141,16 +142,7 @@
     "copy_failed": "Could not copy. Try again."
   },
   "conversation_pane": {
-    "actor_archived": "Actor archived",
-    "preparing": "Preparing execution on this device…",
-    "service_unavailable": "Execution status is temporarily unavailable.",
-    "recovery_blocked": "Recovery is paused. Conversation records and your draft are retained.",
-    "local_recovery": "Continuing on this device while disconnected.",
-    "offline": "The other device is offline. Your draft is retained.",
-    "reconciling": "Restoring the shared conversation…",
-    "recovering": "Recovering on this device…",
-    "synchronizing": "Synchronizing conversation…",
-    "could_not_open_this_record": "Could not open this record.",
+    "session_archived": "This session is archived. Unarchive it to send messages.",
     "settings_were_not_saved_try_again": "Settings were not saved. Try again.",
     "attachment_upload_failed_try_again": "Attachment upload failed. Try again.",
     "value0_conversation": "{{value0}} conversation",
@@ -280,6 +272,8 @@
     "maximum_output": "Maximum output",
     "reasoning": "Reasoning",
     "vision": "Vision",
+    "native_web_search": "Provider-native web search",
+    "native_web_search_hint": "Auto tries the provider's search on the first search, including compatible gateways. If the API clearly does not support it, use the configured external provider. Turn off to always use external search.",
     "auto": "Auto",
     "supported": "Supported",
     "unsupported": "Unsupported",
@@ -349,6 +343,9 @@
     "unsaved_changes": "Unsaved changes"
   },
   "computer_use": {
+    "observation": "GUI view",
+    "window_view": "Window view",
+    "desktop_fallback": "Full desktop",
     "list_apps": "Find apps",
     "list_windows": "Find windows",
     "launch_app": "Launch app",
@@ -666,7 +663,6 @@
     "login_failed": "Login failed. Try again.",
     "login_password_mismatch": "Passwords do not match.",
     "login_password_too_short": "Password must have at least 12 characters.",
-    "core_not_ready": "Conversation is still connecting or synchronizing. Your draft is retained.",
     "unauthorized": "Sign in to continue.",
     "forbidden": "You do not have access to this action.",
     "not_found": "Content not found.",
@@ -725,7 +721,7 @@
   },
   "navigation": {
     "app_navigation": "App navigation",
-    "home": "Home",
+    "new_session": "New session",
     "profile_menu": "Open profile menu",
     "close_sidebar": "Close sidebar",
     "open_sidebar": "Open sidebar"
@@ -840,12 +836,13 @@
     "title": "Import",
     "intro": "Bring a conversation from another AI app into Daat Locus.",
     "sources": "Import from other AI apps",
-    "import": "Import",
+    "start_session": "Start new session",
+    "add_to_session": "Add to session",
     "message_count": "{{count}} messages",
-    "idle_note": "Core will create an Actor with this context. It will wait for you to continue.",
+    "idle_note": "An Actor will take over this conversation and wait for you to continue.",
     "sending": "Sending…",
-    "submitted": "Sent to Core. Open the conversation to follow the import and find your Actor.",
-    "view_core": "View in Core",
+    "submitted": "Import submitted. Open the session to follow it.",
+    "view_session": "View session",
     "bubble_title": "Import Codex conversation",
     "status_queued": "Waiting to import",
     "status_running": "Preparing Actor",
@@ -859,20 +856,22 @@
     "refresh": "Refresh list",
     "archived": "Archived",
     "loading": "Loading conversations…",
+    "loading_sessions": "Loading sessions…",
+    "no_sessions": "No active sessions on this device.",
     "empty": "No Codex conversations found on this device.",
     "no_results": "No matching conversations."
   },
   "gui_use": {
     "title": "GUI Operation",
     "enable": "Enable GUI operation",
-    "scope": "Allow GUI apps to be operated on a virtual display",
+    "scope": "Allow GUI apps to be operated in a separate desktop session",
     "advanced": "Advanced",
     "apply": "Apply"
   },
   "computer_use_settings": {
     "resolution": "Resolution (pixels)",
-    "unavailable": "Virtual display unavailable",
-    "display_effect": "Applying a new resolution returns controlled windows to your desktop."
+    "unavailable": "GUI desktop unavailable",
+    "display_effect": "Applying a new resolution recreates the virtual display; unsaved work there may be lost."
   },
   "phone_use": {
     "method": "Authorization method",
@@ -913,15 +912,18 @@
     "restart_hint": "Enable Daat Locus in System Settings. If it is already enabled but still unavailable, remove and add the app again, then quit and reopen it."
   },
   "virtual_displays": {
-    "title": "Virtual displays",
-    "display": "Virtual display {{number}}",
+    "title": "GUI screens",
+    "display": "GUI screen {{number}}",
     "select": "Select display",
     "read_only": "View only",
+    "actual_size": "Actual size",
+    "fit_view": "Fit to view",
+    "fullscreen": "View full screen",
     "disabled": "GUI use is off",
-    "connecting": "Connecting to virtual displays",
-    "unavailable": "Virtual display unavailable",
-    "unsupported": "Virtual displays are not supported on this device",
-    "empty": "No virtual displays",
+    "connecting": "Connecting to GUI screens",
+    "unavailable": "GUI screen unavailable",
+    "unsupported": "GUI screens are not supported on this device",
+    "empty": "No active GUI screen",
     "waiting": "Waiting for an image"
   },
   "usage_page": {

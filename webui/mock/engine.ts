@@ -14,10 +14,10 @@ import {
   emitEvent,
   getActor,
   newId,
-  nextActorName,
+  taskActorName,
   now,
-  ROOT_ACTOR_ID,
   resolveApprovalRecord,
+  sessionWorkers,
   setActorStatus,
   store,
   touchMessage,
@@ -55,8 +55,8 @@ export function isActorBusy(actorId: string): boolean {
 /** Start (or queue) a turn for a freshly created user request message. */
 export function submitTurn(actor: ActorStore, user: MessageRecord): void {
   if (user.status !== "running") {
-    if (actor.summary.id === ROOT_ACTOR_ID && user.status === "queued") {
-      const active = [...runsByUserMessage.values()].find(run => run.actorId === ROOT_ACTOR_ID);
+    if (actor.summary.role === "session" && user.status === "queued") {
+      const active = [...runsByUserMessage.values()].find(run => run.actorId === actor.summary.id);
       if (active) {
         active.superseded = true;
         if (active.phase === "inference") active.wake?.();
@@ -132,6 +132,16 @@ function compose(actorName: string, input: string): { reasoning: string[]; assis
   };
 }
 
+/** The session's first available worker, created on demand like a Core delegation. */
+function delegate(core: ActorStore, task: string): ActorStore {
+  const existing = sessionWorkers(core.summary.id).find(actor => actor.summary.status !== "archived");
+  if (existing) return existing;
+  const config = core.detail.config!;
+  const worker = createActor({id: newId(), name: taskActorName(core.summary.id, task), parent_id: core.summary.id, apps: [], model: null, workspace: config.workspace, instructions: ""});
+  emitEvent(worker.summary.id, {type: "actor_changed", actor: {...worker.summary}});
+  return worker;
+}
+
 function chunkAround(text: string, size: number): string[] {
   const chunks: string[] = [];
   for (let index = 0; index < text.length; index += size) chunks.push(text.slice(index, index + size));
@@ -144,7 +154,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
   try {
     setActorStatus(actor, "running");
 
-    if (!(await rest(run, actorId === ROOT_ACTOR_ID ? 1200 : 300))) {
+    if (!(await rest(run, actor.summary.role === "session" ? 1200 : 300))) {
       if (run.superseded && !run.cancelled) completeRun(actor, user, user, "");
       else cancelUserOnly(actor, user);
       return;
@@ -157,13 +167,13 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
     emitEvent(actorId, { type: "message_added", message_id: reply.id });
     emitEvent(actorId, { type: "generation_started", message_id: reply.id, generation: 1 });
 
-    if (actorId === ROOT_ACTOR_ID) {
+    if (actor.summary.role === "session") {
       run.phase = "tools";
       const imported = user.attachments.find(item => item.media_type === CODEX_IMPORT_MEDIA_TYPE);
       if (imported) {
         if (!(await rest(run, 700))) return cancelRun(actor, user, reply, "");
-        const id = newId(), config = actor.detail.config!, name = nextActorName();
-        const importedActor = createActor({id, name, parent_id: ROOT_ACTOR_ID, apps: ["actors", "files", "web", "browser_use"], model: config.model, workspace: config.workspace, instructions: imported.name});
+        const id = newId(), config = actor.detail.config!, name = taskActorName(actorId, imported.name);
+        const importedActor = createActor({id, name, parent_id: actorId, apps: ["actors", "files", "web", "browser_use"], model: config.model, workspace: config.workspace, instructions: imported.name});
         emitEvent(id, {type: "actor_changed", actor: importedActor.summary});
         const callId = newId(), resultId = newId(), outcome = {id, name, conversation_url: `/actors/${id}`};
         addTool(actor, {id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__import_conversation", summary: "Imported conversation", error: null, model_content: "Actor prepared", arguments: {resource_id: imported.id, name, instructions: imported.name}, outcome, payload: outcome});
@@ -172,16 +182,17 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
         return;
       }
       const callId = newId(), resultId = newId();
-      const target = getActor("research")!;
+      const target = delegate(actor, user.content);
+      const targetId = target.summary.id;
       const targetName = target.summary.name;
       const title = user.content.trim().replace(/\s+/g, " ").slice(0, 48) || "Task";
       const text = `Assigned to ${targetName}. I will share progress here.`;
       emitEvent(actorId, { type: "tool_started", message_id: reply.id, call_id: callId, name: "actors__message" });
       if (!(await rest(run, 250))) return cancelRun(actor, user, reply, "");
-      const delegated = addMessage(target, { kind: "request", source: { kind: "actor", actor_id: ROOT_ACTOR_ID }, reply_to: { kind: "actor", actor_id: ROOT_ACTOR_ID, request_id: user.id }, content: user.content, attachments: user.attachments, status: isActorBusy(target.summary.id) ? "queued" : "running" });
+      const delegated = addMessage(target, { kind: "request", source: { kind: "actor", actor_id: actorId }, reply_to: { kind: "actor", actor_id: actorId, request_id: user.id }, content: user.content, attachments: user.attachments, status: isActorBusy(target.summary.id) ? "queued" : "running" });
       emitEvent(target.summary.id, { type: "message_added", message_id: delegated.id });
-      const outcome = { actor_id: "research", name: targetName, message_id: delegated.id, conversation_url: "/actors/research", status: delegated.status, title, sent_message: true };
-      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: `Message sent to ${targetName}`, error: null, arguments: { actor_id: "research", content: user.content, title }, model_content: "Request delivered.", outcome, payload: {...outcome, sent_message:{conversation_url:"/actors/research",content:user.content}} });
+      const outcome = { actor_id: targetId, name: targetName, message_id: delegated.id, conversation_url: `/actors/${targetId}`, status: delegated.status, title, sent_message: true };
+      addTool(actor, { id: resultId, actor_id: actorId, message_id: reply.id, call_id: callId, name: "actors__message", summary: `Message sent to ${targetName}`, error: null, arguments: { actor_id: targetId, content: user.content, title }, model_content: "Request delivered.", outcome, payload: {...outcome, sent_message:{conversation_url:`/actors/${targetId}`,content:user.content}} });
       emitEvent(actorId, { type: "tool_finished", message_id: reply.id, call_id: callId, name: "actors__message", result_id: resultId, summary: `Message sent to ${targetName}`, error: null, outcome });
       submitTurn(target, delegated);
       completeRun(actor, user, reply, text);
@@ -254,7 +265,7 @@ async function execute(run: Run, actor: ActorStore, user: MessageRecord): Promis
       runsByUserMessage.delete(run.userMessageId);
       activeActors.delete(actorId);
       drainQueue(actor);
-      if (!activeActors.has(actorId)) setActorStatus(actor, "idle");
+      if (!activeActors.has(actorId) && actor.summary.status !== "archived") setActorStatus(actor, "idle");
     }
   }
 }

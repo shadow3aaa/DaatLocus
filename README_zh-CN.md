@@ -15,7 +15,7 @@
 
 - 独特而简便的统一交互方式，一个窗口便可并行推进一切任务
 - 让任何设备互联形成强大的分布式 Agent 网络，当然也可单机使用
-- 适配多个平台的虚拟屏 ComputerUse，完全不受打扰地让 Agent 完成 GUI 操作
+- macOS／Android 虚拟显示上的 ComputerUse，供 Agent 在不接管主桌面的情况下操作 GUI。Windows 保留 BrowserUse，不提供桌面 GUI 控制或虚拟显示。
 - 强大的 Agent 浏览器，也可作为普通浏览器使用
 - 超低的内存占用，即使多个 Agent 同时工作
 - 优雅而简洁的界面

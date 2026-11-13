@@ -26,8 +26,9 @@ async fn stop_and_exact_input_cancel_interrupt_unbounded_app_preparation() {
     )
     .await
     .unwrap();
+    system.seed_test_actor("root");
     for stop_actor in [false, true] {
-        let mut actor = system.core_device_actor().unwrap();
+        let mut actor = system.actor("root").unwrap();
         actor.id = "waiting-actor".into();
         let context = system.owner_app_context().unwrap();
         let message = MessageRecord {

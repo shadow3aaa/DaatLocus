@@ -251,7 +251,7 @@ mod tests {
         system.seed_test_actor("other-worker");
         let actor = system.actor("image-worker").unwrap();
         system
-            .send_user(&actor.id, "Show the image".into(), vec![], None)
+            .test_actor_input(&actor.id, "Show the image".into(), vec![], None)
             .unwrap();
         let message = system.store().claim_next(&actor.id).unwrap().unwrap();
         let context = system.execution_context(&actor, &message).unwrap();

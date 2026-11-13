@@ -12,9 +12,12 @@ use serde_json::{Value, json};
 
 pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
-        .route("/v1/core/messages/{message}/edit", post(edit))
-        .route("/v1/core/messages/{message}/withdraw", post(withdraw))
-        .route("/v1/core/queue/clear", post(clear))
+        .route("/v1/sessions/{actor}/messages/{message}/edit", post(edit))
+        .route(
+            "/v1/sessions/{actor}/messages/{message}/withdraw",
+            post(withdraw),
+        )
+        .route("/v1/sessions/{actor}/queue/clear", post(clear))
         .route("/v1/actors/{actor}/queue", get(queue))
         .route(
             "/v1/actors/{actor}/messages/{message}/activity",
@@ -55,19 +58,6 @@ async fn queue(
     if query.after.is_some_and(|cursor| cursor < 0) {
         return Err(ApiError::invalid());
     }
-    if let Some(value) = super::remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        super::ConversationRead::Queue {
-            after: query.after,
-            limit: bounded(query.limit, 100)?.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let page = state
         .system
         .store()
@@ -88,50 +78,16 @@ async fn queue(
 async fn edit(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Path(message): Path<String>,
+    Path((actor, message)): Path<(String, String)>,
     Json(input): Json<Edit>,
 ) -> ApiResult<Json<Value>> {
-    let actor = crate::stage::shared::ACTOR_ID;
+    let actor = actor.as_str();
     access_actor(&state, &headers, actor, true).await?;
     if input.content.len() > 64 * 1024
         || input.content.trim().is_empty() && input.attachments.is_empty()
         || input.expected_updated_at_ms < 0
     {
         return Err(ApiError::invalid());
-    }
-    if let Some(original) = super::remote::core_read(
-        &state,
-        &headers,
-        actor,
-        super::ConversationRead::Message {
-            id: message.clone(),
-        },
-    )
-    .await?
-    {
-        let original: crate::actors::MessageRecord =
-            serde_json::from_value(original).map_err(|_| ApiError::internal())?;
-        if original
-            .attachments
-            .iter()
-            .map(|attachment| &attachment.id)
-            .ne(input.attachments.iter())
-        {
-            return Err(ApiError::invalid());
-        }
-        let value = super::remote::core_control(
-            &state,
-            &headers,
-            actor,
-            crate::stage::protocol::ConversationAction::Amend {
-                message,
-                expected: input.expected_updated_at_ms,
-                content: Some(input.content),
-            },
-        )
-        .await?
-        .ok_or_else(ApiError::unavailable)?;
-        return Ok(Json(value));
     }
     reject_import_edit(&state, actor, &message)?;
     let mut attachments = Vec::new();
@@ -148,23 +104,6 @@ async fn edit(
             size_bytes: resource.size_bytes,
             uri: resource.uri,
         });
-    }
-    if let Some(core) = state.system.shared_core() {
-        let original = state
-            .system
-            .store()
-            .message(&message)
-            .map_err(ApiError::from_report)?;
-        if original.attachments != attachments {
-            return Err(ApiError::invalid());
-        }
-        let record = core
-            .amend(&message, input.expected_updated_at_ms, Some(input.content))
-            .await
-            .map_err(|_| ApiError::unavailable())?;
-        let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-        redact(&mut value, &state.system);
-        return Ok(Json(value));
     }
     let record = state
         .system
@@ -199,20 +138,11 @@ fn reject_import_edit(state: &ServiceState, actor: &str, message: &str) -> ApiRe
 async fn withdraw(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Path(message): Path<String>,
+    Path((actor, message)): Path<(String, String)>,
     Json(input): Json<Withdraw>,
 ) -> ApiResult<Json<Value>> {
-    let actor = crate::stage::shared::ACTOR_ID;
+    let actor = actor.as_str();
     access_actor(&state, &headers, actor, true).await?;
-    if let Some(core) = state.system.shared_core() {
-        let record = core
-            .amend(&message, input.expected_updated_at_ms, None)
-            .await
-            .map_err(|_| ApiError::unavailable())?;
-        let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
-        redact(&mut value, &state.system);
-        return Ok(Json(value));
-    }
     let record = state
         .system
         .store()
@@ -229,16 +159,13 @@ async fn withdraw(
     redact(&mut value, &state.system);
     Ok(Json(value))
 }
-async fn clear(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let actor = crate::stage::shared::ACTOR_ID;
+async fn clear(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Path(actor): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let actor = actor.as_str();
     access_actor(&state, &headers, actor, true).await?;
-    if let Some(core) = state.system.shared_core() {
-        let count = core
-            .clear_queue()
-            .await
-            .map_err(|_| ApiError::unavailable())?;
-        return Ok(Json(json!({"cancelled_count":count})));
-    }
     let count = state
         .system
         .store()
@@ -253,20 +180,6 @@ async fn activity(
     Query(query): Query<Activity>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if let Some(value) = super::remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        super::ConversationRead::Activity {
-            message: id.clone(),
-            after: query.after.unwrap_or(0),
-            limit: bounded(query.limit, 100)?.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let message = state
         .system
         .store()

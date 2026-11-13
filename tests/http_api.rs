@@ -7,12 +7,8 @@ mod approvals;
 mod apps;
 #[path = "http/codex_api.rs"]
 mod codex;
-#[path = "http/computer_use_api.rs"]
-mod computer_use;
 #[path = "http/configuration_api.rs"]
 mod configuration;
-#[path = "http/contacts_api.rs"]
-mod contacts;
 #[path = "http/conversation_api.rs"]
 mod conversation;
 #[path = "http/devices_api.rs"]
@@ -25,6 +21,10 @@ mod prompt;
 mod reset;
 #[path = "http/resources_api.rs"]
 mod resources;
+#[path = "http/session_workers_api.rs"]
+mod session_workers;
+#[path = "http/sessions_api.rs"]
+mod sessions;
 #[path = "http/stream_api.rs"]
 mod stream;
 mod support;

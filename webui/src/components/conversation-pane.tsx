@@ -1,4 +1,3 @@
-import type { ContactFocus } from "@/lib/contacts";
 import { motionScrollBehavior } from "@/lib/appearance";
 import { t } from "@/lib/i18n";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -12,11 +11,10 @@ import { ConversationConnection } from "@/components/conversation-connection";
 import { ConversationHistory } from "@/components/conversation-history";
 import { PrimaryTranscript, WorkTranscript } from "@/components/conversation-turns";
 import { partitionConversationMessages } from "@/lib/conversation-messages";
-import { isPrimaryActor, isUserDelivery, isUserSource } from "@/lib/work-timeline";
+import { isUserDelivery, isUserSource } from "@/lib/work-timeline";
 import { useActorConversation } from "@/hooks/use-actor-conversation";
 import { accessKey, actorModelReady, patchActorPreferences, type Access, type ActorDetail } from "@/lib/actor-api";
 import { cn } from "@/lib/utils";
-import type { ConversationConnectionMessage } from "@/lib/stage-api";
 import { useConversationSearch } from "@/hooks/use-conversation-search";
 import { matchingConversationMessages, matchesConversationText } from "@/lib/conversation-search";
 import { FloatingSearchBar } from "@/components/floating-search";
@@ -24,15 +22,14 @@ import { LazyPage } from "@/components/lazy-page";
 import { ActiveWork } from "@/components/delegation-cards";
 import type { ActiveActor } from "@/hooks/use-active-actors";
 
-export function ConversationPane({ focus, connectionMessage, actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels, activeActors = [], onActivity }: {
-  focus?:ContactFocus|null; connectionMessage?: ConversationConnectionMessage | null;
+export function ConversationPane({ actorId, access, onActor, onAccessRevoked, models = [], ready = true, compact = false, refreshVersion = 0, searchOpen = false, onSearchOpenChange, onActorLoaded, onConfigureModels, activeActors = [], onActivity }: {
   actorId: string; access: Access; onActor(id: string): void; onAccessRevoked(): void; models?: ComposerModel[]; ready?: boolean;
   compact?: boolean; refreshVersion?: number; searchOpen?: boolean; onSearchOpenChange?(open: boolean): void; onActorLoaded?(actor: ActorDetail): void;
   onConfigureModels?(): void; activeActors?: ActiveActor[]; onActivity?(): void;
 }) {
-  const primaryView = isPrimaryActor(actorId);
   const openActor = (id: string) => onActor(actorId.includes("~") && !id.includes("~") ? `${actorId.split("~")[0]}~${id}` : id);
-  const chat = useActorConversation(actorId, { onAccessRevoked, sessionKey: accessKey(access), includeActivity: !primaryView });
+  const chat = useActorConversation(actorId, { onAccessRevoked, sessionKey: accessKey(access) });
+  const primaryView = chat.actor?.role === "session";
   const [searchQuery, setSearchQuery] = useState("");
   const [sendOrigin, setSendOrigin] = useState<SendOrigin>();
   const search = useConversationSearch(actorId, searchQuery, searchOpen);
@@ -52,14 +49,12 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
   const filePreparation = useRef({ actorId, busy: false });
   const actor = chat.actor;
   ready = actorModelReady(actor, ready);
-  const canManage = access.kind === "owner" && (!actor?.remote || actor.access?.manage === true);
-  const waitingMessage = connectionMessage || (chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" : null);
-  // Execution readiness gates submission. An interrupted observation stream
-  // does not stop the HTTP endpoint from accepting a new input.
-  const connecting = Boolean(connectionMessage);
+  const canManage = access.kind === "owner";
+  // An interrupted observation stream does not stop the HTTP endpoint from accepting a new input.
+  const waitingMessage = chat.streamStatus === "reconnecting" ? "conversation_pane.reconnecting" as const : null;
   const archived = actor?.status === "archived";
-  const canConverse = !archived && actor?.access?.converse !== false;
-  const name = actor?.config?.name || actor?.name || (actorId === "core" ? "Daat Locus" : "Actor");
+  const canConverse = !archived;
+  const name = actor?.config?.name || actor?.name || (primaryView ? "Daat Locus" : "Actor");
   const workingMessages = chat.messages.filter(message => message.status === "running" || message.status === "queued");
   const active = [...workingMessages].reverse().find(message => message.status === "running");
   const sourceMessages = useMemo(() => filtering ? matchingConversationMessages(search.ready && !search.failed ? search.items : [], chat.messages, searchQuery) : chat.messages, [filtering, search.ready, search.failed, search.items, chat.messages, searchQuery]);
@@ -109,23 +104,6 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
       area.removeEventListener("keydown", keyDown);
     };
   }, [actorId]);
-  useEffect(()=>{
-    if(!focus||focus.actorId!==actorId||chat.loading)return;
-    const controller=new AbortController();
-    follow.current=false;
-    let found=false;
-    const seek=()=>{
-      if(found)return;
-      const article=scroll.current?.querySelector<HTMLElement>(`#${CSS.escape(`message-${actorId}-${focus.message_id}`)}`);
-      const target=focus.result_id?scroll.current?.querySelector<HTMLElement>(`[data-result-id="${CSS.escape(focus.result_id)}"]`):focus.generation!=null?scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focus.message_id)}"][data-generation="${focus.generation}"]`):scroll.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focus.message_id)}"][data-message-side="${focus.kind}"]`)??article?.querySelector<HTMLElement>(`[data-message-side="${focus.kind}"]`);
-      if(!target)return;
-      found=true;target.scrollIntoView({block:"center",behavior:"instant"});target.classList.add("dl-contact-focus");
-    };
-    const observer=new MutationObserver(seek);
-    if(scroll.current)observer.observe(scroll.current,{childList:true,subtree:true});
-    void chat.revealMessage(focus.message_id,controller.signal).then(()=>requestAnimationFrame(seek)).catch(()=>{if(!controller.signal.aborted)setLocalError(t("lazy_page.load_failed"));});
-    return()=>{controller.abort();observer.disconnect();};
-  },[focus,actorId,chat.loading,chat.revealMessage]);
   useLayoutEffect(() => {
     const section = pane.current;
     const controls = footer.current;
@@ -224,7 +202,6 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
     scroll.current?.scrollTo({ top: 0, behavior: "instant" });
   }
   function submit() {
-    if (connecting) return;
     // Resume following before send() publishes the message or clears the draft.
     // Do not jump again after the request: the user may have scrolled meanwhile.
     bottom();
@@ -254,26 +231,26 @@ export function ConversationPane({ focus, connectionMessage, actorId, access, on
         <div className="dl-message-list" id={resultsId} aria-busy={filtering && search.busy} aria-live={searchOpen ? "off" : "polite"} aria-relevant="additions">
           {!filtering && !chat.loading && actor && !chat.messages.length && !errors && <Empty className="dl-conversation-empty"><EmptyHeader>
             {primaryView && <img src="/logo-mark.svg" alt="" className="dl-empty-logo dl-brand-mark" />}
-            <EmptyTitle>{!connecting && !ready ? t("conversation_pane.set_up_model") : primaryView ? "Daat Locus" : name}</EmptyTitle>
-            {primaryView && !connecting && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
-          </EmptyHeader>{!connecting && !ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
+            <EmptyTitle>{!ready ? t("conversation_pane.set_up_model") : primaryView ? "Daat Locus" : name}</EmptyTitle>
+            {primaryView && ready && <EmptyDescription>{t("conversation_pane.start_conversation")}</EmptyDescription>}
+          </EmptyHeader>{!ready && onConfigureModels && <Button onClick={onConfigureModels}>{t("providers_settings.add_provider")}</Button>}</Empty>}
           {chat.loading && <div className="dl-loading-messages"><Skeleton className="h-24 w-4/5 rounded-3xl" /><Skeleton className="ml-auto h-14 w-3/5 rounded-3xl" /><Skeleton className="h-32 w-4/5 rounded-3xl" /></div>}
           {!filtering && chat.hasMore && chat.nextCursor !== null && <LazyPage key={actorId} cursor={chat.nextCursor} onLoad={earlier} scrollRoot={scroll} errorMessage={t("conversation_pane.could_not_load_earlier_messages")} />}
           {filtering && search.ready && !search.failed && search.next !== null && <LazyPage key={searchQuery.trim()} cursor={search.next} onLoad={moreMatches} errorMessage={t("search_dialog.could_not_load_earlier_results")} />}
           {filtering && search.ready && search.failed && <div className="dl-client-error" role="alert"><span>{t("search_dialog.search_failed_try_again")}</span><Button variant="ghost" size="sm" onClick={search.retry}>{t("app.retry")}</Button></div>}
           {filtering && search.ready && !search.failed && !visibleMessages.length && <Empty className="dl-filter-empty"><EmptyHeader><EmptyTitle>{t("search_dialog.no_results")}</EmptyTitle></EmptyHeader></Empty>}
-          {primaryView ? <PrimaryTranscript sendOrigin={sendOrigin} messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript focus={focus} messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
+          {primaryView ? <PrimaryTranscript sendOrigin={sendOrigin} messages={visibleMessages} working={Boolean(active)} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} receiptMessageId={receiptMessageId} /> : <WorkTranscript messages={visibleMessages} chat={presentationChat} searchQuery={searchOpen ? searchQuery : undefined} access={access} onActor={openActor} />}
           <div className="dl-conversation-bottom" />
         </div>
       </div>
       {!primaryView && !searchOpen && <ConversationHistory messages={visibleMessages} scroll={scroll} onNavigate={() => {follow.current = false;}} />}
       <div ref={footer} className="dl-conversation-footer">
         <ConversationConnection message={waitingMessage} />
-        {!connecting && !ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
+        {!ready && chat.messages.length > 0 && onConfigureModels && <div className="dl-model-required"><span>{t("conversation_pane.model_required")}</span><Button variant="outline" size="sm" onClick={onConfigureModels}>{t("app.settings")}</Button></div>}
         {!atBottom && <Button className="dl-jump-bottom" variant="outline" size="icon" aria-label={t("conversation_pane.jump_to_latest")} onClick={bottom}><ArrowDownIcon /></Button>}
         {errors && <div className="dl-client-error" role="alert"><span>{errors}</span><Button size="sm" variant="ghost" onClick={() => { setLocalError(""); void chat.refresh(); }}><RefreshCwIcon data-icon="inline-start" />{t("app.retry")}</Button></div>}
         {primaryView && !searchOpen && <ActiveWork actors={activeActors} onActor={openActor} />}
-        {primaryView && <Composer key={`${actorId}:${accessKey(access)}`} value={chat.draft} onValueChange={chat.setDraft} skills={chat.skills} onSkillsChange={chat.setSkills} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} submissionDisabled={connecting} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.actor_archived") : !ready && !connecting ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
+        {primaryView && <Composer key={`${actorId}:${accessKey(access)}`} value={chat.draft} onValueChange={chat.setDraft} skills={chat.skills} onSkillsChange={chat.setSkills} onSubmit={submit} attachments={chat.attachments} onFiles={selected => { void files(selected); }} onRemoveAttachment={chat.removeAttachment} uploading={chat.uploading || preparingFiles} busy={chat.sending || changing} disabled={!canConverse || !actor || !ready || chat.deleted || chat.loading} canManage={canManage} models={models} modelName={actor?.config?.model || ""} onModelChange={model => { void configure({ model: model || null }); }} placeholder={archived ? t("conversation_pane.session_archived") : !ready ? t("conversation_pane.add_a_model_to_send_messages") : t("composer.message")} compact={compact} />}
       </div>
   </section>;
 }

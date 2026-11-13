@@ -1,7 +1,6 @@
 #![cfg(windows)]
-//! Real owner-local installer coordination, including native display handle release.
+//! Real owner-local installer coordination across binary replacement.
 use daat_locus::daemon::{control, installation};
-use daat_locus_virtual_workspace::displays;
 use std::{
     path::Path,
     process::{Child, Command, Stdio},
@@ -42,16 +41,10 @@ impl Drop for Restored {
 
 #[tokio::test]
 async fn installer_fences_startup_and_restores_only_running_profiles() {
-    lifecycle(false).await;
+    lifecycle().await;
 }
 
-#[tokio::test]
-#[ignore = "requires signed IDD and an unlocked stationary desktop; run native tests serially"]
-async fn installer_releases_the_display_fences_startup_and_restores_only_running_profiles() {
-    lifecycle(true).await;
-}
-
-async fn lifecycle(native: bool) {
+async fn lifecycle() {
     let temp = tempfile::tempdir().unwrap();
     let namespace = temp.path().join("account");
     let profile = namespace.join("profiles/working");
@@ -60,7 +53,6 @@ async fn lifecycle(native: bool) {
     let binary = installed.join("daat-locus.exe");
     std::fs::copy(env!("CARGO_BIN_EXE_daat-locus"), &binary).unwrap();
     std::fs::create_dir_all(namespace.join("profiles/never-started")).unwrap();
-    let before = native.then(|| displays().unwrap());
     let mut service = Service(
         command(&binary, &namespace)
             .args([
@@ -76,26 +68,12 @@ async fn lifecycle(native: bool) {
             .unwrap(),
     );
     let old = control::wait_ready(&profile).await.unwrap();
-    let output =
-        before.map(|before| {
-            displays().unwrap().into_iter()
-        .find(|display| !before.iter().any(|item| item.id == display.id))
-        .expect("signed IDD must provide a virtual display before the test can verify its release")
-        });
     let mut transaction = Uuid::new_v4();
     installation::prepare(&namespace, &installed, transaction)
         .await
         .unwrap();
     assert!(service.0.wait().unwrap().success());
     assert!(control::load(&profile).unwrap().is_none());
-    if let Some(output) = output {
-        assert!(
-            !displays()
-                .unwrap()
-                .iter()
-                .any(|display| display.id == output.id)
-        );
-    }
     for action in ["start", "serve"] {
         let mut command = tokio::process::Command::from(command(&binary, &namespace));
         command

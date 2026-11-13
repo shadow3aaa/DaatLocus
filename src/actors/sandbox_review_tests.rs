@@ -156,7 +156,6 @@ async fn fixture(
     )
     .await
     .unwrap();
-    system.install_local_core().unwrap();
     system.seed_test_actor("root");
     let actor = system.actor("root").unwrap();
     let input = input(&system, &actor.id);
@@ -164,13 +163,14 @@ async fn fixture(
 }
 
 fn input(system: &ActorSystem, actor: &str) -> MessageRecord {
-    let message: MessageRecord = serde_json::from_value(json!({
-        "seq":0,"id":Uuid::new_v4().to_string(),"actor_id":actor,"source":{"kind":"user"},
-        "reply_to":{"kind":"user"},"kind":"request","in_reply_to":null,"remote_authority":null,
-        "content":"Read the requested directory and write the requested report.","attachments":[],
-        "status":"queued","cancel_requested":false,"reply":null,"error":null,"created_at_ms":1,"updated_at_ms":1
-    })).unwrap();
-    system.store().enqueue(message, None).unwrap();
+    system
+        .test_actor_input(
+            actor,
+            "Read the requested directory and write the requested report.".into(),
+            vec![],
+            None,
+        )
+        .unwrap();
     system.store().claim_next(actor).unwrap().unwrap()
 }
 
@@ -491,10 +491,7 @@ async fn approved_application_blocks_for_review_then_grants_device_scope_without
     assert!(approved.appeal.is_none());
     assert!(core_inputs(&system).is_empty());
     assert_eq!(reviewer.requests.lock().len(), 1);
-    let usage = system
-        .actor(crate::stage::shared::ACTOR_ID)
-        .unwrap()
-        .context;
+    let usage = system.actor(&actor.id).unwrap().context;
     assert_eq!(usage.usage.total_token_usage.total_tokens, 85);
     assert_eq!(usage.model_usage.len(), 1);
     assert_eq!(usage.model_usage[0].model, "reviewer");
@@ -672,7 +669,7 @@ async fn denied_application_forwards_asynchronously_and_reusing_the_incident_nev
     // Core receives the narrowed application with its own immutable scope.
     // Approving it must not revive the larger refused directory.
     let core_input = system.store().claim_next("core").unwrap().unwrap();
-    let core = system.core_device_actor().unwrap();
+    let core = system.actor("core").unwrap();
     let caller = system
         .execution_context(&core, &core_input)
         .unwrap()
@@ -997,7 +994,7 @@ async fn core_consent_records_scope_and_one_notification_without_replaying_the_o
     .await
     .unwrap();
     let core_input = system.store().claim_next("core").unwrap().unwrap();
-    let core = system.core_device_actor().unwrap();
+    let core = system.actor("core").unwrap();
     let context = system.execution_context(&core, &core_input).unwrap();
     let caller = context.actor_call.unwrap();
     let resolved = system

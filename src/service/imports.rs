@@ -3,10 +3,11 @@ use super::{ApiError, ApiResult, ServiceState, manage, owner};
 use crate::conversation_import::{self, Transcript};
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -91,16 +92,15 @@ async fn preview(
     manage(&state, &headers).await?;
     let title = transcript.title();
     let bytes = serde_json::to_vec(&transcript).map_err(|_| ApiError::internal())?;
-    let resource = crate::resources::publish(
-        &state.system,
-        crate::stage::shared::ACTOR_ID,
-        &title,
-        conversation_import::MEDIA_TYPE,
-        &bytes,
-    )
-    .map_err(|_| ApiError::unavailable())?;
+    // Owner-only staging is not an Actor resource and needs no preset identity.
+    let resource = format!("r-{}", crate::stage::digest(&bytes));
+    state.system.store().stage_transaction(|tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS owner_imports(id TEXT PRIMARY KEY,title TEXT NOT NULL,bytes BLOB NOT NULL);")?;
+        tx.execute("INSERT OR IGNORE INTO owner_imports VALUES(?1,?2,?3)",params![resource,title,bytes])?;
+        Ok(())
+    }).map_err(super::stages::failure)?;
     Ok(Json(
-        json!({"resource_id":resource.id,"title":title,"message_count":transcript.messages.len()}),
+        json!({"resource_id":resource,"title":title,"message_count":transcript.messages.len()}),
     ))
 }
 fn invalid_codex() -> ApiError {
@@ -114,6 +114,8 @@ fn invalid_codex() -> ApiError {
 #[serde(deny_unknown_fields)]
 struct Submit {
     resource_id: String,
+    /// An existing local session; omission or null starts a new one.
+    session_id: Option<String>,
 }
 async fn submit(
     State(state): State<ServiceState>,
@@ -127,16 +129,49 @@ async fn submit(
     if input.resource_id.len() > 128 {
         return Err(ApiError::invalid());
     }
-    let core = crate::stage::shared::ACTOR_ID;
-    let resource = crate::resources::export(&state.system, core, &input.resource_id)
-        .map_err(|_| ApiError::not_found())?;
-    if resource.media_type != conversation_import::MEDIA_TYPE {
-        return Err(ApiError::invalid());
-    }
-    let bytes =
-        crate::resources::bytes(&state.system, core, &resource).map_err(|_| ApiError::invalid())?;
+    let (title,bytes) = state.system.store().stage_transaction(|tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS owner_imports(id TEXT PRIMARY KEY,title TEXT NOT NULL,bytes BLOB NOT NULL);")?;
+        Ok(tx.query_row("SELECT title,bytes FROM owner_imports WHERE id=?1",[&input.resource_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?))).optional()?)
+    }).map_err(super::stages::failure)?.ok_or_else(ApiError::not_found)?;
     Transcript::decode(&bytes).map_err(|_| invalid_codex())?;
-    let key = format!("codex-import-{}", resource.id);
+    let (session, key) = match input.session_id {
+        Some(session) => {
+            // Reject workers, unknown sessions and archived targets before publishing bytes.
+            let summary = state
+                .system
+                .store()
+                .session_summary(&session)
+                .map_err(ApiError::from_report)?;
+            if summary.status == crate::actors::ActorStatus::Archived {
+                return Err(ApiError::from_report(
+                    crate::actors::ActorError::Conflict("Session is archived".into()).into(),
+                ));
+            }
+            let key = format!(
+                "codex-import-{}",
+                crate::stage::digest(format!("{}\n{session}", input.resource_id).as_bytes())
+            );
+            (session, key)
+        }
+        None => {
+            let key = format!("codex-import-{}", input.resource_id);
+            let session = state
+                .system
+                .create_session(Some(title.clone()), None, Some(&key))
+                .await
+                .map_err(ApiError::from_report)?
+                .id;
+            (session, key)
+        }
+    };
+    let resource = crate::resources::publish(
+        &state.system,
+        &session,
+        &title,
+        conversation_import::MEDIA_TYPE,
+        &bytes,
+    )
+    .map_err(super::stages::failure)?;
     headers.insert(
         "idempotency-key",
         key.parse().map_err(|_| ApiError::invalid())?,
@@ -144,6 +179,7 @@ async fn submit(
     super::send_core_message(
         State(state),
         headers,
+        Path(session),
         Json(super::SendRequest {
             skills: Vec::new(),
             content: "Import the attached conversation.".into(),

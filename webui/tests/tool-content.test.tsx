@@ -118,3 +118,17 @@ test("WebSearch renders sources, escapes excerpts and never exposes raw envelope
   const failure=renderToStaticMarkup(<ToolDetail result={toolExampleResult(toolExamples.find(item=>item.id==="websearch-error")!)}/>);
   expect(failure).toContain("HTTP 429"); expect(failure).not.toContain(t("websearch.empty"));
 });
+
+test("provider-native search renders verified citations as clickable inline links",()=>{
+  const result=toolExampleResult(toolExamples.find(item=>item.id==="websearch-native")!);
+  const html=renderToStaticMarkup(<ToolDetail result={result}/>);
+  expect(html).toContain('New release <a');
+  expect(html).toContain('href="https://example.com/releases"');
+  expect(html).toContain(">[1]</a>");
+  expect(html).toContain("Rust documentation");
+  result.payload={answer:"Private <script> [1]",citations:[{url:"javascript:alert(1)",title:"Danger",start_index:17,end_index:20}],results:[{url:"https://example.org",title:"Verified"}],raw_response:"PRIVATE_PROVIDER_TRANSCRIPT"};
+  const safe=renderToStaticMarkup(<ToolDetail result={result}/>);
+  expect(safe).toContain("&lt;script&gt;");
+  expect(safe).not.toContain('href="javascript:');
+  expect(safe).not.toContain("PRIVATE_PROVIDER_TRANSCRIPT");
+});

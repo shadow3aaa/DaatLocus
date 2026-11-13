@@ -15,11 +15,11 @@ import { cn } from "@/lib/utils";
 export type ComposerModel = { name: string; label: string; effort?: string; isDefault?: boolean };
 function effortLabel(value?: string): string { return value && ["none","minimal","low","medium","high","xhigh","max"].includes(value) ? t(`effort.${value}`) : value || ""; }
 
-export function Composer({ value, onValueChange, skills = [], onSkillsChange = () => {}, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, disabled, submissionDisabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
+export function Composer({ value, onValueChange, skills = [], onSkillsChange = () => {}, onSubmit, attachments, onFiles, onRemoveAttachment, uploading, busy, disabled, canManage, models, modelName, onModelChange, placeholder = t("composer.message"), compact = false }: {
   skills?: SkillReference[]; onSkillsChange?(skills: SkillReference[]): void;
   value: string; onValueChange(value: string): void; onSubmit(): void; attachments: Attachment[]; onFiles(files: File[]): void;
   onRemoveAttachment(id: string): void; uploading: boolean; busy: boolean;
-  disabled?: boolean; submissionDisabled?: boolean; canManage: boolean;
+  disabled?: boolean; canManage: boolean;
   models: ComposerModel[]; modelName: string; onModelChange(name: string): void; placeholder?: string; compact?: boolean;
 }) {
   const text = useRef<HTMLTextAreaElement>(null);
@@ -30,7 +30,7 @@ export function Composer({ value, onValueChange, skills = [], onSkillsChange = (
   const preference = models.some(model => model.name === modelName) ? modelName : "";
   const selected = models.find(model => model.name === preference) || models.find(model => model.isDefault);
   const hasDraft = Boolean(value.trim()) || attachments.length > 0;
-  const canSend = !disabled && !submissionDisabled && !busy && !uploading && hasDraft;
+  const canSend = !disabled && !busy && !uploading && hasDraft;
   useLayoutEffect(() => {
     const element = text.current;
     if (!element) return;

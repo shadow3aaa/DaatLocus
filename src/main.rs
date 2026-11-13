@@ -33,26 +33,6 @@ fn main() -> std::process::ExitCode {
         eprintln!("{error:?}");
         std::process::exit(1);
     }
-    #[cfg(windows)]
-    if let cli::Command::ComputerUseLaunch {
-        app,
-        display,
-        left,
-        top,
-        right,
-        bottom,
-    } = &command
-    {
-        if let Err(error) = daat_locus::computer_use_app::launch_from_clean_process(
-            app,
-            display,
-            [*left, *top, *right, *bottom],
-        ) {
-            eprintln!("{error:?}");
-            std::process::exit(1);
-        }
-        return std::process::ExitCode::SUCCESS;
-    }
     let profile_base = std::env::var_os("DAAT_LOCUS_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -135,8 +115,6 @@ async fn dispatch(
                 transaction,
             } => daemon::installation::resume(&namespace, &installation, transaction).await,
         },
-        #[cfg(windows)]
-        cli::Command::ComputerUseLaunch { .. } => unreachable!("handled before service startup"),
         cli::Command::ClientBootstrap => {
             use std::io::Read;
             let mut bytes = zeroize::Zeroizing::new(Vec::new());
@@ -229,6 +207,100 @@ async fn dispatch(
             }
             Ok(())
         }
+        cli::Command::Sessions { action } => match action {
+            cli::SessionsCommand::Create { title, model } => {
+                let response =
+                    control::session_command(&root, Action::SessionCreate { title, model }).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&response).into_diagnostic()?
+                );
+                Ok(())
+            }
+            cli::SessionsCommand::List {
+                archived,
+                limit,
+                after,
+                json,
+            } => {
+                let response = control::session_command(
+                    &root,
+                    Action::SessionsList {
+                        archived,
+                        limit,
+                        after,
+                    },
+                )
+                .await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&response).into_diagnostic()?
+                    );
+                } else {
+                    println!("ID\tSTATUS\tWORKERS\tTITLE");
+                    for session in response["items"].as_array().into_iter().flatten() {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            session["id"].as_str().unwrap_or(""),
+                            session["status"].as_str().unwrap_or("unknown"),
+                            session["working_actors"].as_u64().unwrap_or(0),
+                            session["title"].as_str().unwrap_or("")
+                        );
+                    }
+                    if !response["next_cursor"].is_null() {
+                        println!("Next cursor: {}", response["next_cursor"]);
+                    }
+                }
+                Ok(())
+            }
+            cli::SessionsCommand::Messages {
+                actor,
+                limit,
+                before,
+            } => {
+                let response = control::session_command(
+                    &root,
+                    Action::SessionMessages {
+                        actor,
+                        limit,
+                        before,
+                    },
+                )
+                .await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&response).into_diagnostic()?
+                );
+                Ok(())
+            }
+            cli::SessionsCommand::Send {
+                session,
+                message_stdin: _,
+            } => {
+                use std::io::Read;
+                let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                std::io::stdin()
+                    .take(64 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .into_diagnostic()?;
+                if bytes.len() > 64 * 1024 {
+                    return Err(miette!("Session message exceeds 64 KiB"));
+                }
+                let content = String::from_utf8(bytes.to_vec())
+                    .into_diagnostic()
+                    .map_err(|_| miette!("Session message must be UTF-8"))?;
+                let response =
+                    control::session_command(&root, Action::SessionSend { session, content })
+                        .await?;
+                println!(
+                    "Accepted · session {} · message {}",
+                    response["actor_id"].as_str().unwrap_or(""),
+                    response["id"].as_str().unwrap_or("")
+                );
+                Ok(())
+            }
+        },
     }
 }
 
@@ -279,10 +351,6 @@ async fn serve(
         system.shutdown().await;
         lock.release();
         return result;
-    }
-    #[cfg(windows)]
-    if let Err(error) = system.prepare_computer_workspace().await {
-        tracing::warn!(reason=%error, "ComputerUse virtual display could not be prepared during service startup");
     }
     let listener = tokio::net::TcpListener::bind(address)
         .await

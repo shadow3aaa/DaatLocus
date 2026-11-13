@@ -65,13 +65,6 @@ describe("fixed presentation and chronological source", () => {
     expect(render([old,latest], false)).not.toContain('role="status"');
     expect(render([old,latest], true, "")).not.toContain('role="status"');
   });
-  test("the shared composer can send a new message while work is running", () => {
-    const props: Parameters<typeof Composer>[0] = {value:"New input",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
-    const html = renderToStaticMarkup(<Composer {...props} />);
-    expect(html).toContain(`aria-label="${i18n.t("composer.send_message")}"`);
-    expect(html).not.toContain(`aria-label="${i18n.t("composer.stop_task")}"`);
-    expect(html).not.toContain('disabled=""');
-  });
   test("the composer renders exactly one action for its current draft and execution state", () => {
     const props: Parameters<typeof Composer>[0] = {value:"",onValueChange:()=>{},onSubmit:()=>{},attachments:[],onFiles:()=>{},onRemoveAttachment:()=>{},uploading:false,busy:false,canManage:false,models:[],modelName:"",onModelChange:()=>{}};
     const attachment = {id:"file",name:"report.txt",media_type:"text/plain",size_bytes:10,uri:"/v1/actors/root/resources/file"};

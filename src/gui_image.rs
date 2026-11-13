@@ -124,6 +124,7 @@ fn finish(
     )
     .into_diagnostic()?;
     let mut observation = record.original;
+    map_cursor_to_view(&mut observation, record.view);
     observation["state_id"] = json!(reference.id);
     observation["width"] = json!(record.view.width);
     observation["height"] = json!(record.view.height);
@@ -146,6 +147,40 @@ fn finish(
         height: record.view.height,
     };
     Ok((observation,AgentContentPart::ResourceImage { resource:image, view:Some(identity),description:Some("Input coordinates use this image and its state_id. Re-view that state_id to crop the saved source without operating the target.".into()) }))
+}
+
+fn map_cursor_to_view(observation: &mut Value, view: ImageView) {
+    let Some(object) = observation.as_object_mut() else {
+        return;
+    };
+    let Some((x, y)) = object
+        .get("cursor_x")
+        .and_then(Value::as_i64)
+        .zip(object.get("cursor_y").and_then(Value::as_i64))
+    else {
+        return;
+    };
+    let region = view.region;
+    let (left, top) = (i64::from(region.x), i64::from(region.y));
+    let (right, bottom) = (
+        left + i64::from(region.width),
+        top + i64::from(region.height),
+    );
+    if x < left || x >= right || y < top || y >= bottom {
+        object.remove("cursor_x");
+        object.remove("cursor_y");
+        return;
+    }
+    object.insert(
+        "cursor_x".into(),
+        json!(((x - left) as f64 * f64::from(view.width) / f64::from(region.width)).floor() as i64),
+    );
+    object.insert(
+        "cursor_y".into(),
+        json!(
+            ((y - top) as f64 * f64::from(view.height) / f64::from(region.height)).floor() as i64
+        ),
+    );
 }
 
 /// Map every point in one call using its immutable image, leaving native state
@@ -212,6 +247,51 @@ pub(crate) fn map_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cursor_coordinates_follow_scaled_and_cropped_image_views() {
+        let mut observation = json!({"cursor_x":2500,"cursor_y":1000});
+        map_cursor_to_view(
+            &mut observation,
+            ImageView {
+                source_width: 3840,
+                source_height: 2160,
+                region: ImageRegion {
+                    x: 2000,
+                    y: 800,
+                    width: 600,
+                    height: 400,
+                },
+                width: 300,
+                height: 200,
+            },
+        );
+        assert_eq!(
+            (
+                observation["cursor_x"].as_u64(),
+                observation["cursor_y"].as_u64()
+            ),
+            (Some(250), Some(100))
+        );
+
+        let mut outside = json!({"cursor_x":2500,"cursor_y":1000});
+        map_cursor_to_view(
+            &mut outside,
+            ImageView {
+                source_width: 3840,
+                source_height: 2160,
+                region: ImageRegion {
+                    x: 0,
+                    y: 0,
+                    width: 1024,
+                    height: 576,
+                },
+                width: 1024,
+                height: 576,
+            },
+        );
+        assert!(outside.get("cursor_x").is_none());
+        assert!(outside.get("cursor_y").is_none());
+    }
     #[tokio::test]
     async fn saved_crops_map_each_reference_and_keep_actor_and_target_boundaries() {
         let temp = tempfile::tempdir().unwrap();

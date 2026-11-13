@@ -1,11 +1,9 @@
-import { contactsPage } from "./contacts";
 import { systemPromptRoute } from "./system-prompt";
 import { examplesForScene } from "./tool-showcase";
 import { prepareToolPreviewRead, liveToolResult } from "./tool-showcase-state";
 import { toolPreviewControls } from "./tool-preview-controls";
 import { acceptCoreMotionInput, advanceCoreMotionPreview } from "./core-motion";
 import { appsRoute } from "./apps";
-import { configureComputerUse, getComputerUseStatus } from "./computer-use";
 import { importsRoute } from "./imports";
 import { advanceActivityPreview } from "./activity";
 /**
@@ -19,11 +17,12 @@ import type {
   ConfigReadiness,
   MessageRecord,
   Page,
+  SessionSummary,
   SetupConfigRequest,
   TokenUsage,
   ActorUsage,
 } from "../src/lib/actor-api";
-import type { CoreStatus, Device, DeviceSettings, PublicLoginStatus, StageInfo } from "../src/lib/stage-api";
+import type { Device, DeviceSettings, PublicLoginStatus, StageInfo, StageStatus } from "../src/lib/stage-api";
 import { cancelTurn, isActorBusy, submitTurn } from "./engine";
 import { activateScenario, previewState, scenarios } from "./scenarios";
 import { sseResponse } from "./sse";
@@ -33,22 +32,27 @@ import {
   ACCOUNT_NAME,
   CATALOG_KEY,
   MOCK_PORT,
-  ROOT_ACTOR_ID,
   STAGE_ID,
   addMessage,
   configHolder,
+  createActor,
   emitEvent,
+  emitSessionChanged,
   findApproval,
   getActor,
   maxSeq,
   newId,
   now,
+  sessionSummary,
+  sessionWorkers,
+  setActorStatus,
   stageSettings,
   store,
   toolSummary,
   touchMessage,
   workReset,
   type ActorStore,
+  type SessionMeta,
 } from "./state";
 
 /** Mirrors AccountInfo in src/lib/account-api.ts (that module pulls WASM imports, so it is not type-imported). */
@@ -125,10 +129,6 @@ async function jsonBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
-function coreStatus(): CoreStatus {
-  return {...previewState.core};
-}
-
 function publicLogin(): PublicLoginStatus {
   return { state: "not_configured", error_code: null, changed_at_ms: 0, last_confirmed_at_ms: null, retry_at_ms: null };
 }
@@ -159,6 +159,57 @@ function attachmentsFromIds(ids: unknown): Attachment[] {
       if (blob) attachments.push(blob.attachment);
     }
   return attachments;
+}
+
+/** Backend (src/service/mod.rs): optional key, 1..=128 ASCII graphic. */
+function invalidKey(key: string | null): boolean {
+  return key !== null && (key.length > 128 || !/^[\x21-\x7e]+$/.test(key));
+}
+
+/** Session ids created per Idempotency-Key, so a retried create returns the same session. */
+const sessionKeys = new Map<string, string>();
+
+const sessionTitle = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
+const nullableString = (value: unknown) => value === undefined || value === null || typeof value === "string";
+
+/** Opaque session page cursor: the last row's activity time and id. */
+const sessionCursor = (session: SessionSummary) => `${session.last_activity_at_ms}.${session.id}`;
+function sessionsAfter(all: SessionSummary[], cursor: string): number | null {
+  const split = cursor.indexOf(".");
+  const at = Number(cursor.slice(0, split)), id = cursor.slice(split + 1);
+  if (split < 1 || !Number.isSafeInteger(at) || !id) return null;
+  const index = all.findIndex(session => session.last_activity_at_ms < at || (session.last_activity_at_ms === at && session.id < id));
+  return index < 0 ? all.length : index;
+}
+
+/** Stop every queued or running input of an Actor, as session archival does. */
+function stopInputs(actor: ActorStore): void {
+  for (const message of actor.messages) {
+    if (!["queued", "running"].includes(message.status)) continue;
+    touchMessage(message, { cancel_requested: true });
+    if (!cancelTurn(message.id)) {
+      touchMessage(message, { status: "cancelled", finished_at_ms: now() });
+      emitEvent(actor.summary.id, { type: "message_updated", message_id: message.id, status: "cancelled" });
+    }
+  }
+}
+
+function uploadedAttachment(actor: ActorStore, req: Request, bytes: Uint8Array): Attachment | Response {
+  // Header/limits contract from src/service/resources.rs.
+  const rawName = req.headers.get("x-file-name");
+  if (!rawName) return invalidRequest("X-File-Name header is required");
+  const nameEncoding = req.headers.get("x-file-name-encoding");
+  if (nameEncoding !== null && nameEncoding !== "utf-8-percent") return invalidRequest("Unsupported X-File-Name-Encoding");
+  const name = decodeSegment(rawName);
+  if (!name || name.length > 255 || /[\/\\:]|[\x00-\x1f]/.test(name)) return invalidRequest("Invalid file name");
+  const mediaType = (req.headers.get("content-type") || "application/octet-stream").split(";")[0].trim();
+  if (bytes.byteLength === 0) return invalidRequest("Attachment body must not be empty");
+  if (bytes.byteLength > 32 * 1024 * 1024) return json({ message: "Payload exceeds the attachment limit", code: "payload_too_large" }, 413);
+  if (mediaType.startsWith("image/") && bytes.byteLength > 10 * 1024 * 1024) return invalidRequest("Image attachments are limited to 10 MiB");
+  const id = newId();
+  const attachment: Attachment = { id, name, media_type: mediaType, size_bytes: bytes.byteLength, uri: `/v1/actors/${actor.summary.id}/resources/${id}` };
+  store.attachments.set(id, { attachment, bytes, media_type: mediaType });
+  return attachment;
 }
 
 const RE_ACTOR = /^\/v1\/actors\/([^/]+)$/;
@@ -209,12 +260,12 @@ const RE_ACTOR_USAGE = /^\/v1\/actors\/([^/]+)\/usage$/;
 const RE_MESSAGES = /^\/v1\/actors\/([^/]+)\/messages$/;
 const RE_MESSAGE_SEARCH = /^\/v1\/actors\/([^/]+)\/messages\/search$/;
 const RE_MESSAGE = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)$/;
-const RE_MESSAGE_ACTION = /^\/v1\/(?:actors\/([^/]+)|core)\/messages\/([^/]+)\/(cancel|edit|withdraw)$/;
+const RE_MESSAGE_ACTION = /^\/v1\/(actors|sessions)\/([^/]+)\/messages\/([^/]+)\/(cancel|edit|withdraw)$/;
 const RE_ACTIVITY = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/activity$/;
 const RE_RESULTS = /^\/v1\/actors\/([^/]+)\/messages\/([^/]+)\/results$/;
 const RE_RESULT = /^\/v1\/actors\/([^/]+)\/results\/([^/]+)$/;
 const RE_QUEUE = /^\/v1\/actors\/([^/]+)\/queue$/;
-const RE_QUEUE_CLEAR = /^\/v1\/core\/queue\/clear$/;
+const RE_SESSION = /^\/v1\/sessions\/([^/]+)(?:\/(archive|unarchive|actors|messages|attachments|queue\/clear))?$/;
 const RE_ACTOR_APPROVALS = /^\/v1\/actors\/([^/]+)\/approvals$/;
 const RE_ACTOR_APPROVAL_ITEM = /^\/v1\/actors\/([^/]+)\/approvals\/([^/]+)$/;
 const RE_APPROVAL = /^\/v1\/approvals\/([^/]+)$/;
@@ -243,13 +294,9 @@ export async function handle(req: Request): Promise<Response> {
 }
 
 async function route(method: string, path: string, url: URL, req: Request): Promise<Response | null> {
-  if (path === "/v1/device/virtual-displays/capabilities" && method === "GET") return json({ supported: process.env.DAAT_LOCUS_MOCK_MACOS !== "1" });
-  if (path === "/v1/device/virtual-displays" && method === "GET") return json({ supported: true, state: getComputerUseStatus().enabled ? "ready" : "disabled", displays: [] });
-  if (path === "/v1/device/computer-use/capabilities" && method === "GET") return json({supported: true});
-  if (path === "/v1/device/computer-use") {
-    if (method === "GET") return json(getComputerUseStatus());
-    if (method === "PATCH") return json(await configureComputerUse(await req.json()));
-  }
+  const virtualDisplaysSupported = process.env.DAAT_LOCUS_MOCK_MACOS === "1" || process.env.DAAT_LOCUS_MOCK_PHONE === "1";
+  if (path === "/v1/device/virtual-displays/capabilities" && method === "GET") return json({ supported: virtualDisplaysSupported });
+  if (path === "/v1/device/virtual-displays" && method === "GET") return json({ supported: virtualDisplaysSupported, state: virtualDisplaysSupported ? "ready" : "unsupported", displays: [] });
   let match: RegExpMatchArray | null;
 
   if (RE_MESSAGES.test(path) && method === "GET") {
@@ -284,7 +331,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const id=url.searchParams.get("scene")??"conversation";
     if(!activateScenario(id,url.searchParams.get("case") ?? undefined)) return invalidRequest("Unknown preview scenario or tool example");
     const scene=scenarios.find(item=>item.id===id)!;
-    return new Response(null,{status:303,headers:{Location:scene.id.startsWith("contacts")?"/contacts":scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":scene.actor===ROOT_ACTOR_ID?"/":`/actors/${scene.actor}`}});
+    return new Response(null,{status:303,headers:{Location:scene.id.startsWith("sessions")?"/sessions":scene.id==="empty"?"/":scene.id==="imports"?"/settings/import":scene.id.startsWith("apps")?"/apps":`/actors/${scene.actor}`}});
   }
   if(path==="/__mock/scenario" && method==="POST") {const body=await jsonBody(req);if(typeof body?.id!=="string"||!activateScenario(body.id))return invalidRequest("Unknown preview scenario");return json({id:previewState.id});}
   if (path === "/__mock/health" && method === "GET") return json({ ok: true });
@@ -340,8 +387,6 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       account_id: ACCOUNT_ID,
       name: ACCOUNT_NAME,
       settings: { ...stageSettings },
-      primary_actor_id: ROOT_ACTOR_ID,
-      core: coreStatus(),
       public_login: publicLogin(),
     };
     return json(stage);
@@ -365,7 +410,7 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     const matches = catalog.filter(skill => `${skill.name} ${skill.description}`.toLowerCase().includes(query));
     return json({workspace, skills:matches.slice(cursor,cursor+limit), next_cursor:cursor+limit<matches.length?cursor+limit:null});
   }
-  if (path === "/v1/stage/status" && method === "GET") return json({ core: coreStatus(), public_login: publicLogin(), work_generation: workReset.generation });
+  if (path === "/v1/stage/status" && method === "GET") return json({ public_login: publicLogin(), work_generation: workReset.generation, model_ready: previewState.modelReady && readiness().ready } satisfies StageStatus);
   if (path === "/v1/stage/devices" && method === "GET") {
     const limit = limitParam(url, "limit", 64, 64);
     if (limit === null) return invalidRequest();
@@ -401,17 +446,24 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
 
   { const prompt = await systemPromptRoute(req, url); if (prompt) return prompt; }
 
-  if(path==="/v1/contacts"&&method==="GET"){if(!previewState.authenticated)return json({code:"unauthorized"},401);return contactsPage(url);}
+  // ---- sessions -----------------------------------------------------------
+  if (path === "/v1/sessions" || RE_SESSION.test(path)) {
+    if (!previewState.authenticated) return json({code:"unauthorized"},401);
+    const response = await sessionRoute(method, path, url, req);
+    if (response) return response;
+  }
 
   // ---- actors -------------------------------------------------------------
   if (path === "/v1/actors" && method === "GET") {
     const after = url.searchParams.get("after");
+    const session = url.searchParams.get("session");
     const limit = limitParam(url, "limit", 50);
     if (limit === null) return invalidRequest();
-    const start = after ? Math.max(0, store.order.indexOf(after) + 1) : 0;
-    const ids = after && store.order.indexOf(after) < 0 ? [] : store.order.slice(start, start + limit);
+    const order = session === null ? store.order : store.order.filter(id => store.actors.get(id)?.summary.session_id === session);
+    const start = after ? Math.max(0, order.indexOf(after) + 1) : 0;
+    const ids = after && order.indexOf(after) < 0 ? [] : order.slice(start, start + limit);
     const items = ids.map(id => store.actors.get(id)?.summary).filter((summary): summary is NonNullable<typeof summary> => Boolean(summary));
-    const next = start + limit < store.order.length && ids.length ? ids[ids.length - 1] : null;
+    const next = start + limit < order.length && ids.length ? ids[ids.length - 1] : null;
     return json({ items, next_cursor: next } satisfies Page<NonNullable<ReturnType<typeof getActor>>["summary"], string>);
   }
   if ((match = RE_ACTOR_USAGE.exec(path))) {
@@ -445,8 +497,8 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   if (RE_REMOTE.test(path)) return notFound("Unknown remote stage");
 
   // ---- messages -----------------------------------------------------------
-  if ((match = RE_MESSAGES.exec(path)) || path === "/v1/core/messages") {
-    const actor = getActor(match ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
+  if ((match = RE_MESSAGES.exec(path))) {
+    const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
     if (method === "GET") {
       const before = intParam(url, "before");
@@ -454,39 +506,6 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
       if ((before !== null && before < 0) || limit === null) return invalidRequest();
       const page = pageDesc(actor.messages, before, limit);
       return json({ ...page, ...(before === null ? {active:[...actor.messages].reverse().find(message=>message.status === "running") ?? null} : {}), event_cursor: actor.eventSeq });
-    }
-    if (method === "POST" && path === "/v1/core/messages") {
-      // Backend (src/service/mod.rs): optional key, 1..=128 ASCII graphic.
-      const key = req.headers.get("idempotency-key");
-      if (key !== null && (key.length > 128 || !/^[\x21-\x7e]+$/.test(key)))
-        return invalidRequest("Idempotency-Key must be 1-128 ASCII graphic characters");
-      const body = await jsonBody(req);
-      if (!body || typeof body.content !== "string") return invalidRequest("content must be a string");
-      const attachmentIds = JSON.stringify(Array.isArray(body.attachments) ? body.attachments : []);
-      if (key) {
-        const existing = store.idempotency.get(key);
-        if (existing && existing.actor_id === actor.summary.id) {
-          // Same key + identical payload replays the record (202 again); a changed payload conflicts.
-          if (existing.content === body.content && JSON.stringify(existing.attachments.map(item => item.id)) === attachmentIds && JSON.stringify(existing.skills || []) === JSON.stringify(Array.isArray(body.skills) ? body.skills : []))
-            return json(existing, 202);
-          return conflict();
-        }
-      }
-      const busy = isActorBusy(actor.summary.id);
-      const message = addMessage(actor, {
-        kind: "request",
-        source: { kind: "user" },
-        reply_to: { kind: "user" },
-        content: body.content,
-        status: busy ? "queued" : "running",
-        attachments: attachmentsFromIds(body.attachments),
-        skills: Array.isArray(body.skills) ? body.skills : [],
-      });
-      if (key) store.idempotency.set(key, message);
-      if (previewState.id === "core-motion") acceptCoreMotionInput(message);
-      emitEvent(actor.summary.id, { type: "message_added", message_id: message.id });
-      if (previewState.id !== "core-motion") submitTurn(actor, message);
-      return json(message, 202);
     }
     return json({code:"method_not_allowed"},405);
   }
@@ -505,12 +524,12 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return json({ ...page, event_cursor: actor.eventSeq });
   }
   if ((match = RE_MESSAGE_ACTION.exec(path)) && method === "POST") {
-    if (match[1] ? match[3] !== "cancel" : match[3] === "cancel") return notFound("Unknown action");
-    const actor = getActor(match[1] ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
-    if (!actor) return notFound("Unknown actor");
-    const message = findMessage(actor, decodeSegment(match[2]));
+    const [, collection, actorId, messageId, action] = match;
+    if ((collection === "actors") !== (action === "cancel")) return notFound("Unknown action");
+    const actor = getActor(decodeSegment(actorId));
+    if (!actor || (collection === "sessions" && actor.summary.role !== "session")) return notFound("Unknown actor");
+    const message = findMessage(actor, decodeSegment(messageId));
     if (!message) return notFound("Unknown message");
-    const action = match[3];
     if (action === "cancel") {
       touchMessage(message, { cancel_requested: true });
       const stopped = cancelTurn(message.id);
@@ -572,25 +591,13 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return entry ? json(entry.result) : notFound("Unknown tool result");
   }
   if ((match = RE_MESSAGE.exec(path)) && method === "GET") {
-    const actor = getActor(match[1] ? decodeSegment(match[1]) : ROOT_ACTOR_ID);
+    const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
     const message = findMessage(actor, decodeSegment(match[2]));
     return message ? json(message) : notFound("Unknown message");
   }
 
   // ---- queue --------------------------------------------------------------
-  if (RE_QUEUE_CLEAR.test(path) && method === "POST") {
-    const actor = getActor(ROOT_ACTOR_ID);
-    if (!actor) return notFound("Unknown actor");
-    let cancelled = 0;
-    for (const message of actor.messages)
-      if (message.status === "queued" && ["user", "remote_user"].includes(message.source.kind)) {
-        touchMessage(message, { status: "cancelled", finished_at_ms: now() });
-        emitEvent(actor.summary.id, { type: "message_updated", message_id: message.id, status: "cancelled" });
-        cancelled += 1;
-      }
-    return json({ cancelled_count: cancelled });
-  }
   if ((match = RE_QUEUE.exec(path)) && method === "GET") {
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
@@ -643,32 +650,6 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
   }
 
   // ---- attachments / resources ---------------------------------------------
-  if (path === "/v1/core/attachments" && method === "POST") {
-    const actor = getActor(ROOT_ACTOR_ID);
-    if (!actor) return notFound("Unknown actor");
-    // Header/limits contract from src/service/resources.rs.
-    const rawName = req.headers.get("x-file-name");
-    if (!rawName) return invalidRequest("X-File-Name header is required");
-    const nameEncoding = req.headers.get("x-file-name-encoding");
-    if (nameEncoding !== null && nameEncoding !== "utf-8-percent") return invalidRequest("Unsupported X-File-Name-Encoding");
-    const name = decodeSegment(rawName);
-    if (!name || name.length > 255 || /[\/\\:]|[\x00-\x1f]/.test(name)) return invalidRequest("Invalid file name");
-    const mediaType = (req.headers.get("content-type") || "application/octet-stream").split(";")[0].trim();
-    const bytes = new Uint8Array(await req.arrayBuffer());
-    if (bytes.byteLength === 0) return invalidRequest("Attachment body must not be empty");
-    if (bytes.byteLength > 32 * 1024 * 1024) return json({ message: "Payload exceeds the attachment limit", code: "payload_too_large" }, 413);
-    if (mediaType.startsWith("image/") && bytes.byteLength > 10 * 1024 * 1024) return invalidRequest("Image attachments are limited to 10 MiB");
-    const id = newId();
-    const attachment: Attachment = {
-      id,
-      name,
-      media_type: mediaType,
-      size_bytes: bytes.byteLength,
-      uri: `/v1/actors/${actor.summary.id}/resources/${id}`,
-    };
-    store.attachments.set(id, { attachment, bytes, media_type: mediaType });
-    return json(attachment, 201);
-  }
   if ((match = RE_RESOURCE.exec(path)) && (method === "GET" || method === "HEAD")) {
     const actor = getActor(decodeSegment(match[1]));
     if (!actor) return notFound("Unknown actor");
@@ -707,4 +688,130 @@ async function route(method: string, path: string, url: URL, req: Request): Prom
     return notFound("Provider authentication is not available in the mock server");
 
   return null;
+}
+
+async function sessionRoute(method: string, path: string, url: URL, req: Request): Promise<Response | null> {
+  if (path === "/v1/sessions") {
+    if (method === "GET") {
+      const archived = url.searchParams.get("archived") ?? "false";
+      const limit = limitParam(url, "limit", 50);
+      if (!["true", "false"].includes(archived) || limit === null) return invalidRequest();
+      const all = [...store.sessions.keys()].map(sessionSummary)
+        .filter((session): session is SessionSummary => session !== null && (session.status === "archived") === (archived === "true"))
+        .sort((a, b) => b.last_activity_at_ms - a.last_activity_at_ms || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      const after = url.searchParams.get("after");
+      const start = after ? sessionsAfter(all, after) : 0;
+      if (start === null) return invalidRequest("Invalid cursor");
+      const items = all.slice(start, start + limit);
+      const next = start + limit < all.length && items.length ? sessionCursor(items.at(-1)!) : null;
+      return json({ items, next_cursor: next, event_cursor: maxSeq(CATALOG_KEY) } satisfies Page<SessionSummary, string>);
+    }
+    if (method === "POST") {
+      const key = req.headers.get("idempotency-key");
+      if (invalidKey(key)) return invalidRequest("Idempotency-Key must be 1-128 ASCII graphic characters");
+      const body = await jsonBody(req);
+      if (!body || !nullableString(body.title) || !nullableString(body.model)) return invalidRequest("title and model must be strings or null");
+      const existing = key ? sessionKeys.get(key) : undefined;
+      if (existing && store.sessions.has(existing)) return json(sessionSummary(existing), 201);
+      const id = newId();
+      createActor({ id, name: "Daat Locus", parent_id: null, apps: [], model: (body.model as string | null | undefined) ?? null, workspace: "~", instructions: "", title: sessionTitle(body.title) });
+      if (key) sessionKeys.set(key, id);
+      return json(emitSessionChanged(id), 201);
+    }
+    return json({code:"method_not_allowed"},405);
+  }
+  const match = RE_SESSION.exec(path)!;
+  const id = decodeSegment(match[1]), sub = match[2];
+  const meta = store.sessions.get(id), core = getActor(id);
+  if (!meta || !core) return notFound("Unknown session");
+  const members = () => [core, ...sessionWorkers(id)];
+  if (!sub) {
+    if (method === "GET") return json(sessionSummary(id));
+    if (method === "PATCH") {
+      const body = await jsonBody(req);
+      if (!body || !nullableString(body.title) || !nullableString(body.model)) return invalidRequest("title and model must be strings or null");
+      const fields: Partial<SessionMeta> = { updated_at_ms: now() };
+      if (body.title !== undefined) fields.title = sessionTitle(body.title);
+      if (body.model !== undefined && core.detail.config) core.detail.config.model = body.model as string | null;
+      return json(emitSessionChanged(id, fields));
+    }
+    if (method === "DELETE") {
+      if (!meta.archived) return conflict("Only archived sessions can be deleted");
+      emitEvent(id, { type: "session_deleted", session_id: id });
+      for (const actor of members()) {
+        store.actors.delete(actor.summary.id);
+        store.order.splice(store.order.indexOf(actor.summary.id), 1);
+      }
+      store.sessions.delete(id);
+      return noContent();
+    }
+    return json({code:"method_not_allowed"},405);
+  }
+  if (sub === "actors") {
+    if (method !== "GET") return json({code:"method_not_allowed"},405);
+    const status = url.searchParams.get("status");
+    const limit = limitParam(url, "limit", 50);
+    if ((status !== null && status !== "running") || limit === null) return invalidRequest();
+    const workers = sessionWorkers(id).filter(actor => status === null || actor.summary.status === "running").map(actor => actor.summary);
+    const after = url.searchParams.get("after");
+    const start = after ? workers.findIndex(actor => actor.id === after) + 1 : 0;
+    const items = after && start === 0 ? [] : workers.slice(start, start + limit);
+    const next = start + limit < workers.length && items.length ? items.at(-1)!.id : null;
+    return json({ items, next_cursor: next } satisfies Page<typeof workers[number], string>);
+  }
+  if (method !== "POST") return json({code:"method_not_allowed"},405);
+  if (sub === "archive") {
+    for (const actor of members()) { stopInputs(actor); setActorStatus(actor, "archived"); }
+    return json(emitSessionChanged(id, { archived: true, updated_at_ms: now() }));
+  }
+  if (sub === "unarchive") {
+    for (const actor of members()) if (actor.summary.status === "archived") setActorStatus(actor, "idle");
+    return json(emitSessionChanged(id, { archived: false, updated_at_ms: now() }));
+  }
+  if (sub === "queue/clear") {
+    let cancelled = 0;
+    for (const message of core.messages)
+      if (message.status === "queued" && ["user", "remote_user"].includes(message.source.kind)) {
+        touchMessage(message, { status: "cancelled", finished_at_ms: now() });
+        emitEvent(id, { type: "message_updated", message_id: message.id, status: "cancelled" });
+        cancelled += 1;
+      }
+    return json({ cancelled_count: cancelled });
+  }
+  if (meta.archived) return conflict("The session is archived");
+  if (sub === "attachments") {
+    const attachment = uploadedAttachment(core, req, new Uint8Array(await req.arrayBuffer()));
+    return attachment instanceof Response ? attachment : json(attachment, 201);
+  }
+  // sub === "messages"
+  const key = req.headers.get("idempotency-key");
+  if (invalidKey(key)) return invalidRequest("Idempotency-Key must be 1-128 ASCII graphic characters");
+  const body = await jsonBody(req);
+  if (!body || typeof body.content !== "string") return invalidRequest("content must be a string");
+  const attachmentIds = JSON.stringify(Array.isArray(body.attachments) ? body.attachments : []);
+  const skills = Array.isArray(body.skills) ? body.skills : [];
+  if (key) {
+    const existing = store.idempotency.get(key);
+    if (existing && existing.actor_id === id) {
+      // Same key + identical payload replays the record (202 again); a changed payload conflicts.
+      if (existing.content === body.content && JSON.stringify(existing.attachments.map(item => item.id)) === attachmentIds && JSON.stringify(existing.skills || []) === JSON.stringify(skills))
+        return json(existing, 202);
+      return conflict();
+    }
+  }
+  if (!previewState.modelReady || !readiness().ready) return json({ message: "No model is configured", code: "not_ready" }, 503);
+  const message = addMessage(core, {
+    kind: "request",
+    source: { kind: "user" },
+    reply_to: { kind: "user" },
+    content: body.content,
+    status: isActorBusy(id) ? "queued" : "running",
+    attachments: attachmentsFromIds(body.attachments),
+    skills,
+  });
+  if (key) store.idempotency.set(key, message);
+  if (previewState.id === "core-motion") acceptCoreMotionInput(message);
+  emitEvent(id, { type: "message_added", message_id: message.id });
+  if (previewState.id !== "core-motion") submitTurn(core, message);
+  return json(message, 202);
 }

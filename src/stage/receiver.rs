@@ -151,6 +151,8 @@ impl StageReceiver {
                         && grant.read
                     {
                         actors.push(super::protocol::RemoteActor {
+                            session_id: actor.session_id.clone(),
+                            role: actor.role,
                             address: super::ActorAddress {
                                 stage_id: local,
                                 actor_id: actor.id,

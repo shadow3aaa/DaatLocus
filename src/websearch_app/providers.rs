@@ -87,22 +87,26 @@ pub(super) async fn search(
     )?;
     let body = send(request).await?;
     let mut results = decode(provider, body)?;
+    sanitize_results(&mut results, &key, limit);
+    Ok(results)
+}
+
+pub(super) fn sanitize_results(results: &mut Vec<SearchResult>, key: &str, limit: usize) {
     let mut seen = HashSet::new();
     results.retain(|item| {
         crate::web_app::validate_url(&item.url).is_ok()
-            && !item.url.contains(&key)
+            && !item.url.contains(key)
             && seen.insert(item.url.clone())
     });
     results.truncate(limit);
-    for item in &mut results {
-        item.title = crate::config::redact_secret_text(&item.title, &key);
-        item.content = crate::config::redact_secret_text(&item.content, &key);
+    for item in results {
+        item.title = crate::config::redact_secret_text(&item.title, key);
+        item.content = crate::config::redact_secret_text(&item.content, key);
         item.published_at = item
             .published_at
             .take()
-            .map(|text| crate::config::redact_secret_text(&text, &key));
+            .map(|text| crate::config::redact_secret_text(&text, key));
     }
-    Ok(results)
 }
 
 fn request(
@@ -162,7 +166,25 @@ fn request(
 }
 
 // Pin each hop to public DNS answers and never forward credentials across origins.
-async fn send(mut request: Request) -> Result<Value> {
+pub(super) async fn send(request: Request) -> Result<Value> {
+    send_with_native_probe(request, false).await
+}
+
+pub(super) async fn send_native(request: Request) -> Result<Value> {
+    send_with_native_probe(request, true).await
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error(
+    "This provider does not support native web search; configure an external search provider or change the model setting"
+)]
+pub(super) struct NativeSearchUnsupported;
+
+pub(super) fn native_search_unsupported(error: &miette::Report) -> bool {
+    error.downcast_ref::<NativeSearchUnsupported>().is_some()
+}
+
+async fn send_with_native_probe(mut request: Request, native: bool) -> Result<Value> {
     for hop in 0..=5 {
         let target = request.url().clone();
         if target.scheme() != "https" {
@@ -196,7 +218,7 @@ async fn send(mut request: Request) -> Result<Value> {
             request = redirected(retry, response.status(), response.headers())?;
             continue;
         }
-        return read_response(response).await;
+        return read_response_mode(response, native).await;
     }
     Err(miette!("WebSearch redirect limit exceeded"))
 }
@@ -233,13 +255,35 @@ fn redirected(mut request: Request, status: StatusCode, headers: &HeaderMap) -> 
     *request.url_mut() = target;
     Ok(request)
 }
-async fn read_response(mut response: reqwest::Response) -> Result<Value> {
+#[cfg(test)]
+async fn read_response(response: reqwest::Response) -> Result<Value> {
+    read_response_mode(response, false).await
+}
+
+async fn read_response_mode(mut response: reqwest::Response, native: bool) -> Result<Value> {
     if !response.status().is_success() {
+        let status = response.status().as_u16();
+        if native && matches!(status, 400 | 404 | 405 | 422 | 501) {
+            let mut body = Vec::new();
+            let mut complete = true;
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) if body.len() + chunk.len() <= 16 * 1024 => {
+                        body.extend_from_slice(&chunk)
+                    }
+                    Ok(None) => break,
+                    Ok(Some(_)) | Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete && native_endpoint_unsupported(status, &body) {
+                return Err(NativeSearchUnsupported.into());
+            }
+        }
         // Provider bodies can echo credentials or contain private diagnostics.
-        return Err(miette!(
-            "WebSearch provider returned HTTP {}",
-            response.status().as_u16()
-        ));
+        return Err(miette!("WebSearch provider returned HTTP {status}"));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
@@ -253,6 +297,51 @@ async fn read_response(mut response: reqwest::Response) -> Result<Value> {
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| miette!("WebSearch returned invalid JSON"))
+}
+
+fn native_endpoint_unsupported(status: u16, body: &[u8]) -> bool {
+    let parsed = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let code = parsed["error"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let message = parsed["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if code.contains("model_not_found")
+        || message.contains("model")
+            && (message.contains("not found")
+                || message.contains("does not exist")
+                || message.contains("unknown model"))
+    {
+        return false;
+    }
+    if matches!(status, 404 | 405 | 501) {
+        return true;
+    }
+    let search = [
+        "web_search",
+        "web search",
+        "search tool",
+        "tools/search",
+        "tool_choice",
+        "tools",
+    ]
+    .iter()
+    .any(|word| message.contains(word) || code.contains(word));
+    let incompatible = [
+        "unsupported",
+        "not support",
+        "unrecognized",
+        "unknown",
+        "invalid tool",
+        "not available",
+        "not enabled",
+    ]
+    .iter()
+    .any(|word| message.contains(word) || code.contains(word));
+    matches!(status, 400 | 422) && search && incompatible
 }
 
 #[derive(Deserialize)]

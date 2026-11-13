@@ -1,6 +1,34 @@
-use crate::{Context, Result, command, computer_use, packaged, png_file, raster, xml};
+use crate::{Context, Result, command, packaged, png_file, raster, xml};
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Path, process::Command};
+
+// Keep upgrade coordination independent of optional native capabilities.
+// Burn runs the inverse steps on rollback; uninstall must not replay them.
+fn service_lifecycle(companion: &Path, installation: &str) -> Result<(String, String)> {
+    let transaction = uuid::Uuid::new_v4();
+    let digest: String = Sha256::digest(fs::read(companion)?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let arguments = |action| {
+        xml(&format!(
+            "installer {action} --installation \"{installation}\" --transaction {transaction}"
+        ))
+    };
+    let package = |id, install, rollback| {
+        format!(
+            r#"<ExePackage Id="{id}" DisplayName="Daat Locus" Name="{id}.exe" CacheId="DaatLocus-{id}-{digest}" SourceFile="{}" PerMachine="no" Permanent="no" Vital="yes" DetectCondition="0" InstallCondition="WixBundleAction &lt;&gt; 3" InstallArguments="{}" RepairArguments="{}" UninstallArguments="{}"><ExitCode Value="0" Behavior="success"/><ExitCode Behavior="error"/></ExePackage>"#,
+            xml(&companion.to_string_lossy()),
+            arguments(install),
+            arguments(install),
+            arguments(rollback)
+        )
+    };
+    Ok((
+        package("ServicePause", "prepare", "resume"),
+        package("ServiceResume", "resume", "prepare"),
+    ))
+}
 
 fn download_installer(
     url: &str,
@@ -37,7 +65,7 @@ fn download_installer(
         .env("DAAT_LOCUS_PUBLISHER", publisher))
 }
 
-pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>) -> Result<()> {
+pub(crate) fn package(context: &Context) -> Result<()> {
     let work = context.work()?;
     let icon = work.join("app.ico");
     let mut directory = ico::IconDir::new(ico::ResourceType::Icon);
@@ -54,13 +82,7 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
         return Err("Desktop client is missing".into());
     }
     let source = work.join("package.wxs");
-    let msi = context.output.join(format!("{}.msi", context.stem()));
-    let hook_component = computer.map(|assets| format!(r#"<Component Id="ComputerHook"><File Id="ComputerHookDll" Source="{}" KeyPath="yes"/></Component>"#, xml(&assets.hook.to_string_lossy()))).unwrap_or_default();
-    let hook_reference = if computer.is_some() {
-        "<ComponentRef Id=\"ComputerHook\"/>"
-    } else {
-        ""
-    };
+    let msi = work.join(format!("{}.msi", context.stem()));
     fs::write(
         &source,
         format!(
@@ -71,14 +93,13 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
 <StandardDirectory Id="LocalAppDataFolder"><Directory Id="INSTALLFOLDER" Name="Daat Locus">
 <Component Id="Main"><File Id="MainExe" Source="{}" KeyPath="yes"/></Component>
 <Component Id="Launcher"><File Id="LauncherExe" Source="{}" KeyPath="yes"/></Component>
-{}
 <Component Id="Path"><Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Path" Value="1" Type="integer" KeyPath="yes"/></Component>
 </Directory></StandardDirectory>
 <StandardDirectory Id="ProgramMenuFolder"><Directory Id="MenuFolder" Name="Daat Locus"><Component Id="Shortcut">
 <Shortcut Id="Launch" Name="Daat Locus" Target="[#LauncherExe]" WorkingDirectory="INSTALLFOLDER" Icon="AppIcon"/>
 <RemoveFolder Id="RemoveMenu" On="uninstall"/><RegistryValue Root="HKCU" Key="Software\DaatLocus" Name="Menu" Value="1" Type="integer" KeyPath="yes"/>
 </Component></Directory></StandardDirectory>
-<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/>{}<ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
+<Feature Id="Product"><ComponentRef Id="Main"/><ComponentRef Id="Launcher"/><ComponentRef Id="Path"/><ComponentRef Id="Shortcut"/></Feature>
 </Package></Wix>"#,
             xml(context
                 .meta
@@ -89,8 +110,6 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
             xml(&icon.to_string_lossy()),
             xml(&context.binary("daat-locus").to_string_lossy()),
             xml(&client.to_string_lossy()),
-            hook_component,
-            hook_reference
         ),
     )?;
     command(
@@ -207,7 +226,7 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
         }
     }
     let bundle = work.join("bundle.wxs");
-    let (pause_service, resume_service) = computer_use::service_lifecycle(
+    let (pause_service, resume_service) = service_lifecycle(
         &context.binary("daat-locus"),
         "[LocalAppDataFolder]Daat Locus",
     )?;
@@ -223,8 +242,6 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
 <Payload SourceFile="{}" bal:BAFunctions="yes"/>
 <Payload SourceFile="{}" Name="app.ico"/>
 </BootstrapperApplication>
-<Variable Name="BundledDisplayPackage" Type="string" Value="{}"/>
-<Variable Name="HasVirtualDisplay" Type="numeric" Value="{}"/>
 <Variable Name="LicenseAccepted" Type="numeric" Value="0"/>
 <Variable Name="WinFspVersion" Type="version" Value="0.0.0.0"/>
 <util:ProductSearch Id="WinFspSearch" Variable="WinFspVersion" UpgradeCode="5466A3D8-3AA1-4240-B6A0-3A051940A3EC" Result="version"/>
@@ -240,9 +257,8 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
 <util:RegistrySearch Id="WebView2Machine64Search" Variable="WebView2Machine64" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
 <util:RegistrySearch Id="WebView2User32Search" Variable="WebView2User32" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always32"/>
 <util:RegistrySearch Id="WebView2User64Search" Variable="WebView2User64" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}}" Value="pv" Result="value" Bitness="always64"/>
-{}
 <Chain>
-{}
+{pause_service}
 <ExePackage Id="WebView2" DisplayName="Microsoft Edge WebView2" SourceFile="{}" InstallArguments="/silent /install" DetectCondition="WebView2Machine32 &gt; v0.0.0.0 OR WebView2Machine64 &gt; v0.0.0.0 OR WebView2User32 &gt; v0.0.0.0 OR WebView2User64 &gt; v0.0.0.0" Permanent="yes" PerMachine="no" Vital="yes">
 <ExitCode Value="0" Behavior="success"/>
 <!-- 0x80040828: a concurrent installer has already installed the runtime. -->
@@ -253,9 +269,8 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
 </ExePackage>
 <MsiPackage Id="WinFsp" DisplayName="WinFsp 2.2 Beta 5" SourceFile="{}" Permanent="yes" InstallCondition="WinFspVersion &lt; v2.2.26286 OR (WinFspVersion = v2.2.26286 AND WixBundleAction = 8)"/>
 <MsiPackage Id="WorkspaceSupport" DisplayName="Workspace Support" SourceFile="{}" Permanent="yes" InstallCondition="WorkspaceUnc64 &lt;&gt; 1 OR WorkspaceUnc32 &lt;&gt; 1 OR WixBundleAction = 8"/>
-{}
 <MsiPackage Id="DaatLocus" DisplayName="Daat Locus" SourceFile="{}" Compressed="yes"/>
-{}
+{resume_service}
 </Chain>
 </Bundle>
 </Wix>"#,
@@ -267,20 +282,10 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
             xml(&logo.to_string_lossy()),
             xml(&bootstrapper.to_string_lossy()),
             xml(&icon.to_string_lossy()),
-            computer.map_or("", |assets| assets.package_hash.as_str()),
-            u8::from(computer.is_some()),
-            if computer.is_some() {
-                computer_use::detection()
-            } else {
-                String::new()
-            },
-            pause_service,
             xml(&webview.to_string_lossy()),
             xml(&winfsp.to_string_lossy()),
             xml(&workspace.to_string_lossy()),
-            computer.map(computer_use::prerequisite).unwrap_or_default(),
             xml(&msi.to_string_lossy()),
-            resume_service
         ),
     )?;
     command(
@@ -302,7 +307,10 @@ pub(crate) fn package(context: &Context, computer: Option<&computer_use::Assets>
             .arg("-o")
             .arg(&setup),
     )?;
-    packaged("Windows MSI", &msi)?;
     packaged("Windows setup", &setup)?;
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+#[path = "windows_installer_tests.rs"]
+mod tests;

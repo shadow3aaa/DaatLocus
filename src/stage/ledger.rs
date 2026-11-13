@@ -179,9 +179,6 @@ pub(crate) fn authorize_actor(
     actor: &str,
 ) -> Result<DeviceAuthority> {
     actor_exists(tx, actor)?;
-    if core_read(tx, actor)? {
-        return Ok(peer.authority.clone());
-    }
     let owned: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='stage_account_actors')",
         [],
@@ -278,7 +275,7 @@ pub(crate) fn inherit_account_ownership(
 pub(crate) fn initialize_account_ownership(store: &ActorStore, account: &str) -> Result<()> {
     store.stage_transaction(|tx| bind_account_tree(tx, account))
 }
-fn bind_account_tree(tx: &Transaction<'_>, account: &str) -> Result<()> {
+pub(crate) fn bind_account_tree(tx: &Transaction<'_>, account: &str) -> Result<()> {
     let trusted: TrustRoot = decode(tx.query_row(
         "SELECT value FROM stage_meta WHERE key='root'",
         [],
@@ -289,27 +286,11 @@ fn bind_account_tree(tx: &Transaction<'_>, account: &str) -> Result<()> {
             "Actor account does not match device trust",
         ));
     }
-    let shared: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",
-        [],
-        |row| row.get(0),
-    )?;
-    if shared {
-        let bound: Option<String> = tx
-            .query_row(
-                "SELECT value FROM core_meta WHERE key='account'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if bound.as_deref().is_some_and(|bound| bound != account) {
-            return Err(StageError::Forbidden("Core belongs to another account"));
-        }
-    }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
     tx.execute(
             "WITH RECURSIVE owned(actor) AS (
-                SELECT id FROM actors WHERE id IN ('root','core')
+                 SELECT id FROM actors WHERE json_extract(record,'$.role')='session'
+                   AND json_extract(record,'$.session_id')=id AND parent_id IS NULL
                   AND NOT EXISTS(SELECT 1 FROM stage_account_actors WHERE actor=id AND account!=?1)
                 UNION
                 SELECT a.id FROM actors a JOIN owned o ON a.parent_id=o.actor
@@ -320,37 +301,6 @@ fn bind_account_tree(tx: &Transaction<'_>, account: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn core_read(tx: &Transaction<'_>, actor: &str) -> Result<bool> {
-    if actor != super::shared::ACTOR_ID {
-        return Ok(false);
-    }
-    let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_meta')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Ok(false);
-    }
-    let active: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='active' AND value='1')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !active {
-        return Ok(false);
-    }
-    let account: String =
-        tx.query_row("SELECT value FROM core_meta WHERE key='account'", [], |r| {
-            r.get(0)
-        })?;
-    let trusted: TrustRoot = decode(tx.query_row(
-        "SELECT value FROM stage_meta WHERE key='root'",
-        [],
-        |r| r.get(0),
-    )?)?;
-    Ok(account == trusted.group_id)
-}
 pub(crate) fn actor_exists(tx: &Transaction<'_>, actor: &str) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM actors WHERE id=?1)",
@@ -444,9 +394,6 @@ impl<'a> StageLedger<'a> {
     pub fn manages_actor(&self, id: StageId, actor: &str, now: i64) -> Result<bool> {
         self.store.stage_transaction(|tx| {
             let member = peer(tx, id, now)?;
-            if core_read(tx, actor)? {
-                return Ok(true);
-            }
             let table: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='stage_account_actors')",
                 [],
@@ -795,9 +742,17 @@ impl<'a> StageLedger<'a> {
             let peer=peer(tx,id,now)?;frame.validate(id,self.local,peer.generation,now)?;
             actor_exists(tx,&target.actor_id)?;
             let permission=authorize_actor(tx,&peer,&target.actor_id)?;
-            if !permission.converse || matches!(origin,super::protocol::Origin::Actor{..})&&!permission.delegate { return Err(StageError::Forbidden("Device cannot invoke this Actor")); }
+            if !permission.converse || permission.read_only
+                || matches!(origin,super::protocol::Origin::Actor{..})&&!permission.delegate { return Err(StageError::Forbidden("Device cannot invoke this Actor")); }
             if let Some((previous,mut receipt))=receipt(tx,id,invocation)? { if previous!=hash { return Err(StageError::Conflict("Invocation identifier changed content")); }receipt.duplicate=true;return Ok(receipt); }
-            if crate::actors::store::actor_tx(tx, &target.actor_id).map_err(|_| StageError::Forbidden("Actor is unavailable"))?.status == crate::actors::ActorStatus::Archived {
+            let target_actor=crate::actors::store::actor_tx(tx, &target.actor_id).map_err(|_| StageError::Forbidden("Actor is unavailable"))?;
+            match origin {
+                super::protocol::Origin::Actor{session_id,session_host,..} if super::session::address(tx,&target_actor,self.local)? != (super::ActorAddress{stage_id:*session_host,actor_id:session_id.clone()})=>return Err(StageError::Forbidden("Actors belong to different sessions")),
+                super::protocol::Origin::User if target_actor.role!=crate::actors::ActorRole::Session=>return Err(StageError::Forbidden("Owner input requires a session Core")),
+                _=>{}
+            }
+            let archived_session:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM actors WHERE id=?1 AND json_extract(record,'$.status')='archived')",[&target_actor.session_id],|row|row.get(0))?;
+            if target_actor.status == crate::actors::ActorStatus::Archived || archived_session {
                 return Err(StageError::Conflict("Actor is archived; unarchive it before sending messages"));
             }
             let pending:i64=tx.query_row("SELECT COALESCE(SUM(length(frame)+COALESCE(json_extract(CAST(frame AS TEXT),'$.body.content.size'),0)+COALESCE((SELECT SUM(json_extract(value,'$.content.size')) FROM json_each(CAST(frame AS TEXT),'$.body.attachments')),0)),0) FROM stage_inbox WHERE finished IS NULL",[],|row|row.get(0))?;
@@ -1128,6 +1083,9 @@ mod tests {
             let store = ActorStore::open(&temp.path().join("actors.sqlite3")).unwrap();
             store
                 .save_actor(&ActorRecord {
+                    session_id: "root".into(),
+                    role: crate::actors::ActorRole::Session,
+                    title: None,
                     remote_read_only: false,
                     context: Default::default(),
                     id: "root".into(),
@@ -1145,7 +1103,8 @@ mod tests {
                     updated_at_ms: 1000,
                 })
                 .unwrap();
-            let mut local = DeviceIdentity::generate().unwrap();
+            let mut local =
+                DeviceIdentity::generate_for_stage(store.public_stage_id().unwrap()).unwrap();
             let remote = DeviceIdentity::generate().unwrap();
             let root = local
                 .initialize_group(1000, 1000 + 90 * 24 * 60 * 60 * 1000)
@@ -1181,7 +1140,7 @@ mod tests {
                         read: true,
                         converse: true,
                         delegate: false,
-                        read_only: true,
+                        read_only: false,
                     },
                     1000,
                 )
@@ -1229,7 +1188,7 @@ mod tests {
         }
     }
     #[test]
-    fn actor_archive_blocks_remote_admission_but_keeps_receipts_and_read_access() {
+    fn session_archive_blocks_remote_admission_but_keeps_receipts_and_read_access() {
         let fixture = Fixture::new();
         let peer = fixture.remote.profile().stage_id;
         let first = fixture.request();
@@ -1237,19 +1196,19 @@ mod tests {
             .ledger()
             .accept_actor_input(peer, &first, "request".into(), 2000)
             .unwrap();
-        fixture.store.set_archived("root", true).unwrap();
+        fixture.store.set_session_archived("root", true).unwrap();
         assert!(
-            !fixture.store.has_queued_input("root").unwrap(),
-            "archival discards queued inputs"
+            fixture.store.claim_next("root").unwrap().is_none(),
+            "archival must fence queued execution"
         );
         assert!(
             fixture
                 .store
                 .message(received.message_id.as_deref().unwrap())
-                .is_err(),
-            "discarded inputs are removed from the inbox"
+                .is_ok(),
+            "the archived session keeps durable receipt provenance"
         );
-        fixture.store.set_archived("root", true).unwrap();
+        fixture.store.set_session_archived("root", true).unwrap();
         assert!(
             fixture
                 .ledger()
@@ -1283,10 +1242,10 @@ mod tests {
                 .unwrap()
                 .items
                 .len(),
-            0,
-            "the discarded input is gone and admission stayed closed"
+            1,
+            "archival must reject new admission without erasing the receipt"
         );
-        fixture.store.set_archived("root", false).unwrap();
+        fixture.store.set_session_archived("root", false).unwrap();
         fixture
             .ledger()
             .accept_actor_input(peer, &next, "request".into(), 2001)
@@ -1298,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_archive_does_not_wait_for_outstanding_remote_delegations() {
+    fn session_archive_does_not_wait_for_outstanding_remote_delegations() {
         let fixture = Fixture::new();
         let peer = fixture.remote.profile().stage_id;
         let receipt = fixture
@@ -1338,7 +1297,7 @@ mod tests {
             fixture.store.actor("root").unwrap().status,
             ActorStatus::Idle
         );
-        fixture.store.set_archived("root", true).unwrap();
+        fixture.store.set_session_archived("root", true).unwrap();
         assert_eq!(
             fixture.store.actor("root").unwrap().status,
             ActorStatus::Archived
@@ -1353,7 +1312,7 @@ mod tests {
                 2002,
             )
             .unwrap();
-        fixture.store.set_archived("root", true).unwrap();
+        fixture.store.set_session_archived("root", true).unwrap();
         assert!(!fixture.store.has_queued_input("root").unwrap());
     }
 
@@ -1381,6 +1340,8 @@ mod tests {
         let mut frame = fixture.request();
         if let Body::Invoke { origin, .. } = &mut frame.body {
             *origin = Origin::Actor {
+                session_id: "root".into(),
+                session_host: fixture.local.profile().stage_id,
                 actor: ActorAddress {
                     stage_id: peer,
                     actor_id: "root".into(),
@@ -1676,6 +1637,15 @@ mod tests {
             .unwrap();
         let first_id = fixture.local.profile().stage_id;
         let second_id = fixture.remote.profile().stage_id;
+        second
+            .stage_transaction(|tx| {
+                tx.execute(
+                    "UPDATE stage_public_meta SET value=?1 WHERE key='stage'",
+                    [second_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let second_ledger =
             StageLedger::initialize(&second, second_id, &fixture.enrollment.root).unwrap();
         second_ledger
@@ -1791,7 +1761,7 @@ mod tests {
         }
         let journal = Journal::new(&fixture.store);
         let first = journal
-            .page(peer, "root", None, SubscriptionLevel::Detail, 2002, 2)
+            .page(peer, "root", None, SubscriptionLevel::Detail, 2002, 5)
             .unwrap();
         let second = journal
             .page(
@@ -1809,11 +1779,11 @@ mod tests {
         };
         let replica = Replica::new(&fixture.store);
         let out_of_order = replica.receive(&address, &second, 2003).unwrap();
-        assert_eq!(out_of_order.durable_received.sequence, 4);
+        assert_eq!(out_of_order.durable_received.sequence, second.base.sequence);
         assert_eq!(out_of_order.contiguous_received.sequence, 0);
         assert!(!out_of_order.caught_up);
         let blocked = replica.receive(&address, &first, 2004).unwrap();
-        assert_eq!(blocked.contiguous_received.sequence, 4);
+        assert_eq!(blocked.contiguous_received.sequence, second.base.sequence);
         assert_eq!(blocked.contiguous_applied.sequence, 0);
         let missing = replica.missing_content(&address, 2005).unwrap();
         assert_eq!(missing.len(), 1);
@@ -1825,7 +1795,7 @@ mod tests {
             .unwrap();
         let applied = replica.apply_available(&address, 2007).unwrap();
         assert!(applied.caught_up);
-        assert_eq!(applied.contiguous_applied.sequence, 4);
+        assert_eq!(applied.contiguous_applied.sequence, second.base.sequence);
         assert!(replica.receive(&address, &second, 2008).unwrap().caught_up);
         let mut views = Subscriptions::default();
         let view_a = Uuid::new_v4();
@@ -1970,7 +1940,16 @@ mod tests {
             .page(peer, "root", None, SubscriptionLevel::Detail, 2002, 100)
             .unwrap();
         assert!(page.caught_up);
-        assert_eq!(page.base.sequence, 4);
+        assert_eq!(
+            page.base.sequence,
+            page.entries.last().unwrap().cursor.sequence
+        );
+        assert!(
+            page.entries
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| entry.cursor.sequence == index as u64 + 1)
+        );
         let deltas: Vec<_> = page
             .entries
             .iter()
@@ -2172,7 +2151,6 @@ mod tests {
     fn account_tree_migration_preserves_foreign_ownership_and_device_revocation() {
         let fixture = Fixture::new();
         let account = fixture.enrollment.root.group_id.clone();
-        super::super::shared_store::initialize(&fixture.store, &account).unwrap();
         let root = fixture.store.actor("root").unwrap();
         for (id, parent) in [
             ("legacy", "root"),
@@ -2301,7 +2279,7 @@ mod tests {
             crate::actors::MessageSource::RemoteUser { .. }
         ));
         assert!(message.remote_authority.is_some());
-        assert!(message.remote_authority.as_ref().unwrap().read_only);
+        assert!(!message.remote_authority.as_ref().unwrap().read_only);
         assert!(
             !serde_json::to_value(message)
                 .unwrap()
@@ -2335,6 +2313,40 @@ mod tests {
                 .message_content(peer, "root", &finished.result.unwrap(), 0, 2005)
                 .unwrap(),
             b"verified reply"
+        );
+    }
+
+    #[test]
+    fn read_only_peer_cannot_create_a_remote_user_input() {
+        let fixture = Fixture::new();
+        let peer = fixture.remote.profile().stage_id;
+        fixture
+            .ledger()
+            .import_peer(
+                fixture.enrollment.clone(),
+                DeviceAuthority {
+                    read: true,
+                    converse: true,
+                    delegate: false,
+                    read_only: true,
+                },
+                2000,
+            )
+            .unwrap();
+        let request = fixture.request();
+        assert!(matches!(
+            fixture
+                .ledger()
+                .accept_actor_input(peer, &request, "request".into(), 2001),
+            Err(StageError::Forbidden(_))
+        ));
+        assert!(
+            fixture
+                .store
+                .messages("root", None, 10)
+                .unwrap()
+                .items
+                .is_empty()
         );
     }
 }

@@ -7,8 +7,9 @@ import { CodexMark } from "@/components/import-conversation";
 import { listCodexConversations, previewCodexImport, submitCodexImport, type CodexConversation, type ImportPreview } from "@/lib/conversation-import";
 import { getCurrentWebUiLanguage, t } from "@/lib/i18n";
 import { errorText } from "./controls";
+import { ImportSessionPicker } from "./import-session-picker";
 
-export function ImportSettings({onViewCore}: {onViewCore(): void}) {
+export function ImportSettings({onViewSession}: {onViewSession(id: string): void}) {
   const [source, setSource] = useState(false);
   const [items, setItems] = useState<CodexConversation[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -18,7 +19,8 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<"reading" | "sending" | null>(null);
   const [error, setError] = useState("");
-  const [sent, setSent] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
   const listController = useRef<AbortController | null>(null);
   const selectionController = useRef<AbortController | null>(null);
   useEffect(() => () => {listController.current?.abort();selectionController.current?.abort();}, []);
@@ -27,7 +29,7 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
     const current = new AbortController();listController.current=current;
     const requestSignal = signal ? AbortSignal.any([signal, current.signal]) : current.signal;
     setLoading(true);setError("");
-    if (!after) {selectionController.current?.abort();setPreview(null);setSelected(null);setSent(false);setBusy(null);setItems([]);setCursor(null);}
+    if (!after) {selectionController.current?.abort();setPreview(null);setSelected(null);setSent(null);setBusy(null);setItems([]);setCursor(null);}
     try {const page=await listCodexConversations(query,after,refresh,requestSignal);if(!requestSignal.aborted){setItems(previous=>after?[...previous,...page.items]:page.items);setCursor(page.next_cursor);}}
     catch(cause){if(!requestSignal.aborted){if(after)throw cause;setError(errorText(cause));}}
     finally{if(!current.signal.aborted)setLoading(false);}
@@ -39,21 +41,21 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
   },[source,query]);
   function search(value: string) {
     listController.current?.abort();selectionController.current?.abort();
-    setQuery(value);setItems([]);setCursor(null);setSelected(null);setPreview(null);setSent(false);setBusy(null);setLoading(true);setError("");
+    setQuery(value);setItems([]);setCursor(null);setSelected(null);setPreview(null);setSent(null);setBusy(null);setLoading(true);setError("");
   }
   async function choose(item: CodexConversation) {
     if(busy==="sending")return;
     selectionController.current?.abort();
     const current=new AbortController();selectionController.current=current;
-    setSelected(item.id);setPreview(null);setSent(false);setBusy("reading");setError("");
+    setSelected(item.id);setPreview(null);setSent(null);setBusy("reading");setError("");
     try {const result=await previewCodexImport(item.id,current.signal);if(!current.signal.aborted)setPreview(result);}
     catch(cause){if(!current.signal.aborted)setError(errorText(cause));}
     finally{if(!current.signal.aborted)setBusy(null);}
   }
-  async function submit() {
+  async function submit(session: string | null) {
     if(!preview||busy||sent)return;
     setBusy("sending");setError("");
-    try {await submitCodexImport(preview.resource_id);setSent(true);}
+    try {const message=await submitCodexImport(preview.resource_id,session);setSent(message.actor_id);setPicking(false);}
     catch(cause){setError(errorText(cause));}
     finally{setBusy(null);}
   }
@@ -69,7 +71,8 @@ export function ImportSettings({onViewCore}: {onViewCore(): void}) {
       {!loading&&!items.length&&!error&&<p className="dl-import-empty">{t(query?"imports.no_results":"imports.empty")}</p>}
       {cursor&&<LazyPage key={query} cursor={cursor} enabled={busy!=="sending"} onLoad={signal=>load(cursor,false,signal)} errorMessage={t("lazy_page.load_failed")}/>}
       {error&&<div className="dl-import-error"><p role="alert" className="dl-operation-error">{error}</p><Button variant="ghost" size="sm" disabled={loading||busy==="sending"} onClick={()=>void load(undefined,true)}>{t("imports.refresh")}</Button></div>}
-      {preview&&<footer className="dl-import-confirm"><div><strong>{preview.title}</strong><p>{t(sent?"imports.submitted":"imports.idle_note")}</p>{!sent&&<span>{t("imports.message_count",{count:preview.message_count})}</span>}</div>{sent?<Button onClick={onViewCore}>{t("imports.view_core")}<ArrowUpRightIcon/></Button>:<Button disabled={!!busy} onClick={()=>void submit()}>{busy==="sending"&&<Spinner/>}{t(busy==="sending"?"imports.sending":"imports.import")}</Button>}</footer>}
+      {preview&&<footer className="dl-import-confirm"><div><strong>{preview.title}</strong><p>{t(sent?"imports.submitted":"imports.idle_note")}</p>{!sent&&<span>{t("imports.message_count",{count:preview.message_count})}</span>}</div>{sent?<Button onClick={()=>onViewSession(sent)}>{t("imports.view_session")}<ArrowUpRightIcon/></Button>:<div className="dl-import-actions"><Button variant="outline" disabled={!!busy} onClick={()=>{setError("");setPicking(true);}}>{t("imports.add_to_session")}</Button><Button disabled={!!busy} onClick={()=>void submit(null)}>{busy==="sending"&&!picking&&<Spinner/>}{t("imports.start_session")}</Button></div>}</footer>}
+      <ImportSessionPicker open={picking} pending={busy==="sending"} error={picking?error:""} onOpenChange={setPicking} onChoose={session=>void submit(session)}/>
     </section>}
   </div>;
 }

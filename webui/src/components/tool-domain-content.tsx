@@ -19,6 +19,21 @@ function DocumentLink({title,url}:{title:string;url?:string}) {
   const href=url&&(safeLink(url)||resourceActorId(url,typeof location==="undefined"?"http://localhost":location.href)&&url);
   return href?<a className="dl-result-link" href={href} target="_blank" rel="noreferrer">{title.trim()?title:url}</a>:title.trim()?<span>{title}</span>:null;
 }
+function CitedAnswer({text,citations}:{text:string;citations:Record<string,JsonValue>[]}) {
+  const chars=Array.from(text);
+  let position=0;
+  const fragments:ReactNode[]=[];
+  for(const citation of [...citations].sort((left,right)=>Number(left.start_index)-Number(right.start_index))) {
+    const start=citation.start_index,end=citation.end_index,href=safeLink(asText(citation.url));
+    if(typeof start!=="number"||typeof end!=="number"||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<position||end> chars.length||end<=start||!href?.startsWith("http"))continue;
+    fragments.push(chars.slice(position,start).join(""));
+    const excerpt=chars.slice(start,end).join("");
+    fragments.push(<a key={start} href={href} target="_blank" rel="noreferrer" className="underline underline-offset-2">{excerpt.startsWith("cite")?asText(citation.title)||asText(citation.url):excerpt}</a>);
+    position=end;
+  }
+  fragments.push(chars.slice(position).join(""));
+  return <p className="whitespace-pre-wrap break-words">{fragments}</p>;
+}
 export function TerminalContent({value,live=false}:{value:Record<string,JsonValue>;live?:boolean}) {
   const text=terminalText(value),session=asObject(value.session);
   const running=live||value.running===true||session.status==="running";
@@ -52,11 +67,14 @@ export function ToolDomainContent({kind,value,live}:{kind:string|undefined;value
         {asRows(document.matches).map((match,index)=><pre className="dl-search-match" key={index}>{asText(match.content)}</pre>)}
       </>;
     }}/>;
-    case "websearch":return !Array.isArray(value.results)?null:items.length ? <ResultList items={items} render={entry=><>
+    case "websearch":return !Array.isArray(value.results)?null:<>
+      {asText(value.answer)&&asRows(value.citations).length>0&&<CitedAnswer text={asText(value.answer)} citations={asRows(value.citations)}/>}
+      {items.length ? <ResultList items={items} render={entry=><>
       <DocumentLink title={asText(entry.title)} url={asText(entry.url)}/>
       {asText(entry.published_at)&&<small className="dl-tool-note">{asText(entry.published_at)}</small>}
       {asText(entry.content)&&<p className="whitespace-pre-wrap break-words">{asText(entry.content)}</p>}
-    </>}/> : <p className="dl-tool-note">{t("websearch.empty")}</p>;
+      </>}/> : !asText(value.answer)&&<p className="dl-tool-note">{t("websearch.empty")}</p>}
+    </>;
     case "workspace":return <>
       {workspaceText(value).trim()&&<CodeBlock code={workspaceText(value)} language="text"/>}
       {items.length>0&&<ResultList items={items} render={entry=>asText(entry.path)?<span className="dl-result-path">{entry.kind==="added"?"+ ":entry.kind==="deleted"?"− ":""}{asText(entry.path)}</span>:<span>{asText(entry.message)}</span>}/>}

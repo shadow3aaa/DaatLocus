@@ -498,8 +498,6 @@ fn remember(system: &ActorSystem, actor: &str, resource: &Resource) -> Result<()
         let native:String=tx.query_row("SELECT record FROM resources WHERE actor_id=?1 AND id=?2",params![actor,resource.id],|r|r.get(0))?;
         let path=serde_json::from_str::<serde_json::Value>(&native).map_err(|_|StageError::Invalid("Invalid resource storage"))?["path"].as_str().ok_or(StageError::Invalid("Invalid resource path"))?.to_owned();
         tx.execute("INSERT INTO stage_resource_files VALUES(?1,?2,?3,?4) ON CONFLICT(actor,id) DO UPDATE SET root=excluded.root,path=excluded.path",params![actor,resource.id,root.to_string_lossy(),path])?;
-        let core:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_dirty')",[],|r|r.get(0))?;
-        if actor==crate::stage::shared::ACTOR_ID && core && previous.is_none(){tx.execute("INSERT INTO core_dirty VALUES('resources',?1,1) ON CONFLICT(entity,local_key) DO UPDATE SET revision=revision+1",[&resource.id])?;}
         Ok(())
     })
 }

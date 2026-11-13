@@ -250,7 +250,7 @@ mod tests {
                     "-NoProfile".into(),
                     "-Command".into(),
                     format!(
-                        "$child=Start-Process cmd.exe -ArgumentList '/d','/c','ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru; [Console]::Out.WriteLine($child.Id); {}",
+                        "$child=Start-Process cmd.exe -ArgumentList '/d /c ping -n 120 127.0.0.1 >nul' -PassThru; [Console]::Out.WriteLine($child.Id); [Console]::Out.Flush(); {}",
                         if parent_exits {
                             "exit 0"
                         } else {

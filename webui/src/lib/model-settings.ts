@@ -22,6 +22,7 @@ export function selectDiscoveredModel(model: ModelConfig, found: DiscoveredModel
     capabilities: model.model_id === found.id ? model.capabilities : "",
     max_completion_tokens: found.max_completion_tokens ?? null,
     supports_vision: found.supports_vision ?? null, thinking_budget: null,
+    native_web_search: model.model_id === found.id ? model.native_web_search : null,
   };
 }
 

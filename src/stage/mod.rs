@@ -2,9 +2,6 @@
 pub mod blob;
 pub mod channel;
 pub mod connection;
-pub mod coordination;
-mod core_transfer;
-pub mod core_wire;
 pub mod delivery;
 mod device_name;
 pub mod host;
@@ -12,20 +9,17 @@ pub mod identity;
 pub mod journal;
 pub mod ledger;
 pub mod observation;
+pub(crate) mod owner_http;
 pub mod peer;
 pub mod protocol;
 pub mod receiver;
-pub mod recovery;
 pub mod relay;
 pub mod reset;
 pub mod revocation;
 pub mod runtime;
+// session-host coordination owns device-local Skill discovery; no Core replica is involved.
 pub mod scheduler;
-pub mod shared;
-pub mod shared_apps;
-pub mod shared_runtime;
-pub mod shared_snapshot;
-pub mod shared_store;
+pub(crate) mod session;
 pub mod sync;
 pub mod transport;
 

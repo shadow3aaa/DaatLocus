@@ -6,13 +6,6 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Query {
-    Contacts {
-        text: String,
-        after: Option<String>,
-        limit: u8,
-        #[serde(default)]
-        sort: crate::actors::store::ContactSort,
-    },
     InvocationMessage {
         id: String,
     },
@@ -65,18 +58,6 @@ pub enum Query {
 impl Query {
     pub fn validate(&self) -> Result<()> {
         let (id, limit) = match self {
-            Self::Contacts {
-                text, after, limit, ..
-            } => {
-                if text.len() > 512
-                    || after
-                        .as_ref()
-                        .is_some_and(|id| id.is_empty() || id.len() > 2048)
-                {
-                    return Err(StageError::Invalid("Invalid contacts query"));
-                }
-                (None, Some(*limit))
-            }
             Self::Actor => (None, None),
             Self::Conversation {
                 cursor,
@@ -137,29 +118,8 @@ pub fn read(
     let source = system
         .actor(&actor.actor_id)
         .map_err(|_| StageError::Forbidden("Actor is unavailable"))?;
-    let event_head =
-        if actor.actor_id == super::shared::ACTOR_ID && matches!(query, Query::Messages { .. }) {
-            Some(super::journal::Journal::new(system.store()).current_cursor(&actor.actor_id)?)
-        } else {
-            None
-        };
     let fail = |_| StageError::Unavailable("Observation is unavailable");
     let mut value=match query {
-        Query::Contacts {text,after,limit,sort}=>{
-            if actor.actor_id!=super::shared::ACTOR_ID || !StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)? {
-                return Err(StageError::Forbidden("Contacts require account ownership"));
-            }
-            let mut page=system.store().contacts(&system.config(),&actor.actor_id,text,after.as_deref(),*limit as usize,*sort).map_err(fail)?;
-            if let Some(index)=page.items.iter().position(|item|item.actor.id==super::shared::ACTOR_ID) {
-                page.items.remove(index);
-                if let Some(after)=page.next_cursor.as_deref() {
-                    let tail=system.store().contacts(&system.config(),&actor.actor_id,text,Some(after),1,*sort).map_err(fail)?;
-                    page.items.extend(tail.items);
-                    page.next_cursor=tail.next_cursor;
-                }
-            }
-            serde_json::to_value(page)
-        },
         Query::InvocationMessage {id}=>{
             let id=uuid::Uuid::parse_str(id).map_err(|_|StageError::Invalid("Invalid invocation identifier"))?;
             let receipt=StageLedger::attach(system.store(),local).result(peer,id,now)?;
@@ -174,7 +134,7 @@ pub fn read(
         Query::Resource {id}=>serde_json::to_value(crate::resources::export(system,&actor.actor_id,id)?),
         Query::Actor => {
             let manages=StageLedger::attach(system.store(),local).manages_actor(peer,&actor.actor_id,now)?;
-            let mut value=json!({"id":source.id,"name":source.config.name,"conversation_url":actor.conversation_url(),"status":source.status,"created_at_ms":source.created_at_ms,"updated_at_ms":source.updated_at_ms,"access":{"view":true,"converse":grant.converse,"manage":manages},"remote":true});
+            let mut value=json!({"id":source.id,"session_id":source.session_id,"role":source.role,"name":source.config.name,"conversation_url":actor.conversation_url(),"status":source.status,"created_at_ms":source.created_at_ms,"updated_at_ms":source.updated_at_ms,"remote":true});
             value["model_ready"] = crate::config_setup::readiness_for_config(&system.config()).is_complete().into();
             if manages{value["config"]=serde_json::to_value(&source.config).map_err(|_|StageError::Invalid("Invalid Actor config"))?;}Ok(value)
         },
@@ -183,6 +143,7 @@ pub fn read(
         Query::Messages {before,limit} => {
             let page=system.store().messages(&actor.actor_id,*before,*limit as usize).map_err(fail)?;
             let mut value=serde_json::to_value(page).map_err(|_|StageError::Invalid("Invalid message page"))?;
+            value["event_cursor"] = system.store().event_cursor().map_err(fail)?.into();
             if before.is_none() { value["active"]=serde_json::to_value(system.store().current_message(&actor.actor_id).map_err(fail)?).map_err(|_|StageError::Invalid("Invalid active input"))?; }
             Ok(value)
         },
@@ -194,10 +155,6 @@ pub fn read(
         Query::Approvals {before,limit} => serde_json::to_value(system.store().approvals(Some(&actor.actor_id),*before,*limit as usize).map_err(fail)?),
         Query::Approval {id} => {let record=system.store().approval(id).map_err(fail)?;if record.source_actor(system.store()).map_err(fail)?!=actor.actor_id{return Err(StageError::Forbidden("Application source belongs to another Actor"));}serde_json::to_value(record)},
     }.map_err(|_|StageError::Invalid("Cannot encode observation"))?;
-    if let Some(cursor) = event_head {
-        value["event_head"] = serde_json::to_value(cursor)
-            .map_err(|_| StageError::Invalid("Invalid conversation cursor"))?;
-    }
     // The service redactor also removes private tool protocol transcripts and credentials.
     crate::service::redact(&mut value, system);
     Ok(value)

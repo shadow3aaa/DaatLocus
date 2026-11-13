@@ -189,8 +189,34 @@ impl Fixture {
         .await
         .unwrap();
         // This is an explicitly named test fixture, not a service preset.
-        let mut actor = system.actor("core").unwrap();
+        let core = daat_locus::actors::ActorRecord {
+            remote_read_only: false,
+            id: "core".into(),
+            session_id: "core".into(),
+            role: daat_locus::actors::ActorRole::Session,
+            title: None,
+            parent_id: None,
+            depth: 0,
+            config: ActorConfig {
+                name: "Fixture session".into(),
+                workspace: system.device_workspace().into(),
+                apps: vec![
+                    "actors".into(),
+                    "admin_actors".into(),
+                    "super_skills".into(),
+                ],
+                model: None,
+                instructions: String::new(),
+            },
+            context: Default::default(),
+            status: daat_locus::actors::ActorStatus::Idle,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        system.store().save_actor(&core).unwrap();
+        let mut actor = core;
         actor.id = "root".into();
+        actor.role = daat_locus::actors::ActorRole::Worker;
         actor.parent_id = Some("core".into());
         actor.depth = 1;
         actor.config.name = "Fixture executor".into();
@@ -314,15 +340,47 @@ impl Fixture {
             .id
     }
 
+    pub fn delegate(&self, actor: &str, content: &str) -> daat_locus::actors::MessageRecord {
+        let active = self.system.store().running_message("core").unwrap();
+        let (core, claimed) = if let Some(active) = active {
+            (active, false)
+        } else {
+            let queued = self.system.store().claim_next("core").unwrap();
+            let core = if let Some(queued) = queued {
+                queued
+            } else {
+                self.system
+                    .send_user("core", format!("Delegate: {content}"), vec![], None)
+                    .unwrap();
+                self.system.store().claim_next("core").unwrap().unwrap()
+            };
+            (core, true)
+        };
+        let result = self
+            .system
+            .message_from_actor("core", &core.id, actor, content.into())
+            .unwrap();
+        if claimed {
+            self.system
+                .store()
+                .finish_message(
+                    &core.id,
+                    daat_locus::actors::MessageStatus::Completed,
+                    Some("Delegated work"),
+                    None,
+                )
+                .unwrap();
+        }
+        result
+    }
+
     pub async fn approval(&self, actor: &str) -> ApprovalRecord {
         let config = self.system.actor(actor).unwrap().config;
         self.system
             .update_owned(actor, config.clone())
             .await
             .unwrap();
-        self.system
-            .send_user(actor, "permission test".into(), vec![], None)
-            .unwrap();
+        self.delegate(actor, "permission test");
         let message = self.system.store().claim_next(actor).unwrap().unwrap();
         self.system
             .store()

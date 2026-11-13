@@ -8,30 +8,15 @@ export type Connectivity = "local" | "relay";
 export type DeviceSettings = { label: string; mode: Connectivity; relay_origin: string | null; compute_priority: number };
 export type DevicePreferences = Partial<Pick<DeviceSettings,"label"|"relay_origin"|"mode">>;
 export type Device = { stage_id: string; label: string | null; error_code?: string | null; connection: { status: string; route: string | null; generation: number; retry_at_ms: number } };
-export type StageInfo = { stage_id: string; account_id: string | null; name: string | null; settings: DeviceSettings; primary_actor_id: string; core: CoreStatus | null; public_login: PublicLoginStatus };
+export type StageInfo = { stage_id: string; account_id: string | null; name: string | null; settings: DeviceSettings; public_login: PublicLoginStatus };
 export const getStage = (options?: FetchOptions) => request<StageInfo>("/v1/stage", options);
 export const getDevices = (options: FetchOptions & { after?: string } = {}) => request<Page<Device,string>>(
   `/v1/stage/devices?limit=64${options.after ? `&after=${encodeURIComponent(options.after)}` : ""}`, options,
 );
 export const saveDeviceSettings = (preferences: DevicePreferences) => request<DeviceSettings>("/v1/stage/settings", {method:"PATCH",body:preferences});
 
-export type CoreStatus = { worker_stage_id: string | null; epoch: number; synchronized: boolean; ready: boolean; model_ready: boolean; state: string; error_code?: string | null; config_revision?: string | null };
-export const getStageStatus = (options?: FetchOptions) => request<{core: CoreStatus | null; public_login: PublicLoginStatus; work_generation?: WorkGeneration | null}>("/v1/stage/status", options);
-export type ConversationConnectionMessage = "conversation_pane.synchronizing" | "conversation_pane.reconnecting" | "conversation_pane.recovering" | "conversation_pane.reconciling" | "conversation_pane.offline" | "conversation_pane.recovery_blocked" | "conversation_pane.preparing" | "conversation_pane.service_unavailable";
-export function coreConversationReady(core: CoreStatus | null | undefined, localReady: boolean): boolean {
-  return core ? core.ready || core.model_ready : localReady;
-}
-export function coreConnectionMessage(core: CoreStatus | null | undefined): ConversationConnectionMessage | null {
-  if (core === undefined) return "conversation_pane.preparing";
-  if (core === null) return "conversation_pane.service_unavailable";
-  if (core?.ready) return null;
-  if (core?.state === "recovering") return "conversation_pane.recovering";
-  if (core?.state === "reconciling") return "conversation_pane.reconciling";
-  if (core?.state === "offline") return "conversation_pane.offline";
-  if (core?.state === "recovery_blocked") return "conversation_pane.recovery_blocked";
-  if (core?.state === "model_required") return null;
-  if (core.state === "synchronizing") return "conversation_pane.synchronizing";
-  return core.state === "connecting" ? "conversation_pane.preparing" : "conversation_pane.service_unavailable";
-}
+export type StageStatus = { public_login: PublicLoginStatus; work_generation?: WorkGeneration | null; model_ready: boolean };
+export const getStageStatus = (options?: FetchOptions) => request<StageStatus>("/v1/stage/status", options);
+export type ConversationConnectionMessage = "conversation_pane.reconnecting";
 
 export type PublicLoginStatus = { state: "not_configured" | "waiting_for_account" | "connecting" | "online" | "reconnecting"; error_code: string | null; changed_at_ms: number; last_confirmed_at_ms: number | null; retry_at_ms: number | null };

@@ -69,21 +69,10 @@ impl ActorStore {
                     ActorError::Forbidden("Execution input is no longer active".into()).into(),
                 );
             }
-            let shared = current.actor_id == crate::stage::shared::ACTOR_ID
-                && sql(tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_order')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                ))?;
-            let query = if shared {
-                "SELECT m.record FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 128"
-            } else {
-                "SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 128"
-            };
             let mut received = vec![current.clone()];
             'inbox: loop {
                 let page = {
-                    let mut statement = sql(tx.prepare(query))?;
+                    let mut statement = sql(tx.prepare("SELECT record FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 128"))?;
                     sql(statement.query_map([&current.actor_id], |row| row.get::<_, String>(0)))?
                         .map(|row| decode(sql(row)?))
                         .collect::<Result<Vec<MessageRecord>>>()?

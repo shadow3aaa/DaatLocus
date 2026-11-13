@@ -10,7 +10,6 @@ pub(crate) struct NativeToolResult {
     started_at_ms: i64,
     authority: String,
     binding: String,
-    effect_digest: Option<String>,
     #[serde(default)]
     completed: bool,
 }
@@ -69,7 +68,6 @@ pub(super) fn insert(
     tx: &Transaction<'_>,
     result: &ToolResultRecord,
     read_only: bool,
-    effect_digest: Option<String>,
 ) -> Result<()> {
     let input = message_tx(tx, &result.message_id)?;
     if input.actor_id != result.actor_id
@@ -92,7 +90,6 @@ pub(super) fn insert(
             .ok_or_else(|| ActorError::Invalid("Tool execution was not started".into()))?,
         authority: authority(&input)?,
         binding: binding(result)?,
-        effect_digest,
         completed: false,
     };
     sql(tx.execute(
@@ -113,10 +110,7 @@ pub(super) fn complete(tx: &Transaction<'_>, result: &ToolResultRecord, id: &str
         [id],
         |r| r.get(0),
     ))?)?;
-    if native.effect_digest.is_some()
-        || native.binding != binding(result)?
-        || result.finished_at_ms.is_none()
-    {
+    if native.binding != binding(result)? || result.finished_at_ms.is_none() {
         return Err(ActorError::Forbidden(
             "Completed App result does not match its local execution".into(),
         )
@@ -131,43 +125,6 @@ pub(super) fn complete(tx: &Transaction<'_>, result: &ToolResultRecord, id: &str
 }
 
 impl ActorStore {
-    /// The effect fence and its local provenance must commit before device execution.
-    pub(crate) fn shared_tool_started(
-        &self,
-        actor: &str,
-        message: &str,
-        call: &AgentToolCall,
-        read_only: bool,
-        digest: &str,
-    ) -> Result<String> {
-        database_io(|| {
-            let mut db = self.db.lock();
-            let tx = sql(db.transaction())?;
-            let result = ToolResultRecord {
-                id: Uuid::new_v4().to_string(),
-                actor_id: actor.into(),
-                message_id: message.into(),
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-                payload: Value::Null,
-                output_schema: None,
-                model_content: String::new(),
-                summary: String::new(),
-                error: None,
-                started_at_ms: Some(now()),
-                finished_at_ms: None,
-            };
-            sql(tx.execute(
-                "INSERT INTO core_app_effects VALUES(?1,?2,?3,'started',NULL)",
-                params![message, call.id, digest],
-            ))?;
-            tool_provenance::insert(&tx, &result, read_only, Some(digest.into()))?;
-            self.commit(tx)?;
-            Ok(result.id)
-        })
-    }
-
     /// A structured approval decision or interrupted invocation is not a new
     /// result-based permission application, even if its observation UUID is known.
     pub(crate) fn discard_tool_result_reference(
@@ -213,47 +170,21 @@ impl ActorStore {
                 )
                 .into());
             }
-            if let Some(expected) = &native.effect_digest {
-                let effect: Option<(String,String,Option<Vec<u8>>)> = sql(db.query_row(
-                    "SELECT digest,state,result FROM core_app_effects WHERE message=?1 AND call=?2",
-                    params![native.message_id,native.call.id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-                ).optional())?;
-                let Some((digest, state, Some(bytes))) = effect else {
-                    return Err(
-                        ActorError::Forbidden("Device tool result is not complete".into()).into(),
-                    );
-                };
-                let result: crate::app::AppToolExecutionResult =
-                    serde_json::from_slice(&bytes).into_diagnostic()?;
-                if digest != *expected
-                    || state != "completed"
-                    || result
-                        .permission_reference
-                        .as_ref()
-                        .is_none_or(|reference| reference.tool_result_id != id)
-                {
-                    return Err(ActorError::Forbidden(
-                        "Device tool result reference does not match its execution".into(),
-                    )
-                    .into());
-                }
-            } else {
-                let (data, done): (String, bool) = sql(db.query_row(
-                    "SELECT record,done FROM tools WHERE id=?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                ))?;
-                let result: ToolResultRecord = decode(data)?;
-                if !native.completed
-                    || !done
-                    || result.finished_at_ms.is_none()
-                    || binding(&result)? != native.binding
-                {
-                    return Err(ActorError::Forbidden(
-                        "Tool result reference does not match a completed local execution".into(),
-                    )
-                    .into());
-                }
+            let (data, done): (String, bool) = sql(db.query_row(
+                "SELECT record,done FROM tools WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ))?;
+            let result: ToolResultRecord = decode(data)?;
+            if !native.completed
+                || !done
+                || result.finished_at_ms.is_none()
+                || binding(&result)? != native.binding
+            {
+                return Err(ActorError::Forbidden(
+                    "Tool result reference does not match a completed local execution".into(),
+                )
+                .into());
             }
             Ok(native)
         })

@@ -40,6 +40,16 @@ Browser-only first registration uses the local CLI: stop the development service
 
 For a backend-only build, use `cargo build --locked --no-default-features --bin daat-locus`. It serves the API without a bundled UI.
 
+The local maintenance CLI can inspect sessions and send a message to a session Core without a browser cookie:
+
+```sh
+daat-locus sessions list --json
+printf '%s' 'Status check' | daat-locus sessions send SESSION_ID --message-stdin
+daat-locus sessions messages SESSION_ID --limit 20
+```
+
+Use `--archived` to list archived sessions instead, `--after` to continue a list page, and `--profile NAME` to select a profile. Message content is read from stdin and never placed in process arguments. `messages` also accepts a worker ID for observation; only session Cores accept `send`.
+
 To skip asset embedding during checks, set `DAAT_LOCUS_BUILD_WEBUI=0` in the current shell:
 
 ```powershell
@@ -81,9 +91,9 @@ Run packaging from the repository root. It prepares the shared frontend before b
 
 Outputs go under `target/<triple>/<profile>/package`; `--out-dir` overrides the package directory. Use `cargo xtask package <format> --help` for signing and reuse options.
 
-Windows GUI packaging needs a signed virtual-display package and matching helpers. macOS and Android release builds need their signing credentials. See [the client guide](clients/app/README.md) before building installers.
+Windows builds include BrowserUse but no desktop GUI control or virtual-display support. The Setup executable is currently unsigned; public distribution can apply Authenticode signing separately. macOS and Android release builds still need their signing credentials. See [the client guide](clients/app/README.md) before building installers.
 
-Do not delete `.dev/windows-signing` during cleanup. It contains a persistent local development signing identity. Never commit credentials, private keys, runtime data or build output. Preserve the attribution files described in [license notes](docs/license-attribution.md).
+Never commit or delete local credentials, private keys or runtime data as part of build cleanup. Do not commit build output. Preserve the attribution files described in [license notes](docs/license-attribution.md).
 
 ## Changes
 

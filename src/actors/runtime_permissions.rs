@@ -435,8 +435,8 @@ fn forward_to_core(
     id: &str,
     explanation: &str,
 ) -> Result<ApprovalRecord> {
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        system.appeal_from_current_core(id, explanation)
+    if actor.role == super::ActorRole::Session {
+        system.appeal_from_current_core(&actor.id, id, explanation)
     } else {
         let caller = base
             .actor_call
@@ -454,14 +454,6 @@ pub(crate) async fn submit_from_actor(
     source: ApplicationSource,
     application: super::ReviewApplication,
 ) -> miette::Result<super::ApprovalRecord> {
-    if caller.actor_id == crate::stage::shared::ACTOR_ID
-        && let Some(core) = system.shared_core()
-    {
-        return core
-            .submit_approval_application(caller, stage, source, application)
-            .await
-            .map_err(miette::Report::new);
-    }
     if stage
         != system
             .store()

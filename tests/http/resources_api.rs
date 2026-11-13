@@ -8,7 +8,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
     let fixture = Fixture::new().await;
     let b = fixture.child("beta").await;
     let unicode = fixture
-        .owner(reqwest::Method::POST, "/v1/core/attachments")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/attachments")
         .header("x-file-name", "%E8%B0%83%E7%A0%94%E6%8A%A5%E5%91%8A.txt")
         .header("x-file-name-encoding", "utf-8-percent")
         .header("content-type", "text/plain")
@@ -24,7 +24,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
     for name in ["%2Fprivate.txt", "%FF.txt", "incomplete%2"] {
         assert_eq!(
             fixture
-                .owner(reqwest::Method::POST, "/v1/core/attachments")
+                .owner(reqwest::Method::POST, "/v1/sessions/core/attachments")
                 .header("x-file-name", name)
                 .header("x-file-name-encoding", "utf-8-percent")
                 .body("invalid name")
@@ -36,7 +36,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
         );
     }
     let upload = fixture
-        .owner(reqwest::Method::POST, "/v1/core/attachments")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/attachments")
         .header("x-file-name", "report.html")
         .header("content-type", "text/html")
         .body("<script>fetch('/v1/config')</script>")
@@ -91,7 +91,8 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
     );
     assert_eq!(
         fixture
-            .owner(reqwest::Method::POST, "/v1/core/messages")
+            .owner(reqwest::Method::POST, "/v1/sessions/core/messages")
+            .header("idempotency-key", "invalid-resource-payload")
             .json(&json!({"content": "no", "attachments": [{"path": "C:/private"}]}))
             .send()
             .await
@@ -100,7 +101,7 @@ async fn attachments_are_opaque_scoped_and_active_documents_are_sandboxed() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let upload = fixture
-        .owner(reqwest::Method::POST, "/v1/core/attachments")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/attachments")
         .header("x-file-name", "large.bin")
         .header("content-type", "application/octet-stream")
         .body(vec![7u8; 2 * 1024 * 1024])
@@ -132,10 +133,7 @@ async fn historical_tool_queries_return_small_refs_then_scoped_details() {
     let fixture = Fixture::new().await;
     let a = fixture.child("alpha").await;
     let b = fixture.child("beta").await;
-    let message = fixture
-        .system
-        .send_user(&a, "historical tools".into(), vec![], None)
-        .unwrap();
+    let message = fixture.delegate(&a, "historical tools");
     // This paused fixture must claim its input before recording an in-flight call.
     let active = fixture.system.store().claim_next(&a).unwrap().unwrap();
     assert_eq!(active.id, message.id);

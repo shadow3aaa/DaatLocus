@@ -1,6 +1,6 @@
 import { SseParser } from "../src/lib/event-stream";
 import { afterEach, describe, expect, test } from "bun:test";
-import { ActorApiError, actorModelReady, listToolSummaries, logoutSession, patchActorPreferences, saveConfig, subscribeActorEvents, uploadAttachment, type ActorDetail, type EventRecord } from "../src/lib/actor-api";
+import { ActorApiError, actorModelReady, listToolSummaries, logoutSession, patchActorPreferences, saveConfig, subscribeActorEvents, uploadSessionAttachment, type ActorDetail, type EventRecord } from "../src/lib/actor-api";
 const originalFetch = globalThis.fetch;
 test("remote conversations use host readiness even when this phone has no usable model", () => {
   const actor: ActorDetail = {id:"host~task",remote:true,model_ready:true,conversation_url:"/stages/host/actors/task",status:"idle",created_at_ms:1,updated_at_ms:1};
@@ -218,7 +218,7 @@ describe("cookie-only requests", () => {
   test("Unicode attachment names have an ASCII transport representation", async () => {
     let headers = new Headers();
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => { headers = new Headers(init?.headers); return Response.json({ id: "upload" }); }) as typeof fetch;
-    await uploadAttachment(new File(["内容"], "报告.txt", { type: "text/plain" }));
+    await uploadSessionAttachment("core", new File(["内容"], "报告.txt", { type: "text/plain" }));
     expect(headers.get("X-File-Name")).toBe("%E6%8A%A5%E5%91%8A.txt");
     expect(headers.get("X-File-Name-Encoding")).toBe("utf-8-percent");
   });

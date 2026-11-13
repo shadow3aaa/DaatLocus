@@ -74,7 +74,7 @@ export const serviceFetch: typeof fetch = async (input, init) => {
 
 /** Only authorized service resources may use the credentialed native protocol. */
 export function resourceSource(path: string): string {
-  if (!isTauri()) return path;
+  if (!isTauri() || path.startsWith("blob:")) return path;
   const url = new URL(path, location.href), local = new URL(location.href);
   if (url.protocol !== local.protocol || url.host !== local.host || url.search || url.hash
     || !/^\/v1\/(?:stages\/[0-9a-f-]+\/)?actors\/[a-zA-Z0-9_-]+\/resources\/[^/%\\]+$/.test(url.pathname))

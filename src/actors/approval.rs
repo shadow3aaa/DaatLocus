@@ -341,11 +341,7 @@ pub(crate) fn ensure_current(
     {
         return Err(miette!("App call request is no longer active"));
     }
-    let current_actor = if actor.id == crate::stage::shared::ACTOR_ID {
-        system.core_device_actor()?
-    } else {
-        system.execution_actor(&current_message)?
-    };
+    let current_actor = system.execution_actor(&current_message)?;
     if current_actor.config != actor.config {
         return Err(miette!(
             "Actor configuration changed while awaiting approval"
@@ -365,7 +361,6 @@ async fn automatic_review(
     control: &ActorControl,
     record: &ApprovalRecord,
 ) -> Result<std::result::Result<ReviewVerdict, ReviewFailure>> {
-    let started = Instant::now();
     let application = record
         .application
         .as_ref()
@@ -400,41 +395,17 @@ async fn automatic_review(
             "requested_additional_filesystem_access":record.requested,
             "requested_scopes":record.scopes})
         .to_string();
-    // Device execution never claims or moves Core. Its independent review RPC
-    // goes to the already selected account worker; local accounts use this host.
+    // Review is an independent model request on the operation's device.
     let future = async {
-        if let Some(core) = system.shared_core() {
-            core.review_approval(input).await.map_err(|error| {
-                tracing::warn!(
-                    approval_id = %record.id,
-                    actor_id = %actor.id,
-                    failure = ReviewFailure::Request.code(),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    error = %system.safe_error(&error.to_string()),
-                    "Automatic review RPC failed"
-                );
-                ReviewFailure::Request
-            })?
-        } else if system.local_core() {
-            review_on_core(
-                system,
-                input,
-                ReviewLogContext {
-                    approval_id: Some(&record.id),
-                    actor_id: Some(&actor.id),
-                },
-            )
-            .await
-        } else {
-            tracing::warn!(
-                approval_id = %record.id,
-                actor_id = %actor.id,
-                failure = ReviewFailure::Request.code(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "Automatic review is unavailable without a Core worker"
-            );
-            Err(ReviewFailure::Request)
-        }
+        review_on_core(
+            system,
+            input,
+            ReviewLogContext {
+                approval_id: Some(&record.id),
+                actor_id: Some(&actor.id),
+            },
+        )
+        .await
     };
     tokio::pin!(future);
     let changed = system.store().changed();
@@ -519,7 +490,7 @@ pub(crate) async fn review_on_core(
     system
         .store()
         .record_model_usage(
-            crate::stage::shared::ACTOR_ID,
+            actor_id,
             &model_usage,
             provider
                 .token_usage_info()

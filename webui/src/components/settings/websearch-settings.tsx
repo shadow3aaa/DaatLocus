@@ -12,6 +12,7 @@ export function WebSearchSettings({preferences}: {preferences: WebSearchPreferen
   const configured=settings?.providers.find(item=>item.id===provider)?.credential_configured;
   return <>
     <StatusNote text={error} error />
+    <p className="dl-settings-caption">{t("websearch.native_priority")}</p>
     {error&&<Button variant="outline" disabled={pending} onClick={()=>void preferences.retry()}>{t("app.retry")}</Button>}
     <SettingsGroup>
       <Picker id="dl-websearch-provider" label={t("websearch.provider")} value={provider??""} disabled={!settings||pending||Boolean(error)} options={Object.entries(searchProviderNames).map(([value,label])=>({value,label}))} onChange={value=>{preferences.editKey(""); void preferences.save({provider:value as SearchProvider});}} />

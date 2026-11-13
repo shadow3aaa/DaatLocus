@@ -33,9 +33,6 @@ fn network_addresses(
 pub struct Runtime {
     pub host: Arc<Host>,
     account_network: tokio::sync::Mutex<Option<Arc<crate::accounts::network::Network>>>,
-    pub(crate) coordination: RwLock<Option<Arc<super::coordination::Coordinator>>>,
-    pub(crate) core: RwLock<Option<Arc<super::shared_runtime::Controller>>>,
-    core_task: Mutex<Option<JoinHandle<()>>>,
     errors: RwLock<HashMap<StageId, String>>,
     handles: RwLock<HashMap<StageId, PeerHandle>>,
     states: RwLock<HashMap<StageId, LinkState>>,
@@ -51,6 +48,9 @@ pub struct Runtime {
     public_connection: Mutex<Option<JoinHandle<()>>>,
 }
 impl Runtime {
+    pub(crate) fn wake_sessions(&self) {
+        self.wake.notify_one();
+    }
     pub(crate) fn network_generation(&self) -> u64 {
         self.network_epoch.load(Ordering::Acquire)
     }
@@ -70,31 +70,6 @@ impl Runtime {
         self.relay_changed();
         self.wake.notify_waiters();
         tracing::debug!("Network changed; refreshing authenticated device paths");
-    }
-    pub fn voting_member(&self, peer: StageId) -> Option<bool> {
-        self.coordination
-            .read()
-            .as_ref()
-            .map(|coordinator| coordinator.is_voter(peer))
-    }
-    pub async fn coordinate(
-        &self,
-        operation: super::shared::Operation,
-        receipts: Vec<super::shared::Acknowledgement>,
-    ) -> Result<(super::shared::Reply, std::time::Instant, std::time::Instant)> {
-        let coordinator = self
-            .coordination
-            .read()
-            .clone()
-            .ok_or(StageError::Unavailable("Device consensus is not running"))?;
-        let sent = std::time::Instant::now();
-        let reply = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            coordinator.command(operation, receipts),
-        )
-        .await
-        .map_err(|_| StageError::Unavailable("Device quorum request timed out"))??;
-        Ok((reply, sent, std::time::Instant::now()))
     }
     pub(crate) fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
@@ -136,12 +111,9 @@ impl Runtime {
         self.tasks.lock().push(tokio::spawn(future));
     }
     pub fn new(host: Arc<Host>) -> Arc<Self> {
-        Arc::new(Self {
-            coordination: RwLock::new(None),
+        let runtime = Arc::new(Self {
             host,
             account_network: tokio::sync::Mutex::new(None),
-            core: RwLock::new(None),
-            core_task: Mutex::new(None),
             errors: RwLock::new(HashMap::new()),
             handles: RwLock::new(HashMap::new()),
             states: RwLock::new(HashMap::new()),
@@ -155,7 +127,9 @@ impl Runtime {
             relay_wake: Notify::new(),
             relay_tx: RwLock::new(None),
             public_connection: Mutex::new(None),
-        })
+        });
+        runtime.host.system.bind_device_runtime(&runtime);
+        runtime
     }
     pub fn state(&self, peer: StageId) -> LinkState {
         self.states.read().get(&peer).cloned().unwrap_or_default()
@@ -244,27 +218,17 @@ impl Runtime {
         self.host.enrollment()?;
         super::reset::cleanup(&self.host.system)?;
         if settings.mode == super::host::Connectivity::Local {
-            self.host
-                .system
-                .install_local_core()
-                .map_err(|_| StageError::Unavailable("Cannot initialize local Core"))?;
             let account = self
                 .host
                 .account_id()
                 .ok_or(StageError::Unavailable("Account unavailable"))?;
             super::ledger::initialize_account_ownership(self.host.system.store(), &account)?;
-            self.host
-                .system
-                .ensure_core_actor()
-                .map_err(|_| StageError::Unavailable("Cannot initialize local Core"))?;
             let own = self.clone();
             self.spawn(async move {
                 own.supervise().await;
             });
             return Ok(());
         }
-        self.host.system.disable_local_core();
-
         if self
             .host
             .configurations
@@ -278,41 +242,6 @@ impl Runtime {
                 .configurations
                 .publish(&self.host, &self.host.system.config())
                 .map_err(|_| StageError::Invalid("Cannot initialize account model definitions"))?;
-        }
-        if super::identity::verify_enrollment(
-            &self.host.enrollment()?.root,
-            &self.host.enrollment()?.chain,
-            chrono::Utc::now().timestamp_millis(),
-            &super::revocation::removed(self.host.system.store())?,
-        )?
-        .can_enroll
-        {
-            let core = super::shared_runtime::Controller::new(self)?;
-            let coordinator = super::coordination::Coordinator::new(self).await?;
-            *self.host.coordination.write() = Some(Arc::downgrade(&coordinator));
-            *self.coordination.write() = Some(coordinator.clone());
-            coordinator.bootstrap().await?;
-            let membership = coordinator.clone();
-            let owner = self.clone();
-            self.spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                while !owner.is_stopped() {
-                    interval.tick().await;
-                    if let Err(error) = tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        membership.admit_connected(),
-                    )
-                    .await
-                    {
-                        tracing::debug!(reason=?error, "Device membership update deferred");
-                    }
-                }
-            });
-            *self.host.core.write() = Some(Arc::downgrade(&core));
-            self.host.system.install_shared_core(&core);
-            *self.core.write() = Some(core.clone());
-            *self.core_task.lock() = Some(tokio::spawn(core.run()));
         }
         let own = self.clone();
         self.tasks.lock().push(tokio::spawn(async move {
@@ -351,19 +280,6 @@ impl Runtime {
             self.ensure_public_connection();
         }
         Ok(())
-    }
-    pub fn core_status(&self) -> Option<serde_json::Value> {
-        if self.host.settings().mode == super::host::Connectivity::Local
-            && self.host.account_id().is_some()
-            && self.host.system.local_core()
-        {
-            let model_ready = self.host.system.config().validate().is_ok();
-            Some(
-                serde_json::json!({"worker_stage_id":self.host.local,"epoch":0,"synchronized":true,"ready":self.host.system.core_permitted(),"model_ready":model_ready,"state":if model_ready{"local"}else{"model_required"},"error_code":null,"config_revision":null}),
-            )
-        } else {
-            self.core.read().as_ref().map(|core| core.status())
-        }
     }
     pub async fn public_login_status(
         &self,
@@ -595,19 +511,8 @@ impl Runtime {
             ));
         }
         match scope {
-            SendScope::Core => {
-                if self.host.account_id().is_none() {
-                    return Err(StageError::Forbidden(
-                        "Account Actor connectivity was disabled",
-                    ));
-                }
-                Ok(())
-            }
             SendScope::Connection => Ok(()),
             SendScope::Actor(actor) => {
-                if actor == super::shared::ACTOR_ID && self.host.account_id().is_some() {
-                    return Ok(());
-                }
                 if !StageLedger::attach(self.host.system.store(), self.host.local)
                     .authorize_actor(verified.stage_id(), actor, time)?
                     .read
@@ -643,6 +548,9 @@ impl Runtime {
             let changed = changes.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
+            if let Err(error) = super::session::flush(&self.host.system).await {
+                tracing::debug!(reason=%error,"Session coordination deferred");
+            }
             let reset = self.host.work_reset.record.lock().clone();
             if let Some(record) = reset {
                 let _lifecycle = self.host.lifecycle.lock().await;
@@ -691,7 +599,7 @@ impl Runtime {
         }
     }
     pub async fn stop(&self) {
-        self.stop_inner(true).await;
+        self.stop_inner().await;
     }
     pub async fn reset_account_work(
         self: &Arc<Self>,
@@ -733,16 +641,6 @@ impl Runtime {
         })
         .await
         .map_err(|_| StageError::Unavailable("Old device operations have not stopped"))?;
-        let core = self.core.write().take();
-        if let Some(core) = core {
-            core.stop().await;
-        }
-        let task = self.core_task.lock().take();
-        if let Some(task) = task {
-            task.abort();
-            let _ = task.await;
-        }
-        self.host.core.write().take();
         if current.as_ref() != Some(&next) {
             let replaced = self.host.system.reset_account_work(record).await;
             super::reset::initialize(&self.host)?;
@@ -750,85 +648,25 @@ impl Runtime {
         } else {
             super::reset::cleanup(&self.host.system)?;
         }
-        let own = self.host.enrollment()?;
-        let member = super::identity::verify_enrollment(
-            &own.root,
-            &own.chain,
-            chrono::Utc::now().timestamp_millis(),
-            &super::revocation::removed(self.host.system.store())?,
-        )?;
-        let local = self.host.settings().mode == super::host::Connectivity::Local;
-        if local {
-            self.host
-                .system
-                .install_local_core()
-                .map_err(|_| StageError::Unavailable("Cannot restart local Core"))?;
+        {
             let account = self
                 .host
                 .account_id()
                 .ok_or(StageError::Unavailable("Account unavailable"))?;
             super::ledger::initialize_account_ownership(self.host.system.store(), &account)?;
         }
-        let core = (member.can_enroll && !local)
-            .then(|| super::shared_runtime::Controller::new(self))
-            .transpose()?;
-        if let Some(core) = &core {
-            *self.host.core.write() = Some(Arc::downgrade(core));
-            self.host.system.install_shared_core(core);
-            *self.core.write() = Some(core.clone());
-        }
         self.host.work_reset.active.store(false, Ordering::Release);
-        if let Some(core) = core
-            && self.running.load(Ordering::Acquire)
-        {
-            *self.core_task.lock() = Some(tokio::spawn(core.run()));
-        }
         self.host.system.store().changed().notify_waiters();
         Ok(())
     }
     #[cfg(test)]
     pub(crate) async fn stop_abruptly(&self) {
-        self.stop_inner(false).await;
+        self.stop_inner().await;
     }
-    #[cfg(test)]
-    pub(crate) fn disconnect_peers(&self) {
-        for handle in self.handles.read().values() {
-            handle.disconnect();
-        }
-    }
-    async fn stop_inner(&self, graceful: bool) {
+    async fn stop_inner(&self) {
         if let Some(network) = self.account_network.lock().await.take() {
             network.stop().await;
         }
-        let core = self.core.read().clone();
-        if graceful
-            && let Some(core) = &core
-            && let Err(error) =
-                tokio::time::timeout(std::time::Duration::from_secs(20), core.prepare_exit()).await
-        {
-            tracing::debug!(reason=?error,"Device conversation handoff timed out; recovery records retained");
-        }
-        let coordinator = self.coordination.read().clone();
-        if graceful
-            && let Some(coordinator) = &coordinator
-            && let Err(error) = coordinator.leave().await
-        {
-            tracing::debug!(reason=%error,"Device authority handoff deferred; local recovery remains available");
-        }
-        self.core.write().take();
-        if let Some(core) = core {
-            core.stop().await;
-        }
-        let core_task = self.core_task.lock().take();
-        if let Some(task) = core_task {
-            task.abort();
-            let _ = task.await;
-        }
-        self.coordination.write().take();
-        if let Some(coordinator) = coordinator {
-            coordinator.stop().await;
-        }
-        self.host.coordination.write().take();
         self.stopped.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
         self.wake.notify_waiters();
@@ -847,7 +685,6 @@ impl Runtime {
         self.handles.write().clear();
         // Online is a live-channel fact. Durable generations stay in the ledger.
         self.states.write().clear();
-        self.host.system.disable_local_core();
     }
     pub async fn reconfigure(self: &Arc<Self>, settings: super::host::Settings) -> Result<()> {
         let _guard = self.host.lifecycle.lock().await;
@@ -894,19 +731,6 @@ impl Runtime {
         }
         self.host.prepare_settings(&settings)?;
         self.stop().await;
-        self.host
-            .system
-            .quiesce_core()
-            .await
-            .map_err(|_| StageError::Unavailable("Cannot stop Core during connection change"))?;
-        self.host
-            .system
-            .store()
-            .interrupt_actor(
-                super::shared::ACTOR_ID,
-                "Connection settings changed; uncertain effects were not replayed",
-            )
-            .map_err(|_| StageError::Unavailable("Cannot preserve interrupted Core input"))?;
         self.host.publish_settings(settings);
         if let Err(error) = self.start().await {
             self.stop().await;

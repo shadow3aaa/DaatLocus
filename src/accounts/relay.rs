@@ -792,7 +792,7 @@ mod tests {
     async fn password_login_over_relay() {
         if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
             let _ = tracing_subscriber::fmt()
-                .with_env_filter("daat_locus::stage=debug,daat_locus::accounts=debug,openraft=warn")
+                .with_env_filter("daat_locus::stage=debug,daat_locus::accounts=debug")
                 .with_test_writer()
                 .try_init();
         }

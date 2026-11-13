@@ -1,23 +1,5 @@
 use super::*;
 
-fn core_stop_context(system: &ActorSystem, template: &MessageRecord) -> AppToolExecutionContext {
-    system.install_local_core().unwrap();
-    let mut input = template.clone();
-    input.id = uuid::Uuid::new_v4().to_string();
-    input.seq = 0;
-    input.actor_id = "core".into();
-    input.status = MessageStatus::Queued;
-    input.started_at_ms = None;
-    input.finished_at_ms = None;
-    input.cancel_requested = false;
-    input.content = "Stop the hosted Actor".into();
-    system.store().enqueue(input, None).unwrap();
-    let input = system.store().claim_next("core").unwrap().unwrap();
-    system
-        .execution_context(&system.actor("core").unwrap(), &input)
-        .unwrap()
-}
-
 #[tokio::test]
 async fn delegated_request_outcomes_notify_the_requester_only_when_it_has_no_answer() {
     let (_directory, system, _) = paused_runtime().await;
@@ -25,7 +7,7 @@ async fn delegated_request_outcomes_notify_the_requester_only_when_it_has_no_ans
         .create_owned("root", project_config(&system, "collaborator"))
         .unwrap();
     let source = system
-        .send_user("root", "Coordinate".into(), vec![], None)
+        .test_actor_input("root", "Coordinate".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let results = |system: &ActorSystem| {
@@ -97,15 +79,15 @@ async fn delegated_request_outcomes_notify_the_requester_only_when_it_has_no_ans
 async fn interrupt_actor_repairs_all_received_inputs() {
     let (_directory, system, _) = paused_runtime().await;
     let first = system
-        .send_user("root", "Original work".into(), vec![], None)
+        .test_actor_input("root", "Original work".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let second = system
-        .send_user("root", "First guidance".into(), vec![], None)
+        .test_actor_input("root", "First guidance".into(), vec![], None)
         .unwrap();
     system.store().receive_inputs(&first.id).unwrap();
     let third = system
-        .send_user("root", "Second guidance".into(), vec![], None)
+        .test_actor_input("root", "Second guidance".into(), vec![], None)
         .unwrap();
     system.store().receive_inputs(&second.id).unwrap();
     system
@@ -123,339 +105,8 @@ async fn interrupt_actor_repairs_all_received_inputs() {
 }
 
 #[tokio::test]
-async fn core_stop_cancels_running_and_buffered_inputs_and_preserves_identity_history_and_future_work()
- {
-    use crate::app::App;
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Calls(vec![AgentToolCall {
-            id: "completed-once".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":"once.txt","content":"one effect"}),
-        }]),
-        MockReply::PendingOnEveryRequest,
-    ]));
-    let (directory, system) = runtime(provider.clone()).await;
-    let actor = system.actor("root").unwrap();
-    let first = system
-        .send_user("root", "Original work".into(), vec![], None)
-        .unwrap();
-    wait_requests(&provider, 2).await;
-    let second = system
-        .send_user("root", "First guidance".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        system.store().message(&second.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    let third = system
-        .send_user("root", "Second guidance".into(), vec![], None)
-        .unwrap();
-    assert_eq!(provider.requests.lock().len(), 2);
-    assert_eq!(
-        system.store().message(&third.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    let context = core_stop_context(&system, &first);
-    let mut app = crate::admin_actors_app::AdminActorsApp::new(system.clone());
-    let result = tokio::time::timeout(
-        Duration::from_secs(3),
-        app.execute_tool(
-            &AgentToolCall {
-                id: "stop-worker".into(),
-                name: "stop".into(),
-                arguments: json!({"stage_id":null,"actor_id":"root"}),
-            },
-            &context,
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(result.payload["cancelled_count"], 3);
-    for input in [&first, &second, &third] {
-        let state = system.store().message(&input.id).unwrap();
-        assert_eq!(state.status, MessageStatus::Cancelled);
-        assert!(state.cancel_requested);
-    }
-    assert_eq!(provider.pending.load(Ordering::Acquire), 0);
-    assert_eq!(system.actor("root").unwrap().config, actor.config);
-    assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
-    assert!(
-        !system
-            .store()
-            .history_page("root", 0, None, 100)
-            .unwrap()
-            .is_empty()
-    );
-    provider.replies.lock().clear();
-    provider
-        .replies
-        .lock()
-        .push_back(MockReply::Answer("New work completed"));
-    let next = system
-        .send_user("root", "Start new work".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        wait_completed(&system, &next.id).await.reply.as_deref(),
-        Some("New work completed")
-    );
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("workspace/once.txt")).unwrap(),
-        "one effect"
-    );
-    assert_eq!(
-        system
-            .store()
-            .tool_summaries("root", &first.id, None, 10)
-            .unwrap()
-            .items
-            .len(),
-        1
-    );
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn core_stop_rejects_self_readonly_foreign_and_ordinary_actor_authority() {
-    use crate::app::App;
-    let (_directory, system, _) = paused_runtime().await;
-    let input = system
-        .send_user("root", "Continue work".into(), vec![], None)
-        .unwrap();
-    let context = core_stop_context(&system, &input);
-    let mut core = crate::admin_actors_app::AdminActorsApp::new(system.clone());
-    let mut call = AgentToolCall {
-        id: "stop".into(),
-        name: "stop".into(),
-        arguments: json!({"stage_id":null,"actor_id":"core"}),
-    };
-    assert!(core.execute_tool(&call, &context).await.is_err());
-    let mut foreign = system.actor("root").unwrap();
-    foreign.id = "foreign".into();
-    foreign.parent_id = None;
-    foreign.depth = 0;
-    system.store().save_actor(&foreign).unwrap();
-    system.store().stage_transaction(|tx| {
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);
-            INSERT INTO stage_account_actors VALUES('core','owner-account'),('root','owner-account'),('foreign','other-account');")?;
-        Ok(())
-    }).unwrap();
-    call.arguments["actor_id"] = json!("foreign");
-    assert!(core.execute_tool(&call, &context).await.is_err());
-    call.arguments["actor_id"] = json!("root");
-    let mut readonly = context.clone();
-    readonly.actor_call.as_mut().unwrap().remote_read_only = true;
-    assert!(core.execute_tool(&call, &readonly).await.is_err());
-    let input = system.store().claim_next("root").unwrap().unwrap();
-    let actor = system.actor("root").unwrap();
-    let mut ordinary = crate::actor_app::ActorApp::new("root".into(), system.clone());
-    assert!(!ordinary.tool_specs().iter().any(|tool| tool.name == "stop"));
-    let ordinary_context = system.execution_context(&actor, &input).unwrap();
-    assert!(
-        ordinary
-            .execute_tool(&call, &ordinary_context)
-            .await
-            .is_err()
-    );
-    assert!(!system.store().message(&input.id).unwrap().cancel_requested);
-    system.shutdown().await;
-}
-
-#[cfg(not(target_os = "android"))]
-#[tokio::test]
-async fn core_stop_reaps_running_terminal_and_discards_queued_input() {
-    use crate::app::App;
-    if !crate::sandbox::test_support::native_sandbox_available() {
-        return;
-    }
-    let provider = Arc::new(ReplayProvider::new(vec![]));
-    let (directory, system) = runtime(provider.clone()).await;
-    let pidfile = directory.path().join("workspace/process.pid");
-    let command = format!(
-        "printf '%s' \"$$\" > '{}'; sleep 300",
-        pidfile.display().to_string().replace('\'', "'\\''")
-    );
-    provider.replies.lock().extend([MockReply::Calls(vec![AgentToolCall {
-        id:"long-process".into(),name:"terminal__terminal_exec".into(),
-        arguments:json!({"command":command,"session_id":null,"workdir":null,"yield_time_ms":30000,"max_chars":1024}),
-    }]),MockReply::PendingOnEveryRequest]);
-    let first = system
-        .send_user("root", "Run the process".into(), vec![], None)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !std::fs::read_to_string(&pidfile).is_ok_and(|v| v.parse::<u32>().is_ok()) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    #[cfg(not(target_os = "linux"))]
-    let pid = std::fs::read_to_string(&pidfile)
-        .unwrap()
-        .parse::<u32>()
-        .unwrap();
-    let processes = sysinfo::System::new_all();
-    #[cfg(not(target_os = "linux"))]
-    let pids = std::collections::HashSet::from([sysinfo::Pid::from_u32(pid)]);
-    #[cfg(target_os = "linux")]
-    let pids = {
-        // Bubblewrap's --unshare-pid makes $$ a namespace PID. Match the
-        // unique fixture directory in the host supervisor's argv, then follow
-        // host parent IDs so this checks the actual supervisor/descendant tree.
-        let marker = directory.path().file_name().unwrap().to_string_lossy();
-        let mut pids = processes
-            .processes()
-            .iter()
-            .filter_map(|(pid, process)| {
-                process
-                    .cmd()
-                    .iter()
-                    .any(|arg| arg.to_string_lossy().contains(marker.as_ref()))
-                    .then_some(*pid)
-            })
-            .collect::<std::collections::HashSet<_>>();
-        assert!(
-            !pids.is_empty(),
-            "fixture has no observable host supervisor"
-        );
-        loop {
-            let children = processes
-                .processes()
-                .iter()
-                .filter_map(|(pid, process)| {
-                    process
-                        .parent()
-                        .is_some_and(|parent| pids.contains(&parent))
-                        .then_some(*pid)
-                })
-                .collect::<Vec<_>>();
-            let before = pids.len();
-            pids.extend(children);
-            if pids.len() == before {
-                break;
-            }
-        }
-        pids
-    };
-    let instances = pids
-        .into_iter()
-        .map(|pid| {
-            let started = processes
-                .process(pid)
-                .expect("fixture process exited before stop")
-                .start_time();
-            (pid, started)
-        })
-        .collect::<Vec<_>>();
-    let queued = system
-        .send_user("root", "Must not start".into(), vec![], None)
-        .unwrap();
-    let context = core_stop_context(&system, &first);
-    let mut core = crate::admin_actors_app::AdminActorsApp::new(system.clone());
-    core.execute_tool(
-        &AgentToolCall {
-            id: "stop-process".into(),
-            name: "stop".into(),
-            arguments: json!({"stage_id":null,"actor_id":"root"}),
-        },
-        &context,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        system.store().message(&first.id).unwrap().status,
-        MessageStatus::Cancelled
-    );
-    let queued_state = system.store().message(&queued.id).unwrap();
-    assert_eq!(queued_state.status, MessageStatus::Cancelled);
-    assert!(queued_state.started_at_ms.is_none());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let processes = sysinfo::System::new_all();
-            if instances.iter().all(|(pid, started)| {
-                processes
-                    .process(*pid)
-                    .is_none_or(|process| process.start_time() != *started)
-            }) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("stopped Actor retained its native process");
-    assert_eq!(provider.requests.lock().len(), 1);
-    system.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn core_stop_routes_to_remote_actor_and_cancels_all_its_open_inputs() {
-    let core_model = Arc::new(ReplayProvider::new(vec![]));
-    let worker_model = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(core_model.clone(), worker_model.clone()).await;
-    let first = b
-        .send_user("root", "Remote original work".into(), vec![], None)
-        .unwrap();
-    wait_requests(&worker_model, 1).await;
-    let second = b
-        .send_user("root", "Remote guidance".into(), vec![], None)
-        .unwrap();
-    assert_eq!(worker_model.requests.lock().len(), 1);
-    assert_eq!(
-        b.store().message(&second.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    let identity = b.actor("root").unwrap().config;
-    let epoch = net_a.core.read().as_ref().unwrap().epoch();
-    core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "remote-stop".into(),
-            name: "admin_actors__stop".into(),
-            arguments: json!({"stage_id":net_b.host.local,"actor_id":"root"}),
-        }]),
-        MockReply::Answer("Remote Actor stopped"),
-        MockReply::PendingOnEveryRequest,
-    ]);
-    let request = a
-        .send_user("core", "Stop the remote Actor".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        wait_completed(&a, &request.id).await.reply.as_deref(),
-        Some("Remote Actor stopped")
-    );
-    for id in [&first.id, &second.id] {
-        assert_eq!(
-            b.store().message(id).unwrap().status,
-            MessageStatus::Cancelled
-        );
-    }
-    assert_eq!(worker_model.pending.load(Ordering::Acquire), 0);
-    assert_eq!(b.actor("root").unwrap().config, identity);
-    assert_eq!(b.actor("root").unwrap().status, ActorStatus::Idle);
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    let tools = a
-        .store()
-        .tool_summaries("core", &request.id, None, 10)
-        .unwrap()
-        .items;
-    assert_eq!(tools.len(), 1);
-    assert!(tools[0].error.is_none());
-    assert_eq!(tools[0].outcome.as_ref().unwrap()["cancelled_count"], 2);
-    assert_eq!(
-        tools[0].outcome.as_ref().unwrap()["stage_id"],
-        net_b.host.local.to_string()
-    );
-    net_a.stop().await;
-    net_b.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test]
 async fn actor_messages_retain_bodies_in_detail_and_only_references_in_events() {
     let (_directory, system, _) = paused_runtime().await;
-    system.install_local_core().unwrap();
     system
         .send_user("core", "Coordinate work".into(), vec![], None)
         .unwrap();
@@ -553,9 +204,8 @@ async fn messages_are_retained_during_automatic_review_and_received_at_the_settl
         .lock()
         .push_back(json!({"decision":"approve","reason":"requested output"}));
     let (_directory, system) = runtime(provider.clone()).await;
-    system.install_local_core().unwrap();
     let original = system
-        .send_user("root", "Write outside the workspace".into(), vec![], None)
+        .test_actor_input("root", "Write outside the workspace".into(), vec![], None)
         .unwrap();
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -575,7 +225,7 @@ async fn messages_are_retained_during_automatic_review_and_received_at_the_settl
     .await
     .expect("filesystem operation never reached automatic review");
     let incoming = system
-        .send_user("root", "Additional information".into(), vec![], None)
+        .test_actor_input("root", "Additional information".into(), vec![], None)
         .unwrap();
     assert!(system.store().has_queued_input("root").unwrap());
     assert!(!target.exists());
@@ -621,7 +271,7 @@ async fn message_tool_is_shared_and_related_messages_do_not_borrow_authority_or_
         .create_owned("root", project_config(&system, "collaborator"))
         .unwrap();
     let source = system
-        .send_user("root", "Coordinate".into(), vec![], None)
+        .test_actor_input("root", "Coordinate".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let target = system
@@ -723,7 +373,7 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
         MockReply::Answer("Combined inputs processed"),
     ]);
     let original = system
-        .send_user("root", "Execute both effects".into(), vec![], None)
+        .test_actor_input("root", "Execute both effects".into(), vec![], None)
         .unwrap();
     let original = system
         .store()
@@ -756,7 +406,7 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
         .await
         .unwrap();
     let incoming = system
-        .send_user("root", "Receive this after the group".into(), vec![], None)
+        .test_actor_input("root", "Receive this after the group".into(), vec![], None)
         .unwrap();
     assert_eq!(
         system.store().message(&incoming.id).unwrap().status,
@@ -797,96 +447,6 @@ async fn messages_wait_for_the_whole_started_tool_group_and_never_split_its_obse
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_core_initial_authorization_survives_new_inputs_without_replay() {
-    let outside = crate::sandbox::test_support::scoped_directory();
-    let workspace = outside.path().join("new-workspace");
-    let core_model = Arc::new(ReplayProvider::new(vec![]));
-    let worker_model = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
-    let ((_a, a, net_a), (_b, b, net_b), _relay) =
-        device_pair(core_model.clone(), worker_model.clone()).await;
-    let epoch = net_a.core.read().as_ref().unwrap().epoch();
-    let source_scopes = a.store().sandbox_scopes().unwrap();
-    core_model.review_blocked.store(true, Ordering::Release);
-    core_model
-        .review_replies
-        .lock()
-        .push_back(json!({"decision":"approve","reason":"requested workspace"}));
-    let gate = Arc::new(tokio::sync::Notify::new());
-    core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"remote-create".into(),name:"actors__create".into(),
-            arguments:json!({"stage_id":net_b.host.local,"name":"New collaborator","workspace":workspace,"instructions":null,"model":"mock","initial_authorization":null})}]),
-        MockReply::Gated(Box::new(MockReply::Calls(vec![AgentToolCall {id:"inspect-created".into(), name:"actors__list".into(), arguments:json!({"stage_id":null,"cursor":null,"limit":8})}])), gate.clone()),
-        MockReply::Answer("Creation and incoming message handled"),MockReply::PendingOnEveryRequest,
-    ]);
-    let original = a
-        .send_user("core", "Create the collaborator".into(), vec![], None)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if workspace.is_dir() && core_model.requests.lock().len() >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("Core did not finish remote creation before continuing inference");
-    let incoming = a
-        .send_user("core", "Additional information".into(), vec![], None)
-        .unwrap();
-    assert!(workspace.is_dir());
-    assert_eq!(
-        a.store().message(&original.id).unwrap().status,
-        MessageStatus::Running
-    );
-    assert_eq!(
-        a.store().message(&incoming.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    assert_eq!(core_model.requests.lock().len(), 2);
-    gate.notify_one();
-    assert_eq!(wait_completed(&a, &incoming.id).await.reply, None);
-    assert_eq!(
-        wait_completed(&a, &original.id).await.reply.as_deref(),
-        Some("Creation and incoming message handled")
-    );
-    assert!(workspace.is_dir());
-    assert_eq!(
-        b.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .filter(|actor| actor.config.name == "New collaborator")
-            .count(),
-        1
-    );
-    assert!(core_model.review_requests.lock().is_empty());
-    assert!(
-        b.store()
-            .approvals(Some("core"), None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        b.store()
-            .sandbox_scopes()
-            .unwrap()
-            .iter()
-            .any(|scope| scope.path == workspace.canonicalize().unwrap()
-                && scope.write
-                && scope.recursive)
-    );
-    assert_eq!(a.store().sandbox_scopes().unwrap(), source_scopes);
-    assert!(worker_model.review_requests.lock().is_empty());
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    net_a.stop().await;
-    net_b.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_input() {
     use crate::stage::{ActorAddress, delivery::Deliveries};
     let source_model = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
@@ -900,14 +460,28 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
     ]));
     let ((_a, a, net_a), (_b, b, net_b), _relay) =
         device_pair(source_model, target_model.clone()).await;
+    b.store()
+        .stage_transaction(|tx| {
+            tx.execute(
+                "INSERT OR REPLACE INTO actor_session_hosts(actor,host) VALUES('root',?1)",
+                [net_a.host.local.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let target = ActorAddress {
         stage_id: net_b.host.local,
         actor_id: "root".into(),
     };
+    let queued = a
+        .test_actor_input("core", "Coordinate remote work".into(), vec![], None)
+        .unwrap();
+    let request = a.store().claim_next("core").unwrap().unwrap();
+    assert_eq!(queued.id, request.id);
     let original = Deliveries::new(a.store(), net_a.host.local)
         .queue(
-            &a.core_device_actor().unwrap(),
-            None,
+            &a.actor("core").unwrap(),
+            Some(&request),
             target.clone(),
             ("Remote original".into(), vec![]),
             chrono::Utc::now().timestamp_millis(),
@@ -915,14 +489,14 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
         )
         .unwrap();
     wait_requests(&target_model, 1).await;
-    let source = a.core_device_actor().unwrap();
+    let source = a.actor("core").unwrap();
     let related = original.invocation_id.unwrap().to_string();
     let deliveries = Deliveries::new(a.store(), net_a.host.local);
     let now = chrono::Utc::now().timestamp_millis();
     let followup = deliveries
         .queue_related(
             &source,
-            None,
+            Some(&request),
             target.clone(),
             ("Remote followup".into(), vec![]),
             now,
@@ -933,7 +507,7 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
     let retry = deliveries
         .queue_related(
             &source,
-            None,
+            Some(&request),
             target.clone(),
             ("Remote followup".into(), vec![]),
             now,
@@ -947,7 +521,7 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
         deliveries
             .queue_related(
                 &source,
-                None,
+                Some(&request),
                 target,
                 ("Remote followup".into(), vec![]),
                 now,
@@ -986,6 +560,9 @@ async fn remote_messages_preserve_correlation_and_deduplicate_the_exact_related_
     .unwrap();
     assert!(!target_model.dropped.load(Ordering::Acquire));
     assert_eq!(target_model.requests.lock().len(), 2);
+    a.store()
+        .finish_message(&request.id, MessageStatus::Completed, None, None)
+        .unwrap();
     net_a.stop().await;
     net_b.stop().await;
     a.shutdown().await;
@@ -1007,7 +584,7 @@ async fn shutdown_preserves_running_and_buffered_inputs_without_replaying_effect
     let original = enqueue_root(&system, "Original running work");
     wait_requests(&provider, 2).await;
     let incoming = system
-        .send_user("root", "Incoming unfinished work".into(), vec![], None)
+        .test_actor_input("root", "Incoming unfinished work".into(), vec![], None)
         .unwrap();
     assert_eq!(provider.requests.lock().len(), 2);
     system.shutdown().await;
@@ -1058,13 +635,39 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
     let worker = Arc::new(ReplayProvider::new(vec![MockReply::PendingOnEveryRequest]));
     let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
         device_pair(coordinator.clone(), worker.clone()).await;
-    let original = b
-        .send_user("root", "REMOTE_VISIBLE_PROGRESS".into(), vec![], None)
+    let _seed = a
+        .test_actor_input("core", "Create remote worker".into(), vec![], None)
         .unwrap();
+    let seed = a.store().claim_next("core").unwrap().unwrap();
+    let context = a
+        .execution_context(&a.actor("core").unwrap(), &seed)
+        .unwrap();
+    let mut actors = crate::actor_app::ActorApp::new("core".into(), a.clone());
+    let created = crate::app::App::execute_tool(
+        &mut actors,
+        &AgentToolCall {
+            id: "create-remote-worker".into(),
+            name: "create".into(),
+            arguments: json!({"stage_id":net_b.host.local,"name":"Remote observer","workspace":null,"instructions":"Observe the remote task","model":"mock","task":"REMOTE_VISIBLE_PROGRESS","forward_input":false}),
+        },
+        &context,
+    ).await.unwrap();
+    a.store()
+        .finish_message(&seed.id, MessageStatus::Completed, None, None)
+        .unwrap();
+    let remote_actor = created.payload["id"].as_str().unwrap().to_owned();
     wait_requests(&worker, 1).await;
+    let original = b
+        .store()
+        .messages(&remote_actor, None, 16)
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .expect("the remote task should be admitted before inference starts");
     coordinator.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall{id:"inspect-remote-conversation".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
-        AgentToolCall{id:"change-remote-model".into(),name:"admin_actors__set_model".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","model":"mock"})}]),
+        MockReply::Calls(vec![AgentToolCall{id:"inspect-remote-conversation".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":remote_actor,"cursor":null,"limit":8})},
+        AgentToolCall{id:"change-remote-model".into(),name:"admin_actors__set_model".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":remote_actor,"model":"mock"})}]),
         MockReply::Answer("Observed progress without messaging the worker"),
     ]);
     let request = a
@@ -1078,7 +681,7 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
     let done = wait_completed(&a, &request.id).await;
     assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
     assert_eq!(
-        b.actor("root").unwrap().config.model.as_deref(),
+        b.actor(&remote_actor).unwrap().config.model.as_deref(),
         Some("mock")
     );
     assert_eq!(
@@ -1110,22 +713,38 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
             .any(|bubble| bubble["content"] == "REMOTE_VISIBLE_PROGRESS")
     );
     assert_eq!(
-        b.store().messages("root", None, 16).unwrap().items.len(),
+        b.store()
+            .messages(&remote_actor, None, 16)
+            .unwrap()
+            .items
+            .len(),
         1,
         "observation must not create another input"
     );
-    // A hosted worker can coordinate through the same read tools without using
-    // Core's inbox or borrowing its execution authority.
+    // A worker in the session can coordinate through these tools without
+    // using the Core inbox or borrowing its execution authority.
+    let hosted = a
+        .create_owned(
+            "core",
+            crate::actors::ActorConfig {
+                name: "Local observer".into(),
+                workspace: a.device_workspace().join("Local observer"),
+                apps: a.device_app_names().unwrap(),
+                model: None,
+                instructions: "Observe the remote worker".into(),
+            },
+        )
+        .unwrap();
     coordinator.replies.lock().extend([
         MockReply::Calls(vec![
             AgentToolCall {id:"worker-devices".into(),name:"actors__devices".into(),arguments:json!({})},
-            AgentToolCall {id:"worker-observe".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","cursor":null,"limit":8})},
+            AgentToolCall {id:"worker-observe".into(),name:"actors__read_conversation".into(),arguments:json!({"stage_id":net_b.host.local,"actor_id":remote_actor,"cursor":null,"limit":8})},
         ]),
         MockReply::Answer("Observed from a hosted worker"),
     ]);
     let hosted_input = a
-        .send_user(
-            "root",
+        .test_actor_input(
+            &hosted.id,
             "Read the remote collaborator's progress".into(),
             vec![],
             None,
@@ -1135,7 +754,7 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
     assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
     let summaries = a
         .store()
-        .tool_summaries("root", &hosted_input.id, None, 8)
+        .tool_summaries(&hosted.id, &hosted_input.id, None, 8)
         .unwrap()
         .items;
     assert_eq!(summaries.len(), 2);
@@ -1160,7 +779,14 @@ async fn administrative_observation_and_model_changes_route_to_the_existing_remo
         1,
         "observation cannot interrupt the remote worker"
     );
-    assert_eq!(b.store().messages("root", None, 16).unwrap().items.len(), 1);
+    assert_eq!(
+        b.store()
+            .messages(&remote_actor, None, 16)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
     net_b.stop_abruptly().await;
     net_a.stop_abruptly().await;
     a.shutdown().await;

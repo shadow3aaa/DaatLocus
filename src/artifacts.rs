@@ -53,7 +53,7 @@ pub fn store_artifact(
     sandbox_policy: &RuntimeSandboxPolicy,
 ) -> Result<ArtifactReference> {
     validate_artifact_args(request)?;
-    let source = prepare_source_from_args(request, Some(execution_cwd), Some(sandbox_policy))?;
+    let source = prepare_source_from_args(request, execution_cwd, sandbox_policy)?;
     store_prepared_artifact(request, source)
 }
 
@@ -187,25 +187,28 @@ enum PreparedSource {
 
 fn prepare_source_from_args(
     args: &ArtifactRequest,
-    execution_cwd: Option<&Path>,
-    sandbox_policy: Option<&RuntimeSandboxPolicy>,
+    execution_cwd: &Path,
+    sandbox_policy: &RuntimeSandboxPolicy,
 ) -> Result<PreparedSource> {
     if let Some(requested_path) = args.path.as_deref() {
         let requested_path = requested_path.trim();
         if requested_path.is_empty() {
             return Err(miette!("`path` must not be empty"));
         }
-        let resolved = RuntimeSandboxPolicy::resolve_path(Path::new(requested_path), execution_cwd);
+        let resolved =
+            RuntimeSandboxPolicy::resolve_path(Path::new(requested_path), Some(execution_cwd));
         let canonical = resolved.canonicalize().map_err(|err| {
             miette!(
                 "unable to resolve artifact path `{}`: {err}",
                 resolved.display()
             )
         })?;
-        if let Some(policy) = sandbox_policy {
-            policy.ensure_path_readable(&canonical, "present_artifact source")?;
-        }
-        let bytes = read_artifact_source_file(&canonical, sandbox_policy)?;
+        sandbox_policy.ensure_path_readable(&canonical, "present_artifact source")?;
+        let bytes = crate::file_io::read_authorized_bytes(
+            &canonical,
+            MAX_ARTIFACT_FILE_BYTES,
+            sandbox_policy,
+        )?;
         let default_title = file_display_name(&canonical);
         let (kind, mime_type, ext) = classify_file_bytes(&bytes, args.kind)?;
         return Ok(PreparedSource::File {
@@ -258,17 +261,6 @@ fn prepare_source_from_args(
     Err(miette!(
         "present_artifact requires exactly one of `path`, `content`, or `url`"
     ))
-}
-
-fn read_artifact_source_file(
-    path: &Path,
-    policy: Option<&RuntimeSandboxPolicy>,
-) -> Result<Vec<u8>> {
-    crate::file_io::read_authorized_bytes(
-        path,
-        MAX_ARTIFACT_FILE_BYTES,
-        policy.unwrap_or(&RuntimeSandboxPolicy::disabled()),
-    )
 }
 
 fn classify_file_bytes(

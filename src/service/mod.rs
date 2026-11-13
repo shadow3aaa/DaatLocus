@@ -3,19 +3,18 @@ mod admin;
 mod approvals;
 mod apps;
 mod auth;
-mod computer_use;
-mod contacts;
 mod conversation;
 mod imports;
 mod prompt;
 mod remote;
+mod remote_sessions;
 mod reset;
 mod resources;
+mod sessions;
 mod stages;
 mod stream;
 mod virtual_displays;
 mod webui;
-use crate::stage::observation::Query as ConversationRead;
 pub(crate) use auth::native_bootstrap;
 
 use crate::{
@@ -47,6 +46,10 @@ pub struct ServiceState {
     listen_address: Option<std::net::SocketAddr>,
     /// Set only by the authenticated OS-owner IPC dispatcher, never by HTTP input.
     bootstrap_owner: bool,
+    /// Set only for bounded session operations by the OS-owner IPC dispatcher.
+    control_owner: bool,
+    /// Authenticated relay peer, set only by the native peer dispatcher.
+    relay_owner: Option<crate::stage::StageId>,
 }
 
 impl ServiceState {
@@ -63,6 +66,8 @@ impl ServiceState {
             codex_imports: Arc::new(Default::default()),
             listen_address: None,
             bootstrap_owner: false,
+            control_owner: false,
+            relay_owner: None,
         })
     }
 
@@ -112,13 +117,11 @@ pub fn router(state: ServiceState) -> Router {
             get(|| async { Json(json!({"protocol": 1, "version": env!("CARGO_PKG_VERSION")})) }),
         )
         .route("/v1/actors", get(list_actors))
-        .route("/v1/contacts", get(contacts::list))
         .route(
             "/v1/actors/{actor}",
             get(get_actor).patch(patch_actor_preferences),
         )
         .route("/v1/actors/{actor}/messages", get(messages))
-        .route("/v1/core/messages", post(send_core_message))
         .route("/v1/actors/{actor}/messages/{message}", get(message))
         .route("/v1/actors/{actor}/messages/search", get(search_messages))
         .route(
@@ -138,20 +141,15 @@ pub fn router(state: ServiceState) -> Router {
             "/v1/actors/{actor}/resources/{resource}",
             get(resources::download),
         )
-        .route(
-            "/v1/core/attachments",
-            post(resources::upload).layer(DefaultBodyLimit::max(
-                crate::daemon::attachments::MAX_FILE_ATTACHMENT_BYTES,
-            )),
-        )
+        .merge(sessions::routes())
         .merge(admin::routes())
-        .merge(computer_use::routes())
         .merge(virtual_displays::routes())
         .merge(apps::routes())
         .merge(imports::routes())
         .merge(prompt::routes())
         .merge(stages::routes())
         .merge(remote::routes())
+        .merge(remote_sessions::routes())
         .merge(approvals::routes())
         .merge(auth::routes())
         .merge(reset::routes())
@@ -271,10 +269,112 @@ impl IntoResponse for ApiError {
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 pub(crate) async fn owner(state: &ServiceState, headers: &HeaderMap) -> ApiResult<()> {
+    if let Some(peer) = state.relay_owner {
+        let runtime = state.stage.as_ref().ok_or_else(ApiError::forbidden)?;
+        return crate::stage::owner_http::authorize(&runtime.host, peer).map_err(stages::failure);
+    }
+    if state.control_owner {
+        return Ok(());
+    }
     if headers.contains_key(axum::http::header::AUTHORIZATION) {
         return Err(ApiError::unauthorized());
     }
     auth::authorize_session(state, headers).await
+}
+
+/// Route a bounded maintenance request from the OS-owner daemon control channel.
+/// This bypass is never reachable from HTTP; the caller is the authenticated local IPC dispatcher.
+pub(crate) async fn owner_control_request(
+    mut state: ServiceState,
+    method: axum::http::Method,
+    uri: &str,
+    body: Vec<u8>,
+) -> miette::Result<(u16, Value)> {
+    use tower::ServiceExt;
+    state.control_owner = true;
+    let origin = state
+        .origins
+        .first()
+        .ok_or_else(|| miette::miette!("Local service origin is unavailable"))?;
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("origin", origin)
+        .header("x-daat-request", "1")
+        .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
+        .map_err(|_| miette::miette!("Invalid local session request"))?;
+    let response = router(state).oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| miette::miette!("Local session response exceeds its limit"))?;
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .map_err(|_| miette::miette!("Invalid local session response"))?
+    };
+    Ok((status, value))
+}
+
+pub(crate) async fn relay_request(
+    host: Arc<crate::stage::host::Host>,
+    peer: crate::stage::StageId,
+    request: crate::stage::owner_http::Request,
+) -> crate::stage::Result<crate::stage::owner_http::Reply> {
+    use crate::stage::{StageError, owner_http};
+    use tower::ServiceExt;
+    owner_http::authorize(&host, peer)?;
+    let path = request.uri.split('?').next().unwrap_or("");
+    if !(path == "/v1/sessions" || path.starts_with("/v1/sessions/") || path == "/v1/events") {
+        return Err(StageError::Forbidden(
+            "Relay route is outside session authority",
+        ));
+    }
+    if path.ends_with("/event-stream") || !request.uri.starts_with("/v1/") {
+        return Err(StageError::Invalid("Use bounded event reads"));
+    }
+    let origin = "http://relay-session.invalid";
+    let mut state = ServiceState::new(host.system.clone(), origin.into())
+        .map_err(|_| StageError::Unavailable("Cannot prepare session service"))?;
+    state.stage = Some(crate::stage::runtime::Runtime::new(host.clone()));
+    state.relay_owner = Some(peer);
+    let mut builder = axum::http::Request::builder()
+        .method(request.method.as_str())
+        .uri(&request.uri)
+        .header("origin", origin)
+        .header("x-daat-request", "1");
+    for (name, value) in request.headers {
+        if !owner_http::forwarded_header(&name) {
+            return Err(StageError::Forbidden("Relay header is not permitted"));
+        }
+        builder = builder.header(name, value);
+    }
+    let input = builder
+        .body(axum::body::Body::from(request.body))
+        .map_err(|_| StageError::Invalid("Invalid relay request"))?;
+    let response = router(state).oneshot(input).await.unwrap();
+    owner_http::authorize(&host, peer)?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = axum::body::to_bytes(
+        response.into_body(),
+        crate::daemon::attachments::MAX_FILE_ATTACHMENT_BYTES + 1024 * 1024,
+    )
+    .await
+    .map_err(|_| StageError::Capacity("Session response exceeds transport budget"))?
+    .to_vec();
+    Ok(owner_http::Reply {
+        status,
+        content_type,
+        body,
+    })
 }
 
 pub(crate) async fn access_actor(
@@ -284,8 +384,16 @@ pub(crate) async fn access_actor(
     converse: bool,
 ) -> ApiResult<()> {
     owner(state, headers).await?;
-    state.system.actor(id).map_err(ApiError::from_report)?;
+    let actor = state.system.actor(id).map_err(ApiError::from_report)?;
     if converse {
+        if actor.role != crate::actors::ActorRole::Session {
+            return Err(ApiError::forbidden());
+        }
+        if actor.status == crate::actors::ActorStatus::Archived {
+            return Err(ApiError::from_report(
+                crate::actors::ActorError::Conflict("Session is archived".into()).into(),
+            ));
+        }
         mutation_origin(state, headers, true).await?;
     }
     Ok(())
@@ -409,6 +517,7 @@ pub(crate) fn redact(value: &mut Value, system: &ActorSystem) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActorListQuery {
+    session: Option<String>,
     after: Option<String>,
     limit: Option<usize>,
 }
@@ -427,7 +536,7 @@ async fn list_actors(
     let mut actors = state
         .system
         .store()
-        .actor_page(query.after.as_deref(), limit + 1)
+        .actor_page(query.session.as_deref(), query.after.as_deref(), limit + 1)
         .map_err(ApiError::from_report)?;
     let next = (actors.len() > limit).then(|| actors[limit - 1].id.clone());
     actors.truncate(limit);
@@ -454,11 +563,6 @@ async fn get_actor(
     Path(actor): Path<String>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if let Some(value) =
-        remote::core_read(&state, &headers, &actor, ConversationRead::Actor).await?
-    {
-        return Ok(Json(value));
-    }
     let record = state.system.actor(&actor).map_err(ApiError::from_report)?;
     let mut value = public_actor(&record);
     redact(&mut value, &state.system);
@@ -520,20 +624,6 @@ async fn search_messages(
     if text.is_empty() || text.len() > 512 || query.before.is_some_and(|n| n <= 0) {
         return Err(ApiError::invalid());
     }
-    if let Some(value) = remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        ConversationRead::Search {
-            text: text.into(),
-            before: query.before,
-            limit: bounded(query.limit, 100)?.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let cursor = state
         .system
         .store()
@@ -556,19 +646,6 @@ async fn messages(
     Query(query): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if let Some(value) = remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        ConversationRead::Messages {
-            before: query.before,
-            limit: bounded(query.limit, 100)?.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     // Captured before the query: changes racing the load are replayed, never lost.
     let cursor = state
         .system
@@ -601,16 +678,6 @@ async fn message(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if let Some(value) = remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        ConversationRead::Message { id: id.clone() },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let message = state
         .system
         .store()
@@ -629,16 +696,6 @@ async fn tool_result(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if let Some(value) = remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        ConversationRead::Result { id: id.clone() },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let result = state
         .system
         .store()
@@ -661,20 +718,6 @@ async fn tool_results(
     access_actor(&state, &headers, &actor, false).await?;
     if query.before.is_some_and(|before| before < 0) {
         return Err(ApiError::invalid());
-    }
-    if let Some(value) = remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        ConversationRead::Results {
-            message: id.clone(),
-            before: query.before,
-            limit: bounded(query.limit, 100)?.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
     }
     let message = state
         .system
@@ -705,16 +748,13 @@ struct SendRequest {
 async fn send_core_message(
     State(state): State<ServiceState>,
     headers: HeaderMap,
+    Path(actor): Path<String>,
     Json(request): Json<SendRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    let actor = crate::stage::shared::ACTOR_ID;
+    let actor = actor.as_str();
     access_actor(&state, &headers, actor, true).await?;
-    if !state.system.core_accepts_input() {
-        return Err(ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "core_not_ready",
-            message: "Conversation is connecting or synchronizing; retry when ready",
-        });
+    if state.system.config().validate().is_err() {
+        return Err(ApiError::unavailable());
     }
     if request.content.len() > 64 * 1024
         || (request.content.trim().is_empty() && request.attachments.is_empty())
@@ -731,6 +771,7 @@ async fn send_core_message(
     }) {
         return Err(ApiError::invalid());
     }
+    let key = key.ok_or_else(ApiError::invalid)?;
     let mut attachments = Vec::new();
     for id in request.attachments {
         let resource = state
@@ -748,29 +789,14 @@ async fn send_core_message(
     }
     let record = state
         .system
-        .send_user_with_skills(actor, request.content, attachments, request.skills, key)
-        .map_err(ApiError::from_report)?;
-    if remote::core_source(&state).is_some() {
-        state
-            .system
-            .shared_core()
-            .ok_or_else(ApiError::unavailable)?
-            .forward_user_input(record.clone())
-            .await
-            .map_err(stages::failure)?;
-        if let Some(value) = remote::core_read(
-            &state,
-            &headers,
+        .send_user_with_skills(
             actor,
-            ConversationRead::Message {
-                id: record.id.clone(),
-            },
+            request.content,
+            attachments,
+            request.skills,
+            Some(key),
         )
-        .await?
-        {
-            return Ok((StatusCode::ACCEPTED, Json(value)));
-        }
-    }
+        .map_err(ApiError::from_report)?;
     let mut value = serde_json::to_value(record).map_err(|_| ApiError::internal())?;
     redact(&mut value, &state.system);
     Ok((StatusCode::ACCEPTED, Json(value)))
@@ -781,19 +807,6 @@ async fn cancel_message(
     Path((actor, message)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     access_actor(&state, &headers, &actor, true).await?;
-    if remote::core_control(
-        &state,
-        &headers,
-        &actor,
-        crate::stage::protocol::ConversationAction::Cancel {
-            message: message.clone(),
-        },
-    )
-    .await?
-    .is_some()
-    {
-        return Ok(StatusCode::ACCEPTED);
-    }
     let record = state
         .system
         .store()

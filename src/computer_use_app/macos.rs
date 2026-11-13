@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 pub(super) fn specifications() -> Vec<AppToolSpec> {
-    let mut tools = ComputerUseApp::windows_specifications();
+    let mut tools = ComputerUseApp::base_specifications();
     for tool in &mut tools {
         tool.description=match tool.name.as_str(){
         "list_apps"=>"List a bounded page of macOS apps. Use only returned app IDs.",

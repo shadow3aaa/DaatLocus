@@ -75,6 +75,8 @@ pub enum Origin {
     User,
     Actor {
         actor: ActorAddress,
+        session_id: String,
+        session_host: StageId,
         request_id: Uuid,
         ceiling: RemoteCeiling,
     },
@@ -100,11 +102,24 @@ pub enum InvocationState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Body {
+    SessionRequest {
+        content: BlobRef,
+        export: Uuid,
+    },
+    SessionReply {
+        content: BlobRef,
+        export: Uuid,
+    },
+    OwnerSessionRequest {
+        content: BlobRef,
+        export: Uuid,
+    },
+    OwnerSessionReply {
+        content: BlobRef,
+        export: Uuid,
+    },
     AccountWorkReset {
         record: Option<super::reset::Record>,
-    },
-    RecoveryStatus {
-        status: super::recovery::Status,
     },
     DeviceName {
         label: String,
@@ -172,16 +187,6 @@ pub enum Body {
         read: bool,
         converse: bool,
     },
-    CoreRequest {
-        content: BlobRef,
-    },
-    CoreRequestInline {
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
-    },
-    CoordinationRequest {
-        request: Box<super::coordination::Request>,
-    },
     AccountConfigurationQuery {
         known_binding: Option<String>,
     },
@@ -193,16 +198,6 @@ pub enum Body {
     },
     AccountInstructions {
         offer: Option<crate::instruction_layers::Offer>,
-    },
-    CoordinationResponse {
-        response: Box<super::coordination::Response>,
-    },
-    CoreResponse {
-        content: BlobRef,
-    },
-    CoreResponseInline {
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
     },
     ReadQuery {
         actor: ActorAddress,
@@ -340,6 +335,8 @@ pub enum ActorAdminAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteActor {
+    pub session_id: String,
+    pub role: crate::actors::ActorRole,
     pub address: ActorAddress,
     pub name: String,
     pub status: crate::actors::ActorStatus,
@@ -451,12 +448,9 @@ impl Envelope {
                 return Err(StageError::Invalid("Invalid notice"));
             }
             Body::Authorize { actor } | Body::ActorAccess { actor, .. } => actor.validate()?,
-            Body::CoreRequest { content } | Body::CoreResponse { content } => content.validate()?,
-            Body::CoreRequestInline { bytes } | Body::CoreResponseInline { bytes }
-                if bytes.len() > super::core_transfer::INLINE_BYTES =>
-            {
-                return Err(StageError::Invalid("Inline core payload exceeds budget"));
-            }
+            Body::OwnerSessionRequest { content, .. }
+            | Body::SessionRequest { content, .. }
+            | Body::OwnerSessionReply { content, .. } => content.validate()?,
             Body::ReadQuery { actor, query } => {
                 actor.validate()?;
                 if actor.stage_id != local {

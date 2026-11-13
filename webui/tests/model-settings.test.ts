@@ -48,3 +48,11 @@ test("switching OpenCode channels retains login and clears the previous URL over
     credential_name: null, credential_configured: false, opencode_auth_method: null});
   expect(changeProviderKind(standard, "open_code_console")).toBe(standard);
 });
+
+test("choosing another model resets only its native search override",()=>{
+  const configured={name:"old",provider_name:"proxy",model_id:"deepseek-flash",native_web_search:false,api_style:"responses"};
+  const next=selectDiscoveredModel(configured,{id:"gpt-6",thinking_budgets:[]});
+  expect(next.native_web_search).toBeNull();
+  expect(next.api_style).toBe("responses");
+  expect(selectDiscoveredModel({...configured,native_web_search:true},{id:"deepseek-flash",thinking_budgets:[]}).native_web_search).toBe(true);
+});

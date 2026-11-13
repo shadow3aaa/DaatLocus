@@ -11,9 +11,10 @@ use futures_util::stream;
 
 pub(super) async fn upload(
     State(state): State<ServiceState>,
+    Path(actor): Path<String>,
     request: Request,
 ) -> ApiResult<(StatusCode, Json<Attachment>)> {
-    let actor = crate::stage::shared::ACTOR_ID;
+    let actor = actor.as_str();
     let headers = request.headers().clone();
     access_actor(&state, &headers, actor, true).await?;
     let raw_name = headers

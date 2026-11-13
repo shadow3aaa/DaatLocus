@@ -67,8 +67,6 @@ struct Inner {
     app_registry: Arc<crate::mcp::Registry>,
     websearch_settings: crate::websearch_app::settings::Store,
     instructions: crate::instruction_layers::InstructionStore,
-    #[cfg(windows)]
-    computer_workspace: Mutex<Option<Arc<crate::computer_use_app::Workspace>>>,
     workspace: PathBuf,
     store: ActorStore,
     config: RwLock<Config>,
@@ -86,8 +84,7 @@ struct Inner {
     idle_timeout: std::time::Duration,
     #[cfg(test)]
     idle_timeout_override: Mutex<Option<std::time::Duration>>,
-    core: RwLock<Option<std::sync::Weak<crate::stage::shared_runtime::Controller>>>,
-    local_core: AtomicBool,
+    runtime: RwLock<Option<std::sync::Weak<crate::stage::runtime::Runtime>>>,
 }
 #[derive(Clone)]
 pub struct ActorSystem {
@@ -104,128 +101,23 @@ fn forbidden(message: &str) -> miette::Report {
 }
 
 impl ActorSystem {
-    /// Called by the Windows service before readiness/worker activation. Ordinary
-    /// ActorSystem construction stays independent of native desktop prerequisites.
-    #[cfg(windows)]
-    pub async fn prepare_computer_workspace(&self) -> Result<()> {
-        let workspace = self.computer_workspace()?;
-        tokio::task::spawn_blocking(move || workspace.initialize())
-            .await
-            .into_diagnostic()??;
-        Ok(())
+    pub(crate) fn bind_device_runtime(&self, runtime: &Arc<crate::stage::runtime::Runtime>) {
+        *self.inner.runtime.write() = Some(Arc::downgrade(runtime));
     }
-
-    #[cfg(windows)]
-    pub(crate) fn computer_workspace(&self) -> Result<Arc<crate::computer_use_app::Workspace>> {
-        let mut workspace = self.inner.computer_workspace.lock();
-        if workspace.is_none() {
-            *workspace = Some(crate::computer_use_app::Workspace::open(
-                &self.inner.data_dir,
-            )?);
-        }
-        Ok(workspace
-            .as_ref()
-            .expect("initialized workspace service")
-            .clone())
-    }
-    pub(crate) fn shared_core(&self) -> Option<Arc<crate::stage::shared_runtime::Controller>> {
+    pub(crate) fn device_runtime(
+        &self,
+    ) -> crate::stage::Result<Arc<crate::stage::runtime::Runtime>> {
         self.inner
-            .core
+            .runtime
             .read()
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
-    }
-    pub(crate) fn install_local_core(&self) -> Result<()> {
-        self.inner.core.write().take();
-        self.store()
-            .stage_transaction(|tx| {
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_meta')",
-                    [],
-                    |row| row.get(0),
-                )?;
-                if exists {
-                    tx.execute("UPDATE core_meta SET value='0' WHERE key='active'", [])?;
-                    tx.execute("INSERT INTO core_meta VALUES('local_mode','1') ON CONFLICT(key) DO UPDATE SET value='1'",[])?;
-                }
-                Ok(())
-            })
-            .map_err(|error| miette::miette!("{error}"))?;
-        self.inner.local_core.store(true, Ordering::Release);
-        Ok(())
-    }
-    pub(crate) fn disable_local_core(&self) {
-        self.inner.local_core.store(false, Ordering::Release);
-    }
-    pub(crate) fn local_core(&self) -> bool {
-        self.inner.local_core.load(Ordering::Acquire)
-    }
-    pub(crate) fn core_permitted(&self) -> bool {
-        if self.local_core() {
-            self.workers_enabled()
-                && !self.inner.stopping.load(Ordering::Acquire)
-                && !self.inner.reconfiguring.load(Ordering::Acquire)
-                && self.config().validate().is_ok()
-        } else {
-            self.shared_core().is_some_and(|core| core.permitted())
-        }
-    }
-    pub(crate) fn core_accepts_input(&self) -> bool {
-        if self.inner.stopping.load(Ordering::Acquire)
-            || self.inner.reconfiguring.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        if self.local_core() {
-            self.core_permitted()
-        } else {
-            self.shared_core().is_some_and(|core| core.accepts_input())
-        }
-    }
-    pub(crate) fn core_execution_permitted(&self) -> bool {
-        if self.local_core() {
-            self.core_permitted()
-        } else {
-            self.shared_core()
-                .is_some_and(|core| core.execution_permitted())
-        }
-    }
-    pub(crate) async fn checkpoint_core(&self) -> Result<()> {
-        if self.local_core() {
-            return Ok(());
-        }
-        self.shared_core()
-            .ok_or_else(|| miette::miette!("Core worker unavailable"))?
-            .checkpoint()
-            .await
-            .map_err(|error| miette::miette!("{error}"))
-    }
-    pub(crate) fn install_shared_core(&self, core: &Arc<crate::stage::shared_runtime::Controller>) {
-        *self.inner.core.write() = Some(Arc::downgrade(core));
-        self.wake(crate::stage::shared::ACTOR_ID);
-    }
-    pub(crate) fn ensure_core_actor(&self) -> Result<()> {
-        if self.store().actor(crate::stage::shared::ACTOR_ID).is_err() {
-            let actor = self.initial_core()?;
-            self.prepare_dirs(&actor.id)?;
-            self.store().save_actor(&actor)?;
-        }
-        self.start_worker(crate::stage::shared::ACTOR_ID)
-    }
-    /// The account Actor's identity is shared; filesystem/App installation
-    /// policy belongs to the device exposing the instance.
-    pub(crate) fn core_device_actor(&self) -> Result<ActorRecord> {
-        let mut actor = self.actor(crate::stage::shared::ACTOR_ID)?;
-        actor.config.workspace = self.device_workspace().to_owned();
-        actor.config.apps = crate::builtin_apps::core_app_names();
-        Ok(actor)
+            .ok_or(crate::stage::StageError::Unavailable(
+                "Device runtime is unavailable",
+            ))
     }
     pub(crate) fn app_actor(&self, id: &str) -> Result<ActorRecord> {
-        if id == crate::stage::shared::ACTOR_ID {
-            self.core_device_actor()
-        } else {
-            self.actor(id)
-        }
+        self.actor(id)
     }
     pub(crate) fn receive_stage_input(
         &self,
@@ -253,11 +145,27 @@ impl ActorSystem {
     }
     pub(crate) fn execution_actor(&self, message: &MessageRecord) -> Result<ActorRecord> {
         let mut actor = self.actor(&message.actor_id)?;
+        self.store().ensure_actor_admission(&actor.id)?;
         let external = matches!(
             message.source,
             MessageSource::RemoteUser { .. } | MessageSource::RemoteActor { .. }
         );
-        if external && message.remote_authority.is_none() {
+        let internal_appeal = if let MessageSource::RemoteActor {
+            stage_id, actor_id, ..
+        } = &message.source
+        {
+            let appeal =
+                serde_json::from_str::<serde_json::Value>(&message.content).is_ok_and(|value| {
+                    value.get("type").and_then(serde_json::Value::as_str) == Some("approval_appeal")
+                });
+            appeal
+                && self
+                    .store()
+                    .session_member(&actor.session_id, actor_id, *stage_id)?
+        } else {
+            false
+        };
+        if external && message.remote_authority.is_none() && !internal_appeal {
             return Err(forbidden("Remote input has no server-bound authority"));
         }
         if let Some(authority) = &message.remote_authority {
@@ -412,8 +320,6 @@ impl ActorSystem {
                 temporary: Mutex::new(Some(temporary)),
                 resource_cleanup: Mutex::new(None),
                 builtin_resources,
-                #[cfg(windows)]
-                computer_workspace: Mutex::new(None),
                 app_registry: crate::mcp::Registry::open(data_dir.join("apps.json"))?,
                 websearch_settings: crate::websearch_app::settings::Store::open(
                     data_dir.join("websearch.json"),
@@ -441,23 +347,14 @@ impl ActorSystem {
                 idle_timeout: std::time::Duration::from_secs(60),
                 #[cfg(test)]
                 idle_timeout_override: Mutex::new(None),
-                core: RwLock::new(None),
-                local_core: AtomicBool::new(false),
+                runtime: RwLock::new(None),
             }),
         };
-        if system
-            .store()
-            .actor(crate::stage::shared::ACTOR_ID)
-            .is_err()
-        {
-            let record = system.initial_core()?;
-            system.prepare_dirs(&record.id)?;
-            system.store().save_actor(&record)?;
-        }
+        system.cleanup_deleted_actors()?;
         // Installation is device-wide. Retired capability lists are ignored.
         for mut actor in system.store().actors()? {
             let previous = actor.config.clone();
-            if actor.id == crate::stage::shared::ACTOR_ID {
+            if actor.role == ActorRole::Session {
                 actor.config.apps = crate::builtin_apps::core_app_names();
             } else {
                 actor.config.apps = system.device_app_names()?;
@@ -713,15 +610,31 @@ impl ActorSystem {
     }
     #[cfg(test)]
     pub(crate) fn seed_test_actor(&self, id: &str) {
-        let mut actor = self.actor(crate::stage::shared::ACTOR_ID).unwrap();
+        if self.actor("core").is_err() {
+            let core = self.initial_session("core".into(), None, None).unwrap();
+            self.prepare_dirs(&core.id).unwrap();
+            self.store()
+                .create_session(&core, None, "test-session")
+                .unwrap();
+        }
+        if id == "core" {
+            return;
+        }
+        if self.actor(id).is_ok() {
+            return;
+        }
+        let mut actor = self.actor("core").unwrap();
         actor.id = id.to_owned();
+        actor.role = ActorRole::Worker;
         actor.status = ActorStatus::Idle;
-        actor.parent_id = Some(crate::stage::shared::ACTOR_ID.into());
+        actor.parent_id = Some("core".into());
         actor.depth = 1;
         actor.config.name = format!("Fixture {id}");
         actor.config.apps = self.device_app_names().unwrap();
         self.prepare_dirs(id).unwrap();
-        self.store().save_actor(&actor).unwrap();
+        self.store()
+            .save_created_actor(&actor, None, &[], None)
+            .unwrap();
     }
     fn hosted_config(&self, mut config: ActorConfig) -> Result<ActorConfig> {
         config.apps = self.device_app_names()?;
@@ -814,7 +727,7 @@ impl ActorSystem {
                 Err(error) => return Err(error).into_diagnostic(),
             }
         }
-        self.prepare_dirs(crate::stage::shared::ACTOR_ID)
+        Ok(())
     }
     pub(crate) async fn reset_account_work(
         &self,
@@ -822,7 +735,6 @@ impl ActorSystem {
     ) -> Result<()> {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let pause = Reconfiguration::begin(&self.inner.reconfiguring, &self.inner.metadata);
-        let root = self.initial_core()?;
         let workers: Vec<_> = self.inner.workers.lock().drain().collect();
         for (_, worker) in &workers {
             worker.control.stop.store(true, Ordering::Release);
@@ -833,24 +745,32 @@ impl ActorSystem {
         }
         #[cfg(target_os = "android")]
         crate::computer_use_app::android::reset_resources()?;
-        crate::stage::reset::replace(self.store(), record, &root, self.device_workspace())
+        crate::stage::reset::replace(self.store(), record, self.device_workspace())
             .map_err(|error| miette::miette!("{error}"))?;
         crate::stage::reset::cleanup(self).map_err(|error| miette::miette!("{error}"))?;
         drop(pause);
         Ok(())
     }
-    fn initial_core(&self) -> Result<ActorRecord> {
+    fn initial_session(
+        &self,
+        id: String,
+        title: Option<String>,
+        model: Option<String>,
+    ) -> Result<ActorRecord> {
         let workspace = self.inner.workspace.clone();
         let root = ActorRecord {
             remote_read_only: false,
-            id: crate::stage::shared::ACTOR_ID.into(),
+            session_id: id.clone(),
+            role: ActorRole::Session,
+            title,
+            id,
             parent_id: None,
             depth: 0,
             config: normalize_config(ActorConfig {
                 name: "Daat Locus".into(),
                 workspace,
                 apps: crate::builtin_apps::core_app_names(),
-                model: None,
+                model,
                 instructions: String::new(),
             })?,
             context: Default::default(),
@@ -861,6 +781,99 @@ impl ActorSystem {
         self.validate_config(&root.config)?;
         std::fs::create_dir_all(&root.config.workspace).into_diagnostic()?;
         Ok(root)
+    }
+    pub async fn create_session(
+        &self,
+        title: Option<String>,
+        model: Option<String>,
+        key: Option<&str>,
+    ) -> Result<SessionSummary> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let title = title.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        let request = serde_json::to_string(&(&title, &model)).into_diagnostic()?;
+        let actor = self.initial_session(Uuid::new_v4().to_string(), title, model)?;
+        let actor = self.store().create_session(&actor, key, &request)?;
+        self.prepare_dirs(&actor.id)?;
+        self.store().session_summary(&actor.id)
+    }
+    pub async fn patch_session(
+        &self,
+        id: &str,
+        title: Option<Option<String>>,
+        model: Option<Option<String>>,
+    ) -> Result<SessionSummary> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let mut config = self.actor(id)?.config;
+        if let Some(model) = &model {
+            config.model = model.clone();
+        }
+        self.validate_config(&config)?;
+        self.store().patch_session(id, title, model)?;
+        self.store().session_summary(id)
+    }
+    pub async fn archive_session(&self, id: &str, archived: bool) -> Result<SessionSummary> {
+        // The committed admission fence precedes all cancellation and cleanup.
+        // A disconnected HTTP client must not abandon cleanup after that fence.
+        let system = self.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            let _lifecycle = system.inner.lifecycle.lock().await;
+            let ids = system.store().set_session_archived(&id, archived)?;
+            if let Ok(runtime) = system.device_runtime() {
+                runtime.wake_sessions();
+            }
+            let _ = crate::stage::session::flush(&system).await;
+            if archived {
+                let mut pending = Vec::new();
+                for actor in &ids {
+                    pending.extend(system.store().request_cancel_actor(actor)?);
+                }
+                let workers = {
+                    let mut workers = system.inner.workers.lock();
+                    ids.iter()
+                        .filter_map(|id| workers.remove(id).map(|w| (id.clone(), w)))
+                        .collect::<Vec<_>>()
+                };
+                for (_, worker) in &workers {
+                    worker.control.stop.store(true, Ordering::Release);
+                    worker.control.wake.notify_one();
+                }
+                for (id, worker) in workers {
+                    system.stop_actor_worker(&id, worker).await?;
+                }
+                system.store().settle_cancelled_inputs(&pending)?;
+            }
+            system.store().session_summary(&id)
+        })
+        .await
+        .map_err(|e| miette::miette!("Session cleanup failed: {e}"))?
+    }
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.store().delete_session(id)?;
+        let _ = crate::stage::session::flush(self).await;
+        if let Ok(runtime) = self.device_runtime() {
+            runtime.wake_sessions();
+        }
+        self.cleanup_deleted_actors()
+    }
+    fn cleanup_deleted_actors(&self) -> Result<()> {
+        let _resources = crate::resources::lock_storage_lifecycle();
+        for id in self.store().pending_actor_cleanup()? {
+            for directory in [
+                self.actor_state_dir(&id),
+                self.actor_data_dir(&id),
+                crate::resources::output_root(self).join(crate::stage::digest(id.as_bytes())),
+            ] {
+                match std::fs::remove_dir_all(directory) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e).into_diagnostic(),
+                }
+            }
+            self.store().finish_actor_cleanup(&id)?;
+        }
+        Ok(())
     }
     fn prepare_dirs(&self, id: &str) -> Result<()> {
         for directory in [self.actor_state_dir(id), self.actor_data_dir(id)] {
@@ -884,9 +897,7 @@ impl ActorSystem {
             worker.control.wake.notify_one();
             return Ok(());
         }
-        if !self.store().has_queued_input(id)?
-            || (id == crate::stage::shared::ACTOR_ID && !self.core_permitted())
-        {
+        if !self.store().has_queued_input(id)? {
             return Ok(());
         }
         self.prepare_dirs(id)?;
@@ -935,15 +946,6 @@ impl ActorSystem {
                 .is_some_and(|worker| Arc::ptr_eq(&worker.control, control))
             {
                 return;
-            }
-            if id == crate::stage::shared::ACTOR_ID
-                && self
-                    .store()
-                    .running_message(id)
-                    .is_ok_and(|message| message.is_some())
-                && let Some(core) = self.shared_core()
-            {
-                core.worker_stopped();
             }
             workers.remove(id);
             // Release retained HashMap capacity too after a burst of activity.
@@ -1134,6 +1136,9 @@ impl ActorSystem {
         )?;
         let actor = ActorRecord {
             remote_read_only: false,
+            session_id: parent.session_id.clone(),
+            role: ActorRole::Worker,
+            title: None,
             context: Default::default(),
             id: import_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             parent_id: Some(parent.id.clone()),
@@ -1161,6 +1166,171 @@ impl ActorSystem {
     pub fn create_owned(&self, parent: &str, config: ActorConfig) -> Result<ActorRecord> {
         let parent = self.actor(parent)?;
         self.create(&parent, config, None, None, &[], None)
+    }
+    pub(crate) async fn create_remote_worker(
+        &self,
+        reservation: &crate::stage::session::Reservation,
+        config: ActorConfig,
+        mut roots: SandboxScopeRequest,
+    ) -> Result<ActorRecord> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        if let Ok(actor) = self.actor(&reservation.id) {
+            if crate::stage::session::actor_session(self, &actor.id)
+                .map_err(|e| miette::miette!("{e}"))?
+                != reservation.scope.session
+            {
+                return Err(forbidden("Creation receipt belongs to another session"));
+            }
+            return Ok(actor);
+        }
+        let mut config = config;
+        if config.workspace.as_os_str().is_empty() {
+            config.workspace = self.device_workspace().to_owned();
+        }
+        if !config.workspace.is_absolute() {
+            return Err(invalid(
+                "Remote workspace must be an absolute target-device path",
+            ));
+        }
+        let config = self.hosted_config(config)?;
+        if config.name.trim() != reservation.name {
+            return Err(forbidden("Worker name changed after reservation"));
+        }
+        self.validate_config(&config)?;
+        roots.writable_roots.push(config.workspace.clone());
+        let roots = roots.canonicalized()?;
+        let mut scopes = Vec::new();
+        if reservation.scope.role == ActorRole::Session {
+            if roots
+                .readable_roots
+                .iter()
+                .chain(roots.writable_roots.iter())
+                .any(|path| !path.is_absolute())
+            {
+                return Err(invalid("Worker authorization roots must be absolute"));
+            }
+            for (paths, write) in [
+                (&roots.readable_roots, false),
+                (&roots.writable_roots, true),
+            ] {
+                for path in paths {
+                    scopes.push(SandboxScope::filesystem(path, write)?);
+                }
+            }
+        } else {
+            return Err(forbidden(
+                "Worker creation requires a device-local authorization request",
+            ));
+        }
+        let actor = ActorRecord {
+            id: reservation.id.clone(),
+            session_id: reservation.scope.session.actor_id.clone(),
+            role: ActorRole::Worker,
+            title: None,
+            parent_id: Some(reservation.scope.actor.actor_id.clone()),
+            depth: reservation
+                .scope
+                .depth
+                .checked_add(1)
+                .ok_or_else(|| invalid("Actor depth overflow"))?,
+            config,
+            context: Default::default(),
+            status: ActorStatus::Idle,
+            remote_read_only: false,
+            created_at_ms: now(),
+            updated_at_ms: now(),
+        };
+        self.store()
+            .stage_transaction(|tx| {
+                crate::stage::session::admission(tx, &actor, reservation.target)
+            })
+            .map_err(|e| miette::miette!("{e}"))?;
+        // Check the host-qualified fence even before this worker has a binding row.
+        self.store()
+            .stage_transaction(|tx| {
+                let state: Option<String> = {
+                    use rusqlite::OptionalExtension;
+                    tx.query_row(
+                        "SELECT state FROM session_lifecycle WHERE host=?1 AND session=?2",
+                        rusqlite::params![
+                            reservation.scope.session.stage_id.to_string(),
+                            actor.session_id
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                };
+                if state.as_deref().is_some_and(|s| s != "active") {
+                    return Err(crate::stage::StageError::Conflict(
+                        "Session is archived or deleted",
+                    ));
+                }
+                Ok(())
+            })
+            .map_err(|e| miette::miette!("{e}"))?;
+        std::fs::create_dir_all(&actor.config.workspace).into_diagnostic()?;
+        protect_private_path(&actor.config.workspace)?;
+        self.prepare_dirs(&actor.id)?;
+        self.store()
+            .save_session_worker(&actor, reservation.scope.session.stage_id, &scopes)?;
+        Ok(actor)
+    }
+    pub(crate) async fn stop_remote_worker(&self, target: &str) -> Result<usize> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        self.stop_session_worker(target).await
+    }
+    async fn stop_session_worker(&self, target: &str) -> Result<usize> {
+        let ids = self.store().request_cancel_actor(target)?;
+        let worker = self.inner.workers.lock().remove(target);
+        if let Some(worker) = worker {
+            worker.control.stop.store(true, Ordering::Release);
+            worker.control.wake.notify_one();
+            self.stop_actor_worker(target, worker).await?;
+        }
+        self.store().settle_cancelled_inputs(&ids)?;
+        Ok(ids.len())
+    }
+    pub(crate) async fn apply_remote_session_lifecycle(
+        &self,
+        session: &crate::stage::ActorAddress,
+        revision: i64,
+        state: &str,
+    ) -> Result<()> {
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        let effective = self.store().stage_transaction(|tx| {
+            use rusqlite::OptionalExtension;
+            let previous: Option<(i64, String)> = tx.query_row("SELECT revision,state FROM session_lifecycle WHERE host=?1 AND session=?2", rusqlite::params![session.stage_id.to_string(), session.actor_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((old, status)) = previous {
+                if old > revision || status == "deleted" { return Ok(status); }
+                if old == revision && status != state { return Err(crate::stage::StageError::Conflict("Lifecycle revision changed state")); }
+            }
+            if revision <= 0 { return Err(crate::stage::StageError::Invalid("Invalid lifecycle revision")); }
+            tx.execute("INSERT INTO session_lifecycle VALUES(?1,?2,?3,?4) ON CONFLICT(host,session) DO UPDATE SET revision=excluded.revision,state=excluded.state", rusqlite::params![session.stage_id.to_string(),session.actor_id,revision,state])?;
+            Ok(state.to_owned())
+        }).map_err(|e| miette::miette!("{e}"))?;
+        let ids = self
+            .store()
+            .actors()?
+            .into_iter()
+            .filter(|a| {
+                crate::stage::session::actor_session(self, &a.id)
+                    .ok()
+                    .as_ref()
+                    == Some(session)
+            })
+            .map(|a| a.id)
+            .collect::<Vec<_>>();
+        if effective != "active" {
+            for id in ids {
+                self.stop_session_worker(&id).await?;
+            }
+        }
+        if effective == "deleted" {
+            self.store()
+                .delete_session_members(&session.actor_id, Some(session.stage_id))?;
+            self.cleanup_deleted_actors()?;
+        }
+        Ok(())
     }
     pub async fn create_from_actor(
         &self,
@@ -1228,7 +1398,7 @@ impl ActorSystem {
             .writable_roots
             .push(config.workspace.clone());
         let initial_authorization = initial_authorization.canonicalized()?;
-        let core = sender == crate::stage::shared::ACTOR_ID;
+        let core = parent.role == ActorRole::Session;
         let mut initial_scopes = vec![];
         let policy = if core {
             // This is Core's explicit device grant, not a per-App review bypass.
@@ -1296,7 +1466,7 @@ impl ActorSystem {
         caller: &ActorCallContext,
     ) -> Result<ActorRecord> {
         let _lifecycle = self.inner.lifecycle.lock().await;
-        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let core = self.session_core_for_tool(caller)?;
         let input = self.store().message(&caller.message_id)?;
         if core.remote_read_only
             || !matches!(input.source, MessageSource::User)
@@ -1320,11 +1490,7 @@ impl ActorSystem {
         explanation: &str,
     ) -> Result<ApprovalRecord> {
         let actor = self.record_for_tool(&caller.actor_id, caller)?;
-        if actor.remote_read_only
-            || !self
-                .account_actor_ids(&actor.id)?
-                .contains(crate::stage::shared::ACTOR_ID)
-        {
+        if actor.remote_read_only {
             return Err(forbidden("Appeal is outside the Actor's account authority"));
         }
         let record = self.store().appeal_approval(
@@ -1337,9 +1503,13 @@ impl ActorSystem {
                 .map_err(|error| miette::miette!("{error}"))?,
             false,
         )?;
-        self.wake(crate::stage::shared::ACTOR_ID);
-        if let Some(core) = self.shared_core() {
-            core.notify();
+        if let Ok(runtime) = self.device_runtime() {
+            runtime.wake_sessions();
+        }
+        if crate::stage::session::actor_session(self, &actor.id).is_ok_and(|session| {
+            session.stage_id == self.store().public_stage_id().unwrap_or(session.stage_id)
+        }) {
+            self.wake(&actor.session_id);
         }
         Ok(record)
     }
@@ -1358,11 +1528,7 @@ impl ActorSystem {
 
     pub(crate) fn core_approval_appeal(&self, approval_id: &str) -> Result<ApprovalRecord> {
         let record = self.store().approval(approval_id)?;
-        if !self
-            .account_actor_ids(crate::stage::shared::ACTOR_ID)?
-            .contains(&record.source_actor(self.store())?)
-            || !self.store().native_approval(approval_id)?
-        {
+        if !self.store().native_approval(approval_id)? {
             return Err(forbidden("Appeal does not belong to this account device"));
         }
         Ok(record)
@@ -1375,10 +1541,13 @@ impl ActorSystem {
         decision: ApprovalDecision,
         reason: &str,
     ) -> Result<ApprovalAppealAuthorization> {
-        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let core = self.session_core_for_tool(caller)?;
+        let origin = self.actor(&record.source_actor(self.store())?)?;
+        if origin.session_id != core.id {
+            return Err(forbidden("Appeal belongs to another session"));
+        }
         let input = self.store().message(&caller.message_id)?;
         if core.remote_read_only
-            || (!self.local_core() && !self.core_execution_permitted())
             || input.remote_authority.is_some()
             || crate::conversation_import::is_import(&input)
         {
@@ -1445,27 +1614,24 @@ impl ActorSystem {
         }
         let record = self.store().resolve_approval_appeal(authorization)?;
         self.wake(&record.source_actor(self.store())?);
-        if record.source_actor(self.store())? == crate::stage::shared::ACTOR_ID
-            && let Some(core) = self.shared_core()
-        {
-            core.notify();
-        }
         Ok(record)
     }
 
     pub(crate) fn appeal_from_current_core(
         &self,
+        caller_id: &str,
         approval_id: &str,
         explanation: &str,
     ) -> Result<ApprovalRecord> {
         let record = self.core_approval_appeal(approval_id)?;
-        if record.source_actor(self.store())? != crate::stage::shared::ACTOR_ID {
+        let source = record.source_actor(self.store())?;
+        if source != caller_id || self.actor(&source)?.role != ActorRole::Session {
             return Err(forbidden(
                 "Core cannot appeal another Actor's denial on its behalf",
             ));
         }
         let record = self.store().appeal_approval(
-            crate::stage::shared::ACTOR_ID,
+            &source,
             &record.message_id,
             approval_id,
             &self.safe_error(explanation),
@@ -1474,9 +1640,7 @@ impl ActorSystem {
                 .map_err(|error| miette::miette!("{error}"))?,
             true,
         )?;
-        if let Some(core) = self.shared_core() {
-            core.notify();
-        }
+        self.wake(&source);
         Ok(record)
     }
     pub fn list_for_actor(&self, sender: &str) -> Result<Vec<ActorRecord>> {
@@ -1527,6 +1691,13 @@ impl ActorSystem {
     fn account_actor_ids(&self, sender: &str) -> Result<std::collections::HashSet<String>> {
         self.store().account_actor_ids(sender)
     }
+    fn session_core_for_tool(&self, caller: &ActorCallContext) -> Result<ActorRecord> {
+        let actor = self.record_for_tool(&caller.actor_id, caller)?;
+        if actor.role != ActorRole::Session || actor.id != actor.session_id {
+            return Err(forbidden("Operation requires this session's Core"));
+        }
+        Ok(actor)
+    }
     pub fn record_for_tool(&self, id: &str, call: &ActorCallContext) -> Result<ActorRecord> {
         if call.actor_id != id {
             return Err(forbidden("Actor identity mismatch"));
@@ -1539,14 +1710,10 @@ impl ActorSystem {
         let mut actor = self.execution_actor(&input)?;
         actor.remote_read_only |= call.remote_read_only;
         if let Some(policy) = &call.device_policy {
-            if id != crate::stage::shared::ACTOR_ID {
-                return Err(forbidden("Device App policy belongs to the shared Actor"));
-            }
-            let actor = self.core_device_actor()?;
-            let mut actor = actor;
-            actor.remote_read_only |= call.remote_read_only;
-            actor.config = policy.clone();
-            return Ok(actor);
+            let _ = policy;
+            return Err(forbidden(
+                "Device-specific Actor policy is no longer supported",
+            ));
         }
         Ok(actor)
     }
@@ -1572,11 +1739,6 @@ impl ActorSystem {
         if cancel && selected.id == current.id {
             return Err(forbidden("End the current turn naturally"));
         }
-        if caller.actor_id == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
-            return Err(forbidden(
-                "Account inputs are controlled on the current Core worker",
-            ));
-        }
         Ok(selected)
     }
     pub fn delegated_request(&self, sender: &str, id: &str) -> Result<MessageRecord> {
@@ -1596,9 +1758,6 @@ impl ActorSystem {
         call: &str,
         content: &str,
     ) -> Result<MessageRecord> {
-        if sender == crate::stage::shared::ACTOR_ID && !self.core_execution_permitted() {
-            return Err(forbidden("Core worker no longer owns execution"));
-        }
         let source = self.store().message(input)?;
         if source.actor_id != sender
             || source.status != MessageStatus::Running
@@ -1621,24 +1780,18 @@ impl ActorSystem {
         }
         Ok(delivery)
     }
-    pub(crate) async fn publish_actor_reply(&self, actor: &str, delivery: &str) -> Result<()> {
-        if actor == crate::stage::shared::ACTOR_ID {
-            self.checkpoint_core().await?;
-        }
+    pub(crate) async fn publish_actor_reply(&self, _actor: &str, delivery: &str) -> Result<()> {
         self.store().publish_delivery(delivery)
     }
 
     pub(crate) fn authorize_account_observation(&self, caller: &ActorCallContext) -> Result<()> {
         self.record_for_tool(&caller.actor_id, caller)?;
-        if !self
-            .account_actor_ids(&caller.actor_id)?
-            .contains(crate::stage::shared::ACTOR_ID)
-            || self
-                .store()
-                .message(&caller.message_id)?
-                .remote_authority
-                .as_ref()
-                .is_some_and(|authority| authority.reply_for.is_none())
+        if self
+            .store()
+            .message(&caller.message_id)?
+            .remote_authority
+            .as_ref()
+            .is_some_and(|authority| authority.reply_for.is_none())
         {
             return Err(forbidden(
                 "Observation is outside this input's account authority",
@@ -1711,11 +1864,7 @@ impl ActorSystem {
             return Err(forbidden("Actor message authority is not valid"));
         }
         self.ensure_delegation_authority(&current)?;
-        let mut source = if sender == crate::stage::shared::ACTOR_ID {
-            self.core_device_actor()?
-        } else {
-            self.execution_actor(&current)?
-        };
+        let mut source = self.execution_actor(&current)?;
         if let Some(context) = context {
             source = self.record_for_tool(
                 sender,
@@ -1816,6 +1965,39 @@ impl ActorSystem {
     ) -> Result<MessageRecord> {
         self.send_user_with_skills(target, content, attachments, Vec::new(), idempotency_key)
     }
+    #[cfg(test)]
+    pub(crate) fn test_actor_input(
+        &self,
+        target: &str,
+        content: String,
+        attachments: Vec<Attachment>,
+        idempotency_key: Option<String>,
+    ) -> Result<MessageRecord> {
+        let actor = self.actor(target)?;
+        if actor.role == ActorRole::Session {
+            return self.send_user(target, content, attachments, idempotency_key);
+        }
+        let session = self.actor(&actor.session_id)?;
+        let mut message = self.make_message(
+            target,
+            MessageSource::Actor {
+                actor_id: session.id.clone(),
+            },
+            ReplyTarget::Actor {
+                actor_id: session.id,
+                request_id: Uuid::new_v4().to_string(),
+            },
+            content,
+            attachments,
+        );
+        message.reply_to = ReplyTarget::Actor {
+            actor_id: actor.session_id,
+            request_id: message.id.clone(),
+        };
+        let message = self.store().enqueue(message, idempotency_key.as_deref())?;
+        self.wake(target);
+        Ok(message)
+    }
     pub(crate) fn send_user_with_skills(
         &self,
         target: &str,
@@ -1824,10 +2006,19 @@ impl ActorSystem {
         skills: Vec<super::SkillReference>,
         idempotency_key: Option<String>,
     ) -> Result<MessageRecord> {
+        let target_actor = self.actor(target)?;
+        if target_actor.role != ActorRole::Session {
+            return Err(forbidden("Owner input is accepted only by session Cores"));
+        }
+        self.store().session_summary(target).and_then(|session| {
+            if session.status == ActorStatus::Archived {
+                Err(ActorError::Conflict("Session is archived".into()).into())
+            } else {
+                Ok(())
+            }
+        })?;
         if !skills.is_empty() {
-            if target != crate::stage::shared::ACTOR_ID
-                || skills.len() > 32
-                || serde_json::to_vec(&skills).into_diagnostic()?.len() > 64 * 1024
+            if skills.len() > 32 || serde_json::to_vec(&skills).into_diagnostic()?.len() > 64 * 1024
             {
                 return Err(invalid("Invalid Skill references"));
             }
@@ -1851,7 +2042,7 @@ impl ActorSystem {
         }
         if self.inner.stopping.load(Ordering::Acquire)
             || self.inner.reconfiguring.load(Ordering::Acquire)
-            || target != crate::stage::shared::ACTOR_ID && self.config().validate().is_err()
+            || self.config().validate().is_err()
         {
             return Err(ActorError::Unavailable("Agent configuration is not ready".into()).into());
         }
@@ -1894,11 +2085,6 @@ impl ActorSystem {
         message.skills = skills;
         let result = self.store().enqueue(message, idempotency_key.as_deref())?;
         self.wake(target);
-        if target == crate::stage::shared::ACTOR_ID
-            && let Some(core) = self.shared_core()
-        {
-            core.notify();
-        }
         Ok(result)
     }
     pub fn cancel(&self, actor_id: &str, message_id: &str) -> Result<()> {
@@ -2004,7 +2190,7 @@ impl ActorSystem {
     }
 
     fn validate_actor_stop(&self, target: &str, caller: &ActorCallContext) -> Result<()> {
-        let core = self.record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let core = self.session_core_for_tool(caller)?;
         if core.remote_read_only
             || crate::conversation_import::is_import(&self.store().message(&caller.message_id)?)
             || self
@@ -2012,7 +2198,7 @@ impl ActorSystem {
                 .message(&caller.message_id)?
                 .remote_authority
                 .is_some()
-            || target == crate::stage::shared::ACTOR_ID
+            || target == core.id
             || !self.account_actor_ids(&core.id)?.contains(target)
         {
             return Err(forbidden(
@@ -2023,9 +2209,6 @@ impl ActorSystem {
     }
 
     pub async fn update_owned(&self, id: &str, config: ActorConfig) -> Result<ActorRecord> {
-        if id == crate::stage::shared::ACTOR_ID && self.shared_core().is_some() {
-            return Err(forbidden("Shared Actor only accepts model preferences"));
-        }
         self.update_owned_with(id, |_| normalize_config(config))
             .await
     }
@@ -2035,13 +2218,10 @@ impl ActorSystem {
         id: &str,
         model: Option<Option<String>>,
     ) -> Result<ActorRecord> {
-        if id == crate::stage::shared::ACTOR_ID
-            && let Some(core) = self.shared_core()
-        {
-            core.preferences(model)
-                .await
-                .map_err(|error| miette::miette!("{error}"))?;
-            return self.actor(id);
+        if self.actor(id)?.role != ActorRole::Session {
+            return Err(forbidden(
+                "Only session model preferences are Owner-editable",
+            ));
         }
         self.apply_owned_preferences(id, model).await
     }
@@ -2073,7 +2253,7 @@ impl ActorSystem {
         let _lifecycle = self.inner.lifecycle.lock().await;
         let mut actor = self.actor(id)?;
         let config = update(actor.config.clone())?;
-        let config = if id == crate::stage::shared::ACTOR_ID {
+        let config = if actor.role == ActorRole::Session {
             config
         } else {
             self.hosted_config(config)?
@@ -2171,22 +2351,6 @@ impl ActorSystem {
         }
         Ok(())
     }
-    pub(crate) async fn quiesce_core(&self) -> Result<()> {
-        let _lifecycle = self.inner.lifecycle.lock().await;
-        let worker = self
-            .inner
-            .workers
-            .lock()
-            .remove(crate::stage::shared::ACTOR_ID);
-        if let Some(worker) = worker {
-            worker.control.stop.store(true, Ordering::Release);
-            worker.control.wake.notify_one();
-            stop_worker(worker).await;
-        }
-        self.store()
-            .set_status(crate::stage::shared::ACTOR_ID, ActorStatus::Idle)?;
-        Ok(())
-    }
     pub(crate) fn is_stopping(&self) -> bool {
         self.inner.stopping.load(Ordering::Acquire)
     }
@@ -2239,7 +2403,18 @@ impl ActorSystem {
         self.build_app_context(actor, &message.id, message.seq as u64, device_policy)
     }
     pub(crate) fn owner_app_context(&self) -> Result<AppToolExecutionContext> {
-        self.build_app_context(self.core_device_actor()?, "owner-app-installation", 0, None)
+        // An Owner infrastructure operation is independent of all session identities.
+        let mut context = AppToolExecutionContext {
+            restart_native: false,
+            access_broker: None,
+            execution_cwd: self.device_workspace().to_owned(),
+            sandbox_policy: crate::sandbox::scopes::policy(&self.store().sandbox_scopes()?, false),
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+            actor_call: None,
+        };
+        context.sandbox_policy.builtin_resources = self.inner.builtin_resources.clone();
+        Ok(context)
     }
     fn build_app_context(
         &self,
@@ -2510,7 +2685,7 @@ mod tests {
     async fn terminal_updates_publish_only_scoped_references_and_stop_at_cancellation() {
         let (_directory, system) = fixture().await;
         let input = system
-            .send_user("root", "Run checks".into(), vec![], None)
+            .test_actor_input("root", "Run checks".into(), vec![], None)
             .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
         let call = crate::model_protocol::AgentToolCall {
@@ -2579,13 +2754,12 @@ mod tests {
             }
         }
         let (_directory, system) = fixture().await;
-        system.install_local_core().unwrap();
         let first = system
-            .send_user("root", "Original input".into(), vec![], None)
+            .test_actor_input("root", "Original input".into(), vec![], None)
             .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
         let second = system
-            .send_user("root", "Nested input".into(), vec![], None)
+            .test_actor_input("root", "Nested input".into(), vec![], None)
             .unwrap();
         system.store().receive_inputs(&first.id).unwrap();
         system
@@ -2685,7 +2859,7 @@ mod tests {
         };
         let (directory, system) = fixture().await;
         let previous = system
-            .send_user("root", "Keep this conversation".into(), vec![], None)
+            .test_actor_input("root", "Keep this conversation".into(), vec![], None)
             .unwrap();
         system
             .store()
@@ -2742,7 +2916,7 @@ mod tests {
             if archived {
                 assert!(
                     system
-                        .send_user("root", "Blocked".into(), vec![], None)
+                        .test_actor_input("root", "Blocked".into(), vec![], None)
                         .is_err()
                 );
                 assert!(system.store().claim_next("root").unwrap().is_none());
@@ -2786,7 +2960,7 @@ mod tests {
                 .is_empty()
         );
         let resumed = system
-            .send_user("root", "New work".into(), vec![], None)
+            .test_actor_input("root", "New work".into(), vec![], None)
             .unwrap();
         assert_eq!(
             system.store().claim_next("root").unwrap().unwrap().id,
@@ -2807,7 +2981,7 @@ mod tests {
             .unwrap();
         let caller = context.actor_call.as_ref().unwrap();
         let queued = system
-            .send_user("root", "Work".into(), vec![], None)
+            .test_actor_input("root", "Work".into(), vec![], None)
             .unwrap();
         // Queued inputs no longer prevent archival; they are discarded instead.
         system
@@ -2829,7 +3003,7 @@ mod tests {
             "a discarded input never runs after unarchive"
         );
         let input = system
-            .send_user("root", "Work again".into(), vec![], None)
+            .test_actor_input("root", "Work again".into(), vec![], None)
             .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
         // A running input still does not prevent archival; it is left to finish.
@@ -2921,7 +3095,7 @@ mod tests {
                     system.store().set_archived("root", true)
                 });
                 barrier.wait();
-                let sent = system.send_user("root", "Concurrent input".into(), vec![], None);
+                let sent = system.test_actor_input("root", "Concurrent input".into(), vec![], None);
                 (archive.join().unwrap(), sent)
             });
             // Archival always succeeds and discards queued inputs, while admission
@@ -3037,7 +3211,7 @@ mod tests {
             },
         );
         let input = system
-            .send_user(FIXTURE_ACTOR_ID, "during cleanup".into(), vec![], None)
+            .test_actor_input(FIXTURE_ACTOR_ID, "during cleanup".into(), vec![], None)
             .unwrap();
         assert!(Arc::ptr_eq(
             &system.inner.workers.lock()[FIXTURE_ACTOR_ID].control,
@@ -3078,7 +3252,7 @@ mod tests {
         );
         for _ in 0..16 {
             let input = system
-                .send_user(FIXTURE_ACTOR_ID, "queued".into(), vec![], None)
+                .test_actor_input(FIXTURE_ACTOR_ID, "queued".into(), vec![], None)
                 .unwrap();
             system.cancel(FIXTURE_ACTOR_ID, &input.id).unwrap();
             assert_eq!(
@@ -3095,7 +3269,7 @@ mod tests {
         let (_directory, system) = fixture().await;
         system.inner.account_gated.store(true, Ordering::Release);
         let input = system
-            .send_user(FIXTURE_ACTOR_ID, "retained".into(), vec![], None)
+            .test_actor_input(FIXTURE_ACTOR_ID, "retained".into(), vec![], None)
             .unwrap();
         system.suspend_execution().await.unwrap();
         system.activate_account_workers().await.unwrap();
@@ -3144,7 +3318,7 @@ mod tests {
     async fn removing_all_models_keeps_queued_input_without_starting_a_worker() {
         let (_directory, system) = fixture().await;
         let queued = system
-            .send_user(
+            .test_actor_input(
                 FIXTURE_ACTOR_ID,
                 "Keep the queued input".into(),
                 vec![],
@@ -3179,7 +3353,7 @@ mod tests {
         actor.name = "Custom model worker".into();
         let child = system.create_owned(FIXTURE_ACTOR_ID, actor).unwrap();
         let request = system
-            .send_user(FIXTURE_ACTOR_ID, "queued work".into(), vec![], None)
+            .test_actor_input(FIXTURE_ACTOR_ID, "queued work".into(), vec![], None)
             .unwrap();
         let mut candidate = system.config();
         candidate.models.remove("custom");
@@ -3204,7 +3378,7 @@ mod tests {
         );
         assert!(
             system
-                .send_user(FIXTURE_ACTOR_ID, "still available".into(), vec![], None)
+                .test_actor_input(FIXTURE_ACTOR_ID, "still available".into(), vec![], None)
                 .is_ok()
         );
         system.shutdown().await;
@@ -3215,7 +3389,7 @@ mod tests {
         let (directory, system) = fixture().await;
         let actor = system.actor(FIXTURE_ACTOR_ID).unwrap();
         let queued = system
-            .send_user(&actor.id, "Retain this request".into(), vec![], None)
+            .test_actor_input(&actor.id, "Retain this request".into(), vec![], None)
             .unwrap();
         let history = crate::model_protocol::AgentMessage::user("Retain the original history");
         system
@@ -3313,23 +3487,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            system
-                .list_visible()
-                .unwrap()
-                .iter()
-                .map(|a| a.id.as_str())
-                .collect::<Vec<_>>(),
-            ["core"]
-        );
+        assert!(system.list_visible().unwrap().is_empty());
+        let session = system.create_session(None, None, None).await.unwrap();
+        let session_id = session.id.clone();
         let input = system
-            .send_user("core", "Create workers".into(), vec![], None)
+            .send_user(&session_id, "Create workers".into(), vec![], None)
             .unwrap();
-        system.store().claim_next("core").unwrap().unwrap();
+        system.store().claim_next(&session_id).unwrap().unwrap();
         let context = system
-            .execution_context(&system.actor("core").unwrap(), &input)
+            .execution_context(&system.actor(&session_id).unwrap(), &input)
             .unwrap();
-        let mut app = crate::actor_app::ActorApp::new("core".into(), system.clone());
+        let mut app = crate::actor_app::ActorApp::new(session_id.clone(), system.clone());
         let mut created = Vec::new();
         for name in ["Parser repair", "Contract investigation"] {
             let result = app
@@ -3350,7 +3518,7 @@ mod tests {
                 .actor(result.payload["id"].as_str().unwrap())
                 .unwrap();
             assert_eq!(actor.config.name, name);
-            assert_eq!(actor.parent_id.as_deref(), Some("core"));
+            assert_eq!(actor.parent_id.as_deref(), Some(session_id.as_str()));
             created.push(actor);
         }
         assert_eq!(created[0].config.apps, created[1].config.apps);
@@ -3725,7 +3893,7 @@ mod tests {
         readonly.actor_call.as_mut().unwrap().remote_read_only = true;
         assert!(admin.execute_tool(&call, &readonly).await.is_err());
         let input = system
-            .send_user("root", "Worker input".into(), vec![], None)
+            .test_actor_input("root", "Worker input".into(), vec![], None)
             .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
         let worker_context = system
@@ -3760,7 +3928,7 @@ mod tests {
         let mut worker = system.actor("root").unwrap();
         worker.config.instructions = "Original task: only report the CI fix to Core".into();
         let input = system
-            .send_user(
+            .test_actor_input(
                 "root",
                 "A collaborator requests a new read-only review".into(),
                 vec![],
@@ -3796,7 +3964,7 @@ mod tests {
         let (_dir, system) = fixture().await;
         let text = "消息\"\n".repeat(1400);
         let input = system
-            .send_user("root", text.clone(), vec![], None)
+            .test_actor_input("root", text.clone(), vec![], None)
             .unwrap();
         system.store().claim_next("root").unwrap().unwrap();
         for (channel, text) in [

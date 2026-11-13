@@ -1,6 +1,21 @@
 //! Persistent format transitions preserve history without reviving retired capabilities.
 use rusqlite::{Transaction, params};
 
+pub(super) fn session_ownership(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    // Persist the transition on every existing identity, including archived workers.
+    // A fresh profile has no rows and does not acquire a preset session.
+    tx.execute(
+        "UPDATE actors SET record=json_set(record,
+        '$.session_id','core', '$.role',CASE WHEN id='core' THEN 'session' ELSE 'worker' END,
+        '$.title',NULL) WHERE json_type(record,'$.session_id') IS NULL",
+        [],
+    )?;
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS actors_session ON actors(json_extract(record,'$.session_id'),id);
+        CREATE TABLE IF NOT EXISTS session_creation_keys(key TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES actors(id) ON DELETE CASCADE, request TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS actor_cleanup_pending(actor TEXT PRIMARY KEY);")?;
+    Ok(())
+}
+
 pub(super) fn remove_actor_capability_lists(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE actors SET record=json_remove(record,

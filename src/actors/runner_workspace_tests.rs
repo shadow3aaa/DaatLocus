@@ -26,7 +26,7 @@ async fn workspace_migration_redirects_following_calls_in_the_same_protocol_grou
         MockReply::Answer("The file is in the selected directory."),
     ]);
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Switch workspace and write the result".into(),
             vec![],

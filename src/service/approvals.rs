@@ -35,19 +35,6 @@ async fn list(
         return Err(ApiError::invalid());
     }
     let limit = bounded(query.limit, 100)?;
-    if let Some(value) = super::remote::core_read(
-        &state,
-        &headers,
-        &actor,
-        super::ConversationRead::Approvals {
-            before: query.before,
-            limit: limit.min(32) as u8,
-        },
-    )
-    .await?
-    {
-        return Ok(Json(value));
-    }
     let page = state
         .system
         .store()
@@ -108,17 +95,6 @@ async fn detail(
     Path((actor, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     access_actor(&state, &headers, &actor, false).await?;
-    if !id.contains('~')
-        && let Some(value) = super::remote::core_read(
-            &state,
-            &headers,
-            &actor,
-            super::ConversationRead::Approval { id: id.clone() },
-        )
-        .await?
-    {
-        return Ok(Json(value));
-    }
     let mut value = if let Some((stage, id)) = split_device_id(&id) {
         owner(&state, &headers).await?;
         let prefix = format!("{stage}~");

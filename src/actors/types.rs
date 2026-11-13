@@ -137,12 +137,37 @@ pub enum ActorStatus {
     Archived,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorRole {
+    Session,
+    Worker,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub stage_id: crate::stage::StageId,
+    pub title: Option<String>,
+    pub status: ActorStatus,
+    pub working_actors: usize,
+    pub model: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub last_activity_at_ms: i64,
+    pub conversation_url: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorRecord {
     /// Execution-only restriction from authenticated remote authority; never Actor configuration.
     #[serde(skip)]
     pub remote_read_only: bool,
     pub id: String,
+    pub session_id: String,
+    pub role: ActorRole,
+    #[serde(default)]
+    pub title: Option<String>,
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub depth: u32,
@@ -157,6 +182,8 @@ pub struct ActorRecord {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActorSummary {
     pub id: String,
+    pub session_id: String,
+    pub role: ActorRole,
     pub parent_id: Option<String>,
     pub conversation_url: String,
     pub name: String,
@@ -170,6 +197,8 @@ impl ActorRecord {
     pub fn summary(&self) -> ActorSummary {
         ActorSummary {
             id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            role: self.role,
             parent_id: self.parent_id.clone(),
             conversation_url: format!("/actors/{}", self.id),
             name: self.config.name.clone(),
@@ -304,6 +333,12 @@ pub struct Page<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActorEvent {
+    SessionChanged {
+        session: SessionSummary,
+    },
+    SessionDeleted {
+        session_id: String,
+    },
     ConversationRestored {
         archive_id: String,
     },

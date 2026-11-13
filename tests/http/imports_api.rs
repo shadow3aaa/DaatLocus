@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn codex_preview_and_resource_download_preserve_a_conversation_over_32_mib() {
     let fixture = Fixture::new().await;
+    fixture.system.archive_session("core", true).await.unwrap();
+    fixture.system.delete_session("core").await.unwrap();
+    assert!(fixture.system.list_visible().unwrap().is_empty());
     let original = "x".repeat(33 * 1024 * 1024);
     let session = "00000000-0000-4000-8000-000000000033";
     let input = format!(
@@ -35,8 +38,19 @@ async fn codex_preview_and_resource_download_preserve_a_conversation_over_32_mib
     let preview: Value = response.json().await.unwrap();
     assert_eq!(preview["message_count"], 1);
     let id = preview["resource_id"].as_str().unwrap();
+    let submitted = fixture
+        .owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), StatusCode::ACCEPTED);
+    let submitted: Value = submitted.json().await.unwrap();
     let response = fixture
-        .owner(Method::GET, &format!("/v1/actors/core/resources/{id}"))
+        .owner(
+            Method::GET,
+            submitted["attachments"][0]["uri"].as_str().unwrap(),
+        )
         .send()
         .await
         .unwrap();
@@ -172,10 +186,30 @@ async fn codex_preview_checks_owner_origin_and_retains_only_inert_conversation()
     assert_eq!(preview["title"], "Check <layout> 🔵");
     assert_eq!(preview["message_count"], 2);
     let resource_id = preview["resource_id"].as_str().unwrap();
+    assert!(
+        fixture
+            .system
+            .store()
+            .messages("core", None, 10)
+            .unwrap()
+            .items
+            .is_empty(),
+        "Preview never queues an input"
+    );
+    let submitted = fixture
+        .owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), StatusCode::ACCEPTED);
+    let submitted: Value = submitted.json().await.unwrap();
+    assert_ne!(submitted["actor_id"], "core");
+    assert_eq!(submitted["content"], "Import the attached conversation.");
     let evidence = fixture
         .owner(
             Method::GET,
-            &format!("/v1/actors/core/resources/{resource_id}"),
+            submitted["attachments"][0]["uri"].as_str().unwrap(),
         )
         .send()
         .await
@@ -257,27 +291,96 @@ async fn codex_preview_checks_owner_origin_and_retains_only_inert_conversation()
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-    // The fixture deliberately has no active Core controller: submission must
-    // obey the same synchronization gate as an ordinary conversation message.
+    // Retrying submission reuses both the new session and its original input.
     let blocked = fixture
         .owner(Method::POST, "/v1/imports/codex")
         .json(&json!({"resource_id":resource_id}))
         .send()
         .await
         .unwrap();
-    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(blocked.status(), StatusCode::ACCEPTED);
     assert_eq!(
-        blocked.json::<Value>().await.unwrap()["code"],
-        "core_not_ready"
+        blocked.json::<Value>().await.unwrap()["id"],
+        submitted["id"]
     );
+    let joined = fixture
+        .owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id,"session_id":"core"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(joined.status(), StatusCode::ACCEPTED);
+    let joined: Value = joined.json().await.unwrap();
+    assert_eq!(joined["actor_id"], "core");
+    assert_ne!(joined["id"], submitted["id"]);
+    let again: Value = fixture
+        .owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id,"session_id":"core"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["id"], joined["id"]);
+    let joined_evidence = fixture
+        .owner(
+            Method::GET,
+            joined["attachments"][0]["uri"].as_str().unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(joined_evidence.status(), StatusCode::OK);
+    assert_eq!(
+        joined_evidence.json::<Value>().await.unwrap()["messages"],
+        evidence["messages"]
+    );
+    let other = fixture
+        .system
+        .create_session(None, None, None)
+        .await
+        .unwrap();
+    fixture
+        .system
+        .archive_session(&other.id, true)
+        .await
+        .unwrap();
+    let rejected = fixture
+        .owner(Method::POST, "/v1/imports/codex")
+        .json(&json!({"resource_id":resource_id,"session_id":other.id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    let worker = fixture.child("Imported work").await;
+    for target in ["missing-session", worker.as_str()] {
+        let rejected = fixture
+            .owner(Method::POST, "/v1/imports/codex")
+            .json(&json!({"resource_id":resource_id,"session_id":target}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+    }
     assert!(
+        fixture
+            .system
+            .store()
+            .messages(&worker, None, 10)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
         fixture
             .system
             .store()
             .messages("core", None, 10)
             .unwrap()
             .items
-            .is_empty()
+            .len(),
+        1
     );
     fixture.system.shutdown().await;
 }

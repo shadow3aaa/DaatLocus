@@ -1,5 +1,4 @@
 import { SkillChips } from "@/components/skill-completion";
-import type { ContactFocus } from "@/lib/contacts";
 import { isInternalNotification } from "@/lib/conversation-messages";
 import { importedConversation, messageDisplayText } from "@/lib/conversation-import";
 import { ImportConversationBubble } from "@/components/import-conversation";
@@ -26,7 +25,7 @@ import { MessageBubbleRow } from "@/components/message-bubble-row";
 import { actorAvatarSeed, messageAvatar } from "@/lib/conversation-avatars";
 
 type Chat = ReturnType<typeof useActorConversation>;
-type Props = { focus?:ContactFocus|null; message: MessageRecord; chat: Chat; access: Access; onActor(id: string, messageId?: string): void; searchQuery?: string };
+type Props = { message: MessageRecord; chat: Chat; access: Access; onActor(id: string, messageId?: string): void; searchQuery?: string };
 function OutcomeStatus({ message }: { message: MessageRecord }) {
   if (message.status === "failed") return <p role="status" className="dl-operation-error">{conversationFailureMessage(message.error)}</p>;
   if (message.status === "cancelled" || message.status === "interrupted") return <p role="status" className="dl-operation-note">{message.started_at_ms == null ? t("conversation_turns.queued_message_withdrawn") : t("conversation_turns.task_stopped_completed_actions_are_retained")}</p>;
@@ -92,7 +91,7 @@ export function WorkTranscript({ messages, ...props }: Omit<Props, "message"> & 
     else turns.push({message:part.message,parts:[part]});
   }
   const anchored = new Set<string>();
-  return <>{props.searchQuery===undefined && messages.filter(message=>message.kind!=="delivery"&&message.status!=="queued").map(message=><WorkActivityHistory key={message.id} message={message} events={props.chat.events} focus={props.focus?.message_id===message.id?props.focus:null} onChange={updateHistory}/>)}{turns.map(turn => {
+  return <>{props.searchQuery===undefined && messages.filter(message=>message.kind!=="delivery"&&message.status!=="queued").map(message=><WorkActivityHistory key={message.id} message={message} events={props.chat.events} onChange={updateHistory}/>)}{turns.map(turn => {
     const first = !anchored.has(turn.message.id);
     anchored.add(turn.message.id);
     const key = `${turn.message.id}:${turn.parts[0].kind}:${turn.parts[0].kind === "activity" ? turn.parts[0].range.start : ""}`;

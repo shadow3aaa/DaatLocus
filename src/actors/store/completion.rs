@@ -12,7 +12,7 @@ pub(super) fn finish_message_tx(
     // later final model answer closes the input without duplicating them.
     let explicit: bool = sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE actor_id=?1 AND json_extract(record,'$.kind')='delivery' AND json_extract(record,'$.in_reply_to')=?2 AND EXISTS(SELECT 1 FROM events e WHERE e.actor_id=m.actor_id AND json_extract(e.record,'$.type')='message_added' AND json_extract(e.record,'$.message_id')=m.id))", params![message.actor_id,id], |r|r.get(0)))?;
     let reply = reply.filter(|reply| !reply.trim().is_empty());
-    let reply = if message.actor_id == crate::stage::shared::ACTOR_ID
+    let reply = if actor_tx(tx, &message.actor_id)?.role == ActorRole::Session
         && explicit
         && status == MessageStatus::Completed
     {
@@ -116,7 +116,7 @@ fn notify_requester(tx: &Transaction<'_>, message: &MessageRecord) -> Result<()>
     let kinds: &[&str] = match message.status {
         MessageStatus::Failed | MessageStatus::Interrupted => &["result"],
         // Core may defer its answer until the user decides.
-        MessageStatus::Completed if message.actor_id != crate::stage::shared::ACTOR_ID => {
+        MessageStatus::Completed if actor_tx(tx, &message.actor_id)?.role != ActorRole::Session => {
             &["progress", "result"]
         }
         _ => return Ok(()),
@@ -127,7 +127,8 @@ fn notify_requester(tx: &Transaction<'_>, message: &MessageRecord) -> Result<()>
     let Ok(original) = message_tx(tx, request_id) else {
         return Ok(());
     };
-    if requester_record.status == ActorStatus::Archived || original.actor_id != *requester {
+    if sessions::ensure_admission(tx, &requester_record).is_err() || original.actor_id != *requester
+    {
         return Ok(());
     }
     // One answer or notice since this input started covers coalesced inputs.

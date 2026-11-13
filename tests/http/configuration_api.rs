@@ -6,6 +6,55 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[tokio::test]
+async fn model_native_search_switch_roundtrips_through_owner_configuration() {
+    let fixture = Fixture::new().await;
+    let mut config: Value = fixture
+        .owner(reqwest::Method::GET, "/v1/config")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(config["models"][0]["native_web_search"].is_null());
+    let original = config["models"][0]["model_id"].clone();
+    for setting in [false, true] {
+        config["models"][0]["native_web_search"] = json!(setting);
+        assert_eq!(
+            fixture
+                .owner(reqwest::Method::PUT, "/v1/config")
+                .json(&config)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        config = fixture
+            .owner(reqwest::Method::GET, "/v1/config")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(config["models"][0]["native_web_search"], setting);
+        assert_eq!(config["models"][0]["model_id"], original);
+        assert_eq!(
+            fixture
+                .system
+                .config()
+                .models
+                .values()
+                .next()
+                .unwrap()
+                .native_web_search,
+            Some(setting)
+        );
+    }
+}
+
+#[tokio::test]
 async fn configuration_preview_accepts_provider_rename_without_disclosing_credentials() {
     let fixture = Fixture::new().await;
     let mut config: Value = fixture
@@ -176,9 +225,9 @@ async fn composer_model_preferences_preserve_device_scopes_and_reject_permission
         )
         .unwrap();
     let scopes = fixture.system.store().sandbox_scopes().unwrap();
-    let endpoint = format!("/v1/actors/{actor}");
+    let endpoint = "/v1/actors/core";
     let response = fixture
-        .owner(reqwest::Method::PATCH, &endpoint)
+        .owner(reqwest::Method::PATCH, endpoint)
         .json(&json!({"model":"alternate"}))
         .send()
         .await
@@ -187,7 +236,7 @@ async fn composer_model_preferences_preserve_device_scopes_and_reject_permission
     assert_eq!(
         fixture
             .system
-            .actor(&actor)
+            .actor("core")
             .unwrap()
             .config
             .model
@@ -196,12 +245,13 @@ async fn composer_model_preferences_preserve_device_scopes_and_reject_permission
     );
     assert_eq!(fixture.system.store().sandbox_scopes().unwrap(), scopes);
     let response = fixture
-        .owner(reqwest::Method::PATCH, &endpoint)
+        .owner(reqwest::Method::PATCH, endpoint)
         .json(&json!({"model":null}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.system.actor("core").unwrap().config.model, None);
     assert_eq!(fixture.system.actor(&actor).unwrap().config.model, None);
     for patch in [
         json!({}),
@@ -212,7 +262,7 @@ async fn composer_model_preferences_preserve_device_scopes_and_reject_permission
     ] {
         assert_eq!(
             fixture
-                .owner(reqwest::Method::PATCH, &endpoint)
+                .owner(reqwest::Method::PATCH, endpoint)
                 .json(&patch)
                 .send()
                 .await
@@ -287,10 +337,7 @@ async fn the_last_provider_can_be_removed_without_deleting_actors_or_queued_inpu
         .update_owned(&actor, preference)
         .await
         .unwrap();
-    let queued = fixture
-        .system
-        .send_user(&actor, "Keep this input".into(), vec![], None)
-        .unwrap();
+    let queued = fixture.delegate(&actor, "Keep this input");
     let mut request: Value = fixture
         .owner(reqwest::Method::GET, "/v1/config")
         .send()

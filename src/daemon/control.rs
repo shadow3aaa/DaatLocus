@@ -88,6 +88,24 @@ pub enum Action {
     Stop,
     Bootstrap(daat_locus_client_protocol::BootstrapRequest),
     WebHost,
+    SessionCreate {
+        title: Option<String>,
+        model: Option<String>,
+    },
+    SessionsList {
+        archived: bool,
+        limit: usize,
+        after: Option<String>,
+    },
+    SessionMessages {
+        actor: String,
+        limit: usize,
+        before: Option<i64>,
+    },
+    SessionSend {
+        session: String,
+        content: String,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,7 +253,8 @@ async fn respond<S: AsyncRead + AsyncWrite + Unpin>(
     bootstrap: Option<crate::service::ServiceState>,
 ) -> Result<()> {
     let bytes = zeroize::Zeroizing::new(
-        tokio::time::timeout(Duration::from_secs(30), read_frame(&mut stream, 64 * 1024))
+        // A 64-KiB message may expand up to sixfold when JSON-escaped.
+        tokio::time::timeout(Duration::from_secs(30), read_frame(&mut stream, 512 * 1024))
             .await
             .map_err(|_| miette!("Control handshake timed out"))??,
     );
@@ -249,6 +268,114 @@ async fn respond<S: AsyncRead + AsyncWrite + Unpin>(
         }
         let state = bootstrap.ok_or_else(|| miette!("Native Web host unavailable"))?;
         return serve_web_host(stream, state.system.web_host(), stop.subscribe()).await;
+    }
+    if matches!(
+        &request.action,
+        Action::SessionsList { .. }
+            | Action::SessionSend { .. }
+            | Action::SessionMessages { .. }
+            | Action::SessionCreate { .. }
+    ) {
+        if *stop.borrow() {
+            return Err(miette!("Service is stopping"));
+        }
+        let state = bootstrap.ok_or_else(|| miette!("Session control unavailable"))?;
+        let response = match request.action {
+            Action::SessionCreate { title, model } => {
+                crate::service::owner_control_request(
+                    state,
+                    axum::http::Method::POST,
+                    "/v1/sessions",
+                    serde_json::to_vec(&serde_json::json!({"title":title,"model":model}))
+                        .into_diagnostic()?,
+                )
+                .await
+            }
+            Action::SessionsList {
+                archived,
+                limit,
+                after,
+            } => {
+                let uri = {
+                    let mut query = url::form_urlencoded::Serializer::new(String::new());
+                    query
+                        .append_pair("archived", &archived.to_string())
+                        .append_pair("limit", &limit.to_string());
+                    if let Some(after) = after {
+                        query.append_pair("after", &after);
+                    }
+                    format!("/v1/sessions?{}", query.finish())
+                };
+                crate::service::owner_control_request(
+                    state,
+                    axum::http::Method::GET,
+                    &uri,
+                    Vec::new(),
+                )
+                .await
+            }
+            Action::SessionMessages {
+                actor,
+                limit,
+                before,
+            } => {
+                if !valid_actor_id(&actor) {
+                    return Err(miette!("Invalid Actor ID"));
+                }
+                let mut uri = format!("/v1/actors/{actor}/messages?limit={limit}");
+                if let Some(before) = before {
+                    uri.push_str(&format!("&before={before}"));
+                }
+                crate::service::owner_control_request(
+                    state,
+                    axum::http::Method::GET,
+                    &uri,
+                    Vec::new(),
+                )
+                .await
+            }
+            Action::SessionSend { session, content } => {
+                if !valid_actor_id(&session) {
+                    Err(miette!("Invalid session ID"))
+                } else {
+                    let uri = format!("/v1/sessions/{session}/messages");
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "content": content,
+                        "attachments": [],
+                        "skills": []
+                    }))
+                    .into_diagnostic()?;
+                    crate::service::owner_control_request(
+                        state,
+                        axum::http::Method::POST,
+                        &uri,
+                        body,
+                    )
+                    .await
+                }
+            }
+            _ => unreachable!(),
+        };
+        let result = match response {
+            Ok((status, body)) if (200..300).contains(&status) => {
+                serde_json::json!({"ok":true,"status":status,"body":body})
+            }
+            Ok((status, body)) => {
+                serde_json::json!({"ok":false,"status":status,"body":body})
+            }
+            Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+        };
+        write_frame(
+            &mut stream,
+            &serde_json::to_vec(&serde_json::json!({
+                "instance":status.instance,
+                "pid":status.pid,
+                "result":result
+            }))
+            .into_diagnostic()?,
+        )
+        .await?;
+        return stream.shutdown().await.into_diagnostic();
     }
     tokio::time::timeout(Duration::from_secs(30), async {
         if let Action::Bootstrap(input) = request.action {
@@ -291,7 +418,15 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Res
     stream.flush().await.into_diagnostic()
 }
 pub async fn query(root: &Path, action: Action) -> Result<Option<Status>> {
-    if matches!(action, Action::Bootstrap(_) | Action::WebHost) {
+    if matches!(
+        action,
+        Action::Bootstrap(_)
+            | Action::WebHost
+            | Action::SessionsList { .. }
+            | Action::SessionSend { .. }
+            | Action::SessionMessages { .. }
+            | Action::SessionCreate { .. }
+    ) {
         return Err(miette!("Use the account bootstrap dispatcher"));
     }
     let Some(record) = load(root)? else {
@@ -319,6 +454,66 @@ pub async fn query(root: &Path, action: Action) -> Result<Option<Status>> {
     .await
     .map_err(|_| miette!("Daemon control timed out"))??;
     Ok(Some(reply))
+}
+
+fn valid_actor_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+pub async fn session_command(root: &Path, action: Action) -> Result<serde_json::Value> {
+    if !matches!(
+        action,
+        Action::SessionsList { .. }
+            | Action::SessionSend { .. }
+            | Action::SessionMessages { .. }
+            | Action::SessionCreate { .. }
+    ) {
+        return Err(miette!("Unsupported session control operation"));
+    }
+    owner_command(root, action, Duration::from_secs(30)).await
+}
+
+async fn owner_command(
+    root: &Path,
+    action: Action,
+    timeout: Duration,
+) -> Result<serde_json::Value> {
+    let record = load(root)?.ok_or_else(|| miette!("Local service is not running"))?;
+    let response = tokio::time::timeout(timeout, async {
+        let mut stream = platform::connect(&record).await?;
+        let request = serde_json::to_vec(&Request {
+            instance: record.instance,
+            action,
+        })
+        .into_diagnostic()?;
+        if request.len() > 512 * 1024 {
+            return Err(miette!("Owner command exceeds its size limit"));
+        }
+        write_frame(&mut stream, &request).await?;
+        let bytes = read_frame(&mut stream, 1024 * 1024).await?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).into_diagnostic()?;
+        if value["instance"].as_str() != Some(&record.instance.to_string())
+            || value["pid"].as_u64() != Some(u64::from(record.pid))
+        {
+            return Err(miette!("Daemon endpoint identity changed"));
+        }
+        let result = value["result"].clone();
+        if result["ok"] != true {
+            let reason = result["body"]["message"]
+                .as_str()
+                .or_else(|| result["error"].as_str())
+                .unwrap_or("Owner command failed");
+            return Err(miette!("{reason}"));
+        }
+        Ok(result["body"].clone())
+    })
+    .await
+    .map_err(|_| miette!("Owner command timed out; observe status before retrying"))??;
+    Ok(response)
 }
 async fn serve_web_host<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,

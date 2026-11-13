@@ -21,6 +21,66 @@ fn approval_tx(tx: &Transaction<'_>, id: &str) -> Result<ApprovalRecord> {
 }
 
 impl ActorStore {
+    pub(crate) fn receive_session_appeal(
+        &self,
+        scope: &crate::stage::session::Scope,
+        id: &str,
+        content: &str,
+    ) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            let previous: Option<String> = sql(tx
+                .query_row("SELECT record FROM messages WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional())?;
+            if let Some(previous) = previous {
+                let previous: MessageRecord = decode(previous)?;
+                if previous.content != content || previous.actor_id != scope.session.actor_id {
+                    return Err(
+                        ActorError::Conflict("Appeal delivery changed content".into()).into(),
+                    );
+                }
+                return Ok(());
+            }
+            if content.len() > 65536 {
+                return Err(ActorError::Invalid("Appeal exceeds message limit".into()).into());
+            }
+            let time = now();
+            Uuid::parse_str(id).into_diagnostic()?;
+            insert_message(
+                &tx,
+                MessageRecord {
+                    skills: vec![],
+                    seq: 0,
+                    id: id.into(),
+                    actor_id: scope.session.actor_id.clone(),
+                    source: MessageSource::RemoteActor {
+                        stage_id: scope.actor.stage_id,
+                        actor_id: scope.actor.actor_id.clone(),
+                        invocation_id: Uuid::parse_str(id).into_diagnostic()?,
+                    },
+                    reply_to: ReplyTarget::User,
+                    kind: MessageKind::Request,
+                    in_reply_to: None,
+                    remote_authority: None,
+                    content: content.into(),
+                    attachments: vec![],
+                    status: MessageStatus::Queued,
+                    cancel_requested: false,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                    final_generation: None,
+                    reply: None,
+                    error: None,
+                    created_at_ms: time,
+                    updated_at_ms: time,
+                },
+            )?;
+            self.commit(tx)
+        })
+    }
     pub(crate) fn appeal_approval(
         &self,
         actor: &str,
@@ -42,7 +102,7 @@ impl ActorStore {
             let original = message_tx(&tx, &approval.message_id)?;
             // A native request from the current Core worker has already checked
             // its input there. No Core worker or current input is needed here.
-            let current = if core_authorized && actor == crate::stage::shared::ACTOR_ID {
+            let current = if core_authorized && actor_tx(&tx, actor)?.role == ActorRole::Session {
                 original.clone()
             } else {
                 message_tx(&tx, input)?
@@ -52,8 +112,14 @@ impl ActorStore {
                 || current.cancel_requested
                 || original.actor_id != actor
                 || !approval.requires_core_review()
-                || current.remote_authority.is_some()
-                || original.remote_authority.is_some()
+                || current
+                    .remote_authority
+                    .as_ref()
+                    .is_some_and(|a| a.read_only)
+                || original
+                    .remote_authority
+                    .as_ref()
+                    .is_some_and(|a| a.read_only)
                 || original.cancel_requested
                 || matches!(
                     original.status,
@@ -71,7 +137,10 @@ impl ActorStore {
                 }
                 return Ok(approval);
             }
-            let core = crate::stage::shared::ACTOR_ID;
+            let source_actor = actor_tx(&tx, actor)?;
+            let session = crate::stage::session::address(&tx, &source_actor, stage)
+                .map_err(|e| miette::miette!("{e}"))?;
+            let core = source_actor.session_id.clone();
             let message_id = Uuid::new_v4().to_string();
             let content = serde_json::json!({
                 "type":"approval_appeal", "approval_id":id, "stage_id":stage,
@@ -89,34 +158,59 @@ impl ActorStore {
                 return Err(ActorError::Invalid("Appeal facts exceed the message limit; narrow the proposed operation before applying again".into()).into());
             }
             let now = now();
-            insert_message(
-                &tx,
-                MessageRecord {
-                    skills: Vec::new(),
-                    seq: 0,
-                    id: message_id.clone(),
-                    actor_id: core.into(),
-                    source: MessageSource::Actor {
+            if session.stage_id != stage {
+                let scope = crate::stage::session::Scope {
+                    actor: crate::stage::ActorAddress {
+                        stage_id: stage,
                         actor_id: actor.into(),
                     },
-                    reply_to: ReplyTarget::User,
-                    kind: MessageKind::Request,
-                    in_reply_to: None,
+                    session: session.clone(),
+                    role: source_actor.role,
+                    depth: source_actor.depth,
+                    message: input.into(),
+                    owner_requested: false,
+                };
+                let request = crate::stage::session::Request {
+                    scope,
+                    operation: crate::stage::session::Operation::AppealNotice {
+                        id: message_id.clone(),
+                        content,
+                    },
+                };
+                sql(tx.execute(
+                    "INSERT INTO session_appeal_outbox VALUES(?1,?2,?3)",
+                    params![message_id, session.stage_id.to_string(), encode(&request)?],
+                ))?;
+            } else {
+                insert_message(
+                    &tx,
+                    MessageRecord {
+                        skills: Vec::new(),
+                        seq: 0,
+                        id: message_id.clone(),
+                        actor_id: core,
+                        source: MessageSource::Actor {
+                            actor_id: actor.into(),
+                        },
+                        reply_to: ReplyTarget::User,
+                        kind: MessageKind::Request,
+                        in_reply_to: None,
 
-                    remote_authority: None,
-                    content,
-                    attachments: vec![],
-                    status: MessageStatus::Queued,
-                    cancel_requested: false,
-                    started_at_ms: None,
-                    finished_at_ms: None,
-                    final_generation: None,
-                    reply: None,
-                    error: None,
-                    created_at_ms: now,
-                    updated_at_ms: now,
-                },
-            )?;
+                        remote_authority: None,
+                        content,
+                        attachments: vec![],
+                        status: MessageStatus::Queued,
+                        cancel_requested: false,
+                        started_at_ms: None,
+                        finished_at_ms: None,
+                        final_generation: None,
+                        reply: None,
+                        error: None,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    },
+                )?;
+            }
             approval.appeal = Some(ApprovalAppeal {
                 core_message_id: message_id,
                 request_message_id: current.id,
@@ -164,8 +258,8 @@ impl ActorStore {
             }
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
-            let core = crate::stage::shared::ACTOR_ID;
             let mut approval = approval_tx(&tx, id)?;
+            let core = actor_tx(&tx, &message_tx(&tx, &approval.message_id)?.actor_id)?.session_id;
             let mut appeal = approval
                 .appeal
                 .clone()
@@ -188,7 +282,10 @@ impl ActorStore {
             let request = message_tx(&tx, &appeal.request_message_id)?;
             if !approval.requires_core_review()
                 || original.cancel_requested
-                || original.remote_authority.is_some()
+                || original
+                    .remote_authority
+                    .as_ref()
+                    .is_some_and(|a| a.read_only)
                 || request.cancel_requested
                 || matches!(
                     request.status,
@@ -212,7 +309,7 @@ impl ActorStore {
             insert_message(&tx, MessageRecord {
                 skills: Vec::new(),
                 seq:0, id:notification_id.clone(), actor_id:original.actor_id.clone(),
-                source:MessageSource::Actor{actor_id:core.into()}, reply_to:original.reply_to.clone(),
+                source:MessageSource::Actor{actor_id:core}, reply_to:original.reply_to.clone(),
                 kind:MessageKind::Request, in_reply_to:Some(approval.message_id.clone()),
                 remote_authority:None,
                 content:serde_json::json!({"type":APPEAL_NOTICE_TYPE, "approval_id":id,

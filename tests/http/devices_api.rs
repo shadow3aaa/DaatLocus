@@ -263,19 +263,6 @@ async fn a_paired_device_without_enrollment_authority_cannot_import_login_creden
         "conversation membership cannot read model credentials"
     );
     assert!(b.stage.host.configurations.current().unwrap().is_none());
-    let denied = peer
-        .rpc(Body::CoordinationRequest {
-            request: Box::new(daat_locus::stage::coordination::Request::Command {
-                operation: daat_locus::stage::shared::Operation::Inspect,
-                receipts: vec![],
-                instance: uuid::Uuid::new_v4(),
-            }),
-        })
-        .await;
-    assert!(
-        matches!(denied, Err(_) | Ok(Body::Error { .. })),
-        "conversation membership cannot control execution metadata"
-    );
     let response = tokio::time::timeout(
         Duration::from_secs(3),
         peer.rpc(Body::AccountCredentialsQuery {
@@ -348,7 +335,9 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
     let detail = b.owner(reqwest::Method::GET, &path).send().await.unwrap();
     assert_eq!(detail.status(), StatusCode::OK);
     let detail: Value = detail.json().await.unwrap();
-    assert_eq!(detail["access"]["manage"], true);
+    assert!(detail.get("access").is_none());
+    assert_eq!(detail["role"], "worker");
+    assert_eq!(detail["session_id"], "core");
     assert_eq!(detail["model_ready"], true);
     assert_eq!(
         detail["conversation_url"],
@@ -361,13 +350,16 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
     let mut nested_config = hosted.config.clone();
     nested_config.name = "Nested collaborator".into();
     let nested = a.system.create_owned(&hosted.id, nested_config).unwrap();
-    // Contacts traverse the same authenticated account channels and retain host-qualified links.
+    // The session's worker catalog remains available across account devices.
     let mut after: Option<String> = None;
     let mut found = false;
     loop {
         let mut request = b
-            .owner(reqwest::Method::GET, "/v1/contacts")
-            .query(&[("q", "Hosted collaborator"), ("limit", "1")]);
+            .owner(
+                reqwest::Method::GET,
+                &format!("/v1/stages/{}/sessions/core/actors", a.stage.host.local),
+            )
+            .query(&[("limit", "1")]);
         if let Some(cursor) = &after {
             request = request.query(&[("after", cursor)]);
         }
@@ -375,9 +367,9 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
         assert_eq!(response.status(), StatusCode::OK);
         let page = response.json::<Value>().await.unwrap();
         for item in page["items"].as_array().unwrap() {
-            if item["actor"]["id"] == hosted.id {
+            if item["id"] == hosted.id {
                 assert_eq!(
-                    item["actor"]["conversation_url"],
+                    item["conversation_url"],
                     format!("/stages/{}/actors/{}", a.stage.host.local, hosted.id)
                 );
                 found = true;
@@ -486,11 +478,10 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
         .unwrap();
     assert_eq!(
         changed.status(),
-        StatusCode::OK,
-        "{}",
-        changed.text().await.unwrap()
+        StatusCode::CONFLICT,
+        "Worker model preferences are not Owner-editable"
     );
-    assert!(changed.json::<Value>().await.unwrap()["config"]["model"].is_null());
+    assert!(a.system.actor(&target).unwrap().config.model.is_none());
     let approval = a.approval(&target).await;
     let remote_id = format!("{}~{}", a.stage.host.local, approval.id);
     let endpoint = format!("/v1/approvals/{remote_id}");
@@ -542,30 +533,10 @@ async fn remote_actor_http_removes_owner_input_and_enforces_source_account_grant
 }
 
 #[tokio::test]
-async fn recovery_record_queries_require_owner_access_and_bounded_cursors() {
+async fn retired_shared_core_recovery_routes_are_not_exposed() {
     let fixture = Fixture::new().await;
-    fixture.stage.start().await.unwrap();
-    let path = "/v1/stage/recovery/archives?limit=30";
-    assert_eq!(
-        fixture
-            .client
-            .get(format!("{}{}", fixture.url, path))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::UNAUTHORIZED
-    );
-    let response = fixture
-        .owner(reqwest::Method::GET, path)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["items"], json!([]));
-    assert!(body["next_cursor"].is_null());
     for path in [
+        "/v1/stage/recovery/archives?limit=30",
         "/v1/stage/recovery/archives?limit=101",
         "/v1/stage/recovery/archives?after=-1",
         "/v1/stage/recovery/archives/not-an-id/messages?limit=30",
@@ -577,16 +548,14 @@ async fn recovery_record_queries_require_owner_access_and_bounded_cursors() {
                 .await
                 .unwrap()
                 .status(),
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            reqwest::StatusCode::NOT_FOUND
         );
     }
-    fixture.stage.stop().await;
-    fixture.system.shutdown().await;
 }
 #[tokio::test]
-async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_account_authority() {
+async fn joining_devices_keep_sessions_local_and_offline_peers_do_not_block_creation() {
     let relay = crate::support::relay::Relay::new().await;
-    use daat_locus::stage::{ledger::StageLedger, shared::Operation};
+    use daat_locus::stage::ledger::StageLedger;
     let desktop = Fixture::new().await;
     let phone = Fixture::with_config_and_account(desktop.system.config(), false).await;
     let request = phone.stage.host.initialize(false).unwrap();
@@ -615,23 +584,18 @@ async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_acco
     crate::support::relay::wait(|| phone.stage.handle(desktop.stage.host.local).is_ok())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if phone
-                .stage
-                .coordinate(Operation::Inspect, vec![])
-                .await
-                .is_ok()
-                && desktop.stage.voting_member(phone.stage.host.local) == Some(false)
-                && phone.stage.voting_member(phone.stage.host.local) == Some(false)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap();
+    let phone_session = phone
+        .system
+        .create_session(None, None, Some("phone-local"))
+        .await
+        .unwrap();
+    let desktop_session = desktop
+        .system
+        .create_session(None, None, Some("desktop-local"))
+        .await
+        .unwrap();
+    assert!(desktop.system.actor(&phone_session.id).is_err());
+    assert!(phone.system.actor(&desktop_session.id).is_err());
     phone.stage.stop().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while desktop.stage.state(phone.stage.host.local).status
@@ -666,27 +630,23 @@ async fn joining_devices_are_replicas_and_offline_replicas_do_not_block_the_acco
         .json()
         .await
         .unwrap();
-    assert_eq!(status["core"]["ready"], false);
-
-    assert!(
-        desktop
-            .stage
-            .coordinate(Operation::Inspect, vec![])
-            .await
-            .is_ok()
-    );
-    assert_eq!(
-        desktop.stage.voting_member(phone.stage.host.local),
-        Some(false)
-    );
+    assert!(status.get("core").is_none());
+    assert_eq!(status["model_ready"], true);
+    let created = desktop
+        .system
+        .create_session(None, None, Some("offline-phone"))
+        .await
+        .unwrap();
+    assert!(desktop.system.actor(&created.id).is_ok());
+    assert!(desktop.system.actor(&desktop_session.id).is_ok());
     desktop.stage.stop().await;
     desktop.system.shutdown().await;
     phone.system.shutdown().await;
 }
 
 #[tokio::test]
-async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
-    let f = Fixture::new().await;
+async fn session_input_requires_a_model_not_shared_core_synchronization() {
+    let f = Fixture::with_config(Config::default()).await;
     let response = f
         .client
         .get(format!("{}/v1/stage/status", f.url))
@@ -702,21 +662,20 @@ async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
         .json()
         .await
         .unwrap();
-    assert!(status["core"].is_null());
+    assert!(status.get("core").is_none());
+    assert_eq!(status["model_ready"], false);
     assert_eq!(status["public_login"]["state"], "not_configured");
     assert!(status["public_login"]["error_code"].is_null());
-    let controller = daat_locus::stage::shared_runtime::Controller::new(&f.stage).unwrap();
-    assert!(!controller.accepts_input());
-
     let response = f
-        .owner(reqwest::Method::POST, "/v1/core/messages")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/messages")
+        .header("idempotency-key", "unconfigured-core")
         .json(&json!({"content":"keep this draft","attachments":[]}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let error: Value = response.json().await.unwrap();
-    assert!(error.to_string().contains("core_not_ready"));
+    assert_eq!(error["code"], "not_ready");
     let messages: Value = f
         .owner(reqwest::Method::GET, "/v1/actors/core/messages?limit=10")
         .send()
@@ -726,15 +685,11 @@ async fn core_readiness_rejects_unsynchronized_input_without_queuing_it() {
         .await
         .unwrap();
     assert!(messages["items"].as_array().unwrap().is_empty());
-    controller.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_replication() {
-    use daat_locus::{
-        actors::MessageStatus,
-        stage::{ledger::StageLedger, shared_store},
-    };
+async fn remote_session_conversation_pages_and_live_updates_do_not_replicate_execution() {
+    use daat_locus::{actors::MessageStatus, stage::ledger::StageLedger};
     use reqwest::Method;
     let relay = crate::support::relay::Relay::new().await;
     let a = Fixture::new_with_factory(std::sync::Arc::new(CoreViewModel)).await;
@@ -777,10 +732,6 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
-    shared_store::initialize(b.system.store(), &account).unwrap();
-    let database =
-        rusqlite::Connection::open(b._temp.path().join("actors/actors.sqlite3")).unwrap();
-    database.execute_batch("CREATE TRIGGER hold_execution_replica BEFORE INSERT ON core_rows BEGIN SELECT RAISE(FAIL,'execution checkpoint deliberately held'); END;").unwrap();
     for fixture in [&a, &b] {
         let mut settings = fixture.stage.host.settings();
         settings.mode = daat_locus::stage::host::Connectivity::Relay;
@@ -797,21 +748,6 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
     })
     .await;
     b.login_cookie().await;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let status = b.stage.core_status().unwrap();
-            if status["ready"] == true && status["synchronized"] == false {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("connected learner must admit forwarded inputs before importing its execution context");
-    assert_eq!(
-        shared_store::head(b.system.store()).unwrap(),
-        daat_locus::stage::shared::Head::default()
-    );
     assert!(
         b.system
             .store()
@@ -820,15 +756,16 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
             .items
             .is_empty()
     );
+    let remote = format!("/v1/stages/{}/actors/core", a.stage.host.local);
     let unauthorized = b
         .client
-        .get(format!("{}/v1/actors/core/messages?limit=5", b.url))
+        .get(format!("{}{remote}/messages?limit=5", b.url))
         .send()
         .await
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     let response = b
-        .owner(Method::GET, "/v1/actors/core/messages?limit=5")
+        .owner(Method::GET, &format!("{remote}/messages?limit=5"))
         .send()
         .await
         .unwrap();
@@ -841,32 +778,9 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
         .map(|row| row["id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(ids, expected[40..].to_vec());
-    assert!(
-        page["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["actor_id"] == "core")
-    );
-    let source_view: Value = b
-        .owner(
-            Method::GET,
-            &format!(
-                "/v1/stages/{}/actors/core/messages?limit=5",
-                a.stage.host.local
-            ),
-        )
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
     let qualified_core = format!("{}~core", a.stage.host.local);
     assert!(
-        source_view["items"]
+        page["items"]
             .as_array()
             .unwrap()
             .iter()
@@ -878,7 +792,7 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
     let response = b
         .owner(
             Method::GET,
-            &format!("/v1/actors/core/messages?limit=5&before={before}"),
+            &format!("{remote}/messages?limit=5&before={before}"),
         )
         .send()
         .await
@@ -892,20 +806,20 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
         .map(|row| row["id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(ids, expected[35..40].to_vec());
-    // A view cursor must not hydrate or certify the execution checkpoint.
     assert!(
         b.system
             .store()
             .messages("core", None, 100)
             .unwrap()
             .items
-            .is_empty()
+            .is_empty(),
+        "Remote reads cannot replicate session execution"
     );
     let mut events = b
         .owner(
             Method::GET,
             &format!(
-                "/v1/actors/core/event-stream?after={}",
+                "{remote}/event-stream?after={}",
                 page["event_cursor"].as_i64().unwrap()
             ),
         )
@@ -938,38 +852,22 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
         !text.contains(&expected[0]),
         "opening the stream must not replay archived message history"
     );
-    assert_eq!(
-        shared_store::head(b.system.store()).unwrap(),
-        daat_locus::stage::shared::Head::default()
-    );
-    let incremental: Value = b
-        .owner(Method::GET, "/v1/actors/core/events?after=0")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
     assert!(
-        incremental["items"]
-            .as_array()
+        b.system
+            .store()
+            .messages("core", None, 100)
             .unwrap()
-            .iter()
-            .any(|row| row["event"]["message_id"] == next.id)
-    );
-    assert!(
-        incremental["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["actor_id"] == "core")
+            .items
+            .is_empty()
     );
     drop(events);
-    b.system.resume_execution().await.unwrap();
     let submit = || {
-        b.owner(Method::POST, "/v1/core/messages")
+        b.owner(
+            Method::POST,
+            &format!("/v1/stages/{}/sessions/core/messages", a.stage.host.local),
+        )
         .header("idempotency-key", "forward-before-execution-sync")
-        .json(&json!({"content":"Forward this without importing execution history", "attachments":[]}))
+        .json(&json!({"content":"Send this without importing execution history", "attachments":[]}))
     };
     let reply = submit().send().await.unwrap();
     assert_eq!(reply.status(), StatusCode::ACCEPTED);
@@ -977,7 +875,7 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
     let retry: Value = submit().send().await.unwrap().json().await.unwrap();
     assert_eq!(
         retry["id"], sent["id"],
-        "forwarded retries must retain the durable input identity"
+        "proxied retries must retain the durable input identity"
     );
     let sent_id = sent["id"].as_str().unwrap();
     let source = a.system.store().message(sent_id).unwrap();
@@ -986,31 +884,14 @@ async fn core_conversation_pages_and_live_updates_do_not_wait_for_execution_repl
         daat_locus::actors::MessageSource::User
     ));
     assert!(source.remote_authority.is_none());
-    assert_eq!(
-        b.stage.core_status().unwrap()["worker_stage_id"],
-        a.stage.host.local.to_string()
+    assert!(
+        b.system
+            .store()
+            .messages("core", None, 100)
+            .unwrap()
+            .items
+            .is_empty()
     );
-    assert_eq!(
-        shared_store::head(b.system.store()).unwrap(),
-        daat_locus::stage::shared::Head::default()
-    );
-    let cancelled = b
-        .owner(
-            Method::POST,
-            &format!("/v1/actors/core/messages/{sent_id}/cancel"),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
-    crate::support::relay::wait(|| {
-        a.system.store().message(sent_id).unwrap().status == MessageStatus::Cancelled
-    })
-    .await
-    .unwrap();
-    database
-        .execute_batch("DROP TRIGGER hold_execution_replica;")
-        .unwrap();
     a.stage.stop().await;
     b.stage.stop().await;
     a.system.shutdown().await;

@@ -29,10 +29,7 @@ static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn strip_dsml_from_thinking(thinking: &str) -> String {
-    let mut out = thinking.to_string();
-
-    out = DSML_FUNCTION_CALLS_RE.replace_all(&out, "").to_string();
-    out = DSML_INVOKE_STRIP_RE.replace_all(&out, "").to_string();
+    let mut out = strip_dsml_blocks(thinking);
 
     // Lone unpaired DSML opener left over after truncation mid-call.
     if let Some(i) = out.find("<｜DSML｜") {
@@ -120,47 +117,33 @@ fn coerce_to_tool_call(
     allowed_names: &HashSet<String>,
     call_index: &mut usize,
 ) -> Option<AgentToolCall> {
-    if !candidate.is_object() {
+    let call = if candidate
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| allowed_names.contains(name))
+    {
+        candidate
+    } else if candidate.get("type").and_then(Value::as_str) == Some("function") {
+        candidate.get("function")?
+    } else {
+        return None;
+    };
+    let name = call.get("name")?.as_str()?;
+    if !allowed_names.contains(name) {
         return None;
     }
-
-    if let Some(name) = candidate.get("name").and_then(Value::as_str)
-        && allowed_names.contains(name)
-    {
-        let arguments = match candidate.get("arguments") {
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-            Some(v) => v.clone(),
-            None => json!({}),
-        };
-        let id = format!("scavenged_{call_index}");
-        *call_index += 1;
-        return Some(AgentToolCall {
-            id,
-            name: name.to_string(),
-            arguments,
-        });
-    }
-
-    if candidate.get("type").and_then(Value::as_str) == Some("function")
-        && let Some(func) = candidate.get("function")
-        && let Some(name) = func.get("name").and_then(Value::as_str)
-        && allowed_names.contains(name)
-    {
-        let arguments = match func.get("arguments") {
-            Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-            Some(v) => v.clone(),
-            None => json!({}),
-        };
-        let id = format!("scavenged_{call_index}");
-        *call_index += 1;
-        return Some(AgentToolCall {
-            id,
-            name: name.to_string(),
-            arguments,
-        });
-    }
-
-    None
+    let arguments = match call.get("arguments") {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+        Some(v) => v.clone(),
+        None => json!({}),
+    };
+    let id = format!("scavenged_{call_index}");
+    *call_index += 1;
+    Some(AgentToolCall {
+        id,
+        name: name.to_string(),
+        arguments,
+    })
 }
 
 fn iterate_json_objects(text: &str) -> impl Iterator<Item = Value> + '_ {
@@ -346,19 +329,14 @@ pub struct TruncationRepairResult {
 }
 
 pub fn repair_tool_call_arguments(call: &mut AgentToolCall) -> bool {
-    let args_str = if let Value::String(ref s) = call.arguments {
-        s.clone()
-    } else {
-        let s = call.arguments.to_string();
-        if s == "null" || s.is_empty() {
+    let args_str = match &call.arguments {
+        Value::String(s) => s.clone(),
+        Value::Null => {
             call.arguments = json!({});
             return true;
         }
-        s
+        _ => return false,
     };
-    if serde_json::from_str::<Value>(&args_str).is_ok() {
-        return false;
-    }
     let result = repair_truncated_json(&args_str);
     if result.changed {
         warn!(
@@ -386,13 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn strip_dsml_removes_pipe_envelope() {
-        let input = "Think\n<|DSML|function_calls>data</|DSML|function_calls>\nEnd";
-        let result = strip_dsml_from_thinking(input);
-        assert!(!result.contains("DSML"));
-    }
-
-    #[test]
     fn strip_dsml_truncates_lone_opener() {
         let input = "Reasoning<｜DSML｜more stuff here";
         let result = strip_dsml_from_thinking(input);
@@ -413,13 +384,14 @@ mod tests {
         let text = r#"<｜DSML｜invoke name="read_file">
 <｜DSML｜parameter name="path">/tmp/test.txt</｜DSML｜parameter>
 </｜DSML｜invoke>"#;
-        let mut allowed = HashSet::new();
-        allowed.insert("read_file".to_string());
-        let calls = scavenge_dsml_tool_calls(text, &allowed, 4);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read_file");
-        assert_eq!(calls[0].arguments["path"], "/tmp/test.txt");
-        assert!(calls[0].id.starts_with("scavenged_"));
+        let allowed = HashSet::from(["read_file".to_string()]);
+        for text in [text.to_owned(), text.replace('｜', "|")] {
+            let calls = scavenge_dsml_tool_calls(&text, &allowed, 4);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "read_file");
+            assert_eq!(calls[0].arguments["path"], "/tmp/test.txt");
+            assert!(calls[0].id.starts_with("scavenged_"));
+        }
     }
 
     #[test]
@@ -557,18 +529,6 @@ Now I will proceed."#;
         assert!(!result.contains("DSML"));
         assert!(result.contains("Think"));
         assert!(result.contains("End"));
-    }
-
-    #[test]
-    fn scavenge_dsml_invoke_with_ascii_pipe() {
-        let text = r#"<|DSML|invoke name="read_file">
-<|DSML|parameter name="path">/tmp/test.txt</|DSML|parameter>
-</|DSML|invoke>"#;
-        let mut allowed = HashSet::new();
-        allowed.insert("read_file".to_string());
-        let calls = scavenge_dsml_tool_calls(text, &allowed, 4);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read_file");
     }
 
     #[test]

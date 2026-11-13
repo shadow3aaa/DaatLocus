@@ -25,9 +25,12 @@ export type ActorConfig = {
   model: string | null;
   instructions: string;
 };
+export type ActorRole = "session" | "worker";
 export type ActorSummary = {
   id: string;
   parent_id?: string | null;
+  session_id: string;
+  role: ActorRole;
   conversation_url: string;
   name: string;
   status: ActorStatus;
@@ -40,17 +43,27 @@ export type ActorDetail = {
   model_ready?: boolean;
   id: string;
   parent_id?: string | null;
+  session_id: string;
+  role: ActorRole;
   conversation_url: string;
   config?: ActorConfig;
   name?: string;
   status: ActorStatus;
   created_at_ms: number;
   updated_at_ms: number;
-  access?: {
-    view: boolean;
-    converse: boolean;
-    manage?: boolean;
-  };
+};
+export type SessionStatus = "idle" | "running" | "archived";
+export type SessionSummary = {
+  id: string;
+  stage_id: string;
+  title: string | null;
+  status: SessionStatus;
+  working_actors: number;
+  model: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  last_activity_at_ms: number;
+  conversation_url: string;
 };
 export const actorModelReady = (actor: ActorDetail | null, localReady: boolean): boolean =>
   actor?.remote ? actor.model_ready ?? true : localReady;
@@ -154,8 +167,11 @@ export type ApprovalRecord = {
   resolved_at_ms: number | null;
 };
 export type ActorEvent = {
-  type: "conversation_restored";
-  archive_id: string;
+  type: "session_changed";
+  session: SessionSummary;
+} | {
+  type: "session_deleted";
+  session_id: string;
 } | {
   type: "actor_changed";
   actor: ActorSummary;
@@ -252,6 +268,7 @@ export type ModelConfig = {
   effective_context_window_percent?: number | null;
   tool_output_max_tokens?: number | null;
   api_style?: string | null;
+  native_web_search?: boolean | null;
 };
 export type SetupConfigRequest = {
   locale?: string | null;
@@ -294,8 +311,11 @@ export class ActorApiError extends Error {
   constructor(message: string, public readonly status: number, public readonly code = "request_failed", public readonly retryAfterMs?: number) { super(message); this.name = "ActorApiError"; }
 }
 const segment = (value: string) => encodeURIComponent(value);
-const actorPath = (id: string) => { const remote = /^([0-9a-f-]{36})~([a-zA-Z0-9_-]+)$/.exec(id); return remote ? `/v1/stages/${remote[1]}/actors/${remote[2]}` : `/v1/actors/${segment(id)}`; };
-function query(path: string, values: Record<string, string | number | boolean | null | undefined>) {
+/** Remote ids are `{stage}~{id}` and route through that device's authenticated proxy. */
+export const scopedPath = (collection: "actors" | "sessions", id: string) => { const remote = /^([0-9a-f-]{36})~([a-zA-Z0-9_-]+)$/.exec(id); return remote ? `/v1/stages/${remote[1]}/${collection}/${remote[2]}` : `/v1/${collection}/${segment(id)}`; };
+const actorPath = (id: string) => scopedPath("actors", id);
+export const sessionPath = (id: string) => scopedPath("sessions", id);
+export function query(path: string, values: Record<string, string | number | boolean | null | undefined>) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values))
     if (value !== null && value !== undefined)
@@ -343,7 +363,8 @@ export const logoutSession = (options?: FetchOptions) => request<void>("/v1/acco
 export const listActors = (options: FetchOptions & {
   after?: string;
   limit?: number;
-} = {}) => request<Page<ActorSummary, string>>(query("/v1/actors", { after: options.after, limit: options.limit ?? 50 }), options);
+  session?: string;
+} = {}) => request<Page<ActorSummary, string>>(query("/v1/actors", { session: options.session, after: options.after, limit: options.limit ?? 50 }), options);
 export type TokenUsage = {
   input_tokens: number;
   cached_input_tokens: number;
@@ -375,11 +396,11 @@ export const listMessages = (actor: string, options: FetchOptions & {
   limit?: number;
 } = {}) => request<ConversationPage>(query(`${actorPath(actor)}/messages`, { before: options.before, limit: options.limit ?? 30 }), options);
 export const getMessage = (actor: string, id: string, options?: FetchOptions) => request<MessageRecord>(`${actorPath(actor)}/messages/${segment(id)}`, options);
-export const sendCoreMessage = (input: {
+export const sendSessionMessage = (session: string, input: {
   content: string;
   attachments: string[];
   skills?: SkillReference[];
-}, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>("/v1/core/messages", { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
+}, idempotencyKey: string, options?: FetchOptions) => request<MessageRecord>(`${sessionPath(session)}/messages`, { ...options, method: "POST", body: input, headers: { "Idempotency-Key": idempotencyKey } });
 export const listMessageActivity = (actor: string, message: string, options: FetchOptions & { after?: number; limit?: number } = {}) => request<Page<EventRecord>>(query(`${actorPath(actor)}/messages/${segment(message)}/activity`, { after: options.after, limit: options.limit ?? 100 }), options);
 export const validateAttachment = async (actor: string, item: Attachment, options?: FetchOptions) => {
   const uri = resourceUrl(actor, item.id);
@@ -403,11 +424,11 @@ export const listApprovals = (actor?: string, options: FetchOptions & {
 } = {}) => request<Page<ApprovalRecord>>(query(actor ? `${actorPath(actor)}/approvals` : "/v1/approvals", { before: options.before, limit: options.limit ?? 30 }), options);
 export const getApproval = (id: string, actor?: string, options?: FetchOptions) => request<ApprovalRecord>(`${actor ? `${actorPath(actor)}/approvals` : "/v1/approvals"}/${segment(id)}`, options);
 export const resourceUrl = (actor: string, resource: string) => `${actorPath(actor)}/resources/${segment(resource)}`;
-export const uploadAttachment = (file: File, options?: FetchOptions) => {
+export const uploadSessionAttachment = (session: string, file: File, options?: FetchOptions) => {
   const maximum = file.type.startsWith("image/") ? 10 * 1024 * 1024 : 32 * 1024 * 1024;
   if (!file.size || file.size > maximum)
     return Promise.reject(new ActorApiError(apiErrorText("payload_too_large"), 413, "payload_too_large"));
-  return request<Attachment>("/v1/core/attachments", { ...options, method: "POST", raw: file, headers: { "X-File-Name": encodeURIComponent(file.name), "X-File-Name-Encoding": "utf-8-percent", "Content-Type": file.type || "application/octet-stream" } });
+  return request<Attachment>(`${sessionPath(session)}/attachments`, { ...options, method: "POST", raw: file, headers: { "X-File-Name": encodeURIComponent(file.name), "X-File-Name-Encoding": "utf-8-percent", "Content-Type": file.type || "application/octet-stream" } });
 };
 export const getConfig = (options?: FetchOptions) => request<SetupConfigRequest>("/v1/config", options);
 export const getConfigReadiness = (options?: FetchOptions) => request<ConfigReadiness>("/v1/config/readiness", options);
@@ -421,4 +442,4 @@ export const runProviderAuth = (provider: ProviderConfig, options?: FetchOptions
 export const startProviderAuth = (provider: ProviderConfig, options?: FetchOptions) => request<ProviderAuthStart>("/v1/config/auth/start", { ...options, method: "POST", body: { provider: providerInput(provider) } });
 export const completeProviderAuth = (provider: ProviderConfig, flowId: string, options?: FetchOptions) => request<ProviderAuthResponse>("/v1/config/auth/complete", { ...options, method: "POST", body: { provider: providerInput(provider), flow_id: flowId } });
 export const subscribeActorEvents = (actor: string, options: StreamOptions) => subscribe(`${actorPath(actor)}/event-stream`, options);
-export const subscribeCatalogEvents = (options: StreamOptions) => subscribe("/v1/event-stream", options);
+export const subscribeCatalogEvents = (options: StreamOptions, stage?: string) => subscribe(stage ? `/v1/stages/${segment(stage)}/event-stream` : "/v1/event-stream", options);

@@ -153,6 +153,11 @@ impl<'a> Deliveries<'a> {
         };
         let origin = if let Some(request) = request {
             Origin::Actor {
+                session_id: source.session_id.clone(),
+                session_host: self
+                    .store
+                    .stage_transaction(|tx| super::session::address(tx, source, self.local))?
+                    .stage_id,
                 actor: ActorAddress {
                     stage_id: self.local,
                     actor_id: source.id.clone(),

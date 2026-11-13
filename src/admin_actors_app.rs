@@ -27,8 +27,10 @@ impl AdminActorsApp {
             .actor_call
             .as_ref()
             .ok_or_else(|| miette!("Actor call context is required"))?;
-        self.system
-            .record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let actor = self.system.record_for_tool(&caller.actor_id, caller)?;
+        if actor.role != crate::actors::ActorRole::Session {
+            return Err(miette!("Administration requires the session Core"));
+        }
         let input = self.system.store().message(&caller.message_id)?;
         if crate::conversation_import::is_import(&input) {
             return Err(miette!("Conversation import cannot administer Actors"));
@@ -105,25 +107,70 @@ impl App for AdminActorsApp {
                     AppealDecision::Approve => crate::actors::ApprovalDecision::Approved,
                     AppealDecision::Deny => crate::actors::ApprovalDecision::Denied,
                 };
-                let record = if let Some(core) = self.system.shared_core() {
-                    core.resolve_approval_appeal(
+                let target = self.system.approval_stage(args.stage_id.as_deref())?;
+                let record = if target
+                    != self
+                        .system
+                        .store()
+                        .public_stage_id()
+                        .map_err(|e| miette!("{e}"))?
+                {
+                    use crate::stage::session::{Operation, execute};
+                    let value = execute(
+                        &self.system,
                         caller,
-                        self.system.approval_stage(args.stage_id.as_deref())?,
-                        args.approval_id,
-                        decision,
-                        args.reason,
+                        args.stage_id.as_deref(),
+                        Operation::AppealRead {
+                            id: args.approval_id,
+                        },
                     )
                     .await
-                    .map_err(|error| miette!("{error}"))?
+                    .map_err(|e| miette!("{e}"))?;
+                    let record: crate::actors::ApprovalRecord =
+                        serde_json::from_value(value).into_diagnostic()?;
+                    let appeal = record
+                        .appeal
+                        .as_ref()
+                        .ok_or_else(|| miette!("Approval has no appeal"))?;
+                    let notice = self.system.store().message(&appeal.core_message_id)?;
+                    let facts: Value = serde_json::from_str(&notice.content).into_diagnostic()?;
+                    if notice.actor_id != caller.actor_id
+                        || facts["approval_id"] != record.id
+                        || facts["stage_id"] != json!(target)
+                    {
+                        return Err(miette!("Appeal belongs to another session or device"));
+                    }
+                    let input = self.system.store().message(&caller.message_id)?;
+                    if input.remote_authority.is_some() {
+                        return Err(miette!("Remote authority cannot resolve appeals"));
+                    }
+                    let authorization = crate::actors::ApprovalAppealAuthorization {
+                        approval_id: record.id.clone(),
+                        core_message_id: appeal.core_message_id.clone(),
+                        decision_message_id: caller.message_id.clone(),
+                        owner_message_id: (input.source == crate::actors::MessageSource::User)
+                            .then_some(input.id),
+                        scopes_digest: crate::actors::approval::scopes_digest(&record)?,
+                        decision,
+                        reason: self.system.safe_error(&args.reason),
+                    };
+                    serde_json::from_value(
+                        execute(
+                            &self.system,
+                            caller,
+                            args.stage_id.as_deref(),
+                            Operation::AppealApply { authorization },
+                        )
+                        .await
+                        .map_err(|e| miette!("{e}"))?,
+                    )
+                    .into_diagnostic()?
                 } else {
                     self.system.require_local_stage(args.stage_id.as_deref())?;
                     self.system
                         .resolve_appeal_from_core(caller, &args.approval_id, decision, &args.reason)
                         .await?
                 };
-                if record.source_actor(self.system.store())? == crate::stage::shared::ACTOR_ID {
-                    self.system.checkpoint_core().await?;
-                }
                 Ok(AppToolExecutionResult::new(
                     "Owner appeal decision recorded",
                     json!({"approval_id":record.id,"appeal":record.appeal,"effect_executed":false}),
@@ -133,6 +180,32 @@ impl App for AdminActorsApp {
             "archive" | "unarchive" => {
                 let args: ActorTargetArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                if crate::stage::session::target(&self.system, args.stage_id.as_deref())
+                    .map_err(|e| miette!("{e}"))?
+                    != self
+                        .system
+                        .store()
+                        .public_stage_id()
+                        .map_err(|e| miette!("{e}"))?
+                {
+                    let value = crate::stage::session::execute(
+                        &self.system,
+                        caller,
+                        args.stage_id.as_deref(),
+                        crate::stage::session::Operation::Admin {
+                            actor: args.actor_id,
+                            action: call.name.clone(),
+                            model: None,
+                        },
+                    )
+                    .await
+                    .map_err(|e| miette!("{e}"))?;
+                    return Ok(AppToolExecutionResult::new(
+                        "Actor archival updated",
+                        value,
+                        None,
+                    ));
+                }
                 self.system.require_local_stage(args.stage_id.as_deref())?;
                 let actor = self
                     .system
@@ -151,6 +224,28 @@ impl App for AdminActorsApp {
             "stop" => {
                 let args: ActorTargetArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                if crate::stage::session::target(&self.system, args.stage_id.as_deref())
+                    .map_err(|e| miette!("{e}"))?
+                    != self
+                        .system
+                        .store()
+                        .public_stage_id()
+                        .map_err(|e| miette!("{e}"))?
+                {
+                    let value = crate::stage::session::execute(
+                        &self.system,
+                        caller,
+                        args.stage_id.as_deref(),
+                        crate::stage::session::Operation::Admin {
+                            actor: args.actor_id,
+                            action: "stop".into(),
+                            model: None,
+                        },
+                    )
+                    .await
+                    .map_err(|e| miette!("{e}"))?;
+                    return Ok(AppToolExecutionResult::new("Actor stopped", value, None));
+                }
                 self.system.require_local_stage(args.stage_id.as_deref())?;
                 let cancelled_count = self.system.stop_from_core(&args.actor_id, caller).await?;
                 Ok(AppToolExecutionResult::new(
@@ -163,6 +258,32 @@ impl App for AdminActorsApp {
             "set_model" => {
                 let args: SetModelArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                if crate::stage::session::target(&self.system, args.stage_id.as_deref())
+                    .map_err(|e| miette!("{e}"))?
+                    != self
+                        .system
+                        .store()
+                        .public_stage_id()
+                        .map_err(|e| miette!("{e}"))?
+                {
+                    let value = crate::stage::session::execute(
+                        &self.system,
+                        caller,
+                        args.stage_id.as_deref(),
+                        crate::stage::session::Operation::Admin {
+                            actor: args.actor_id,
+                            action: "set_model".into(),
+                            model: args.model,
+                        },
+                    )
+                    .await
+                    .map_err(|e| miette!("{e}"))?;
+                    return Ok(AppToolExecutionResult::new(
+                        "Actor model updated",
+                        value,
+                        None,
+                    ));
+                }
                 self.system.require_local_stage(args.stage_id.as_deref())?;
                 let actor = self
                     .system

@@ -29,7 +29,7 @@ pub const DEVICE_APPS: &[&str] = &[
     #[cfg(any(windows, target_os = "macos", target_os = "android"))]
     "browser_use",
     "artifacts",
-    #[cfg(any(all(windows, target_arch = "x86_64"), target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     "computer_use",
     #[cfg(target_os = "android")]
     "phone_use",
@@ -57,12 +57,9 @@ pub(crate) fn core_app_names() -> Vec<String> {
         .into()
 }
 
-pub(crate) fn core_apps(system: &ActorSystem) -> Vec<Box<dyn App>> {
+pub(crate) fn core_apps(system: &ActorSystem, actor_id: &str) -> Vec<Box<dyn App>> {
     vec![
-        Box::new(ActorApp::new(
-            crate::stage::shared::ACTOR_ID.into(),
-            system.clone(),
-        )),
+        Box::new(ActorApp::new(actor_id.into(), system.clone())),
         Box::new(AdminActorsApp::new(system.clone())),
         Box::new(crate::super_skills_app::SuperSkillsApp::new(system.clone())),
     ]
@@ -99,8 +96,8 @@ pub fn create_apps(
     config: &Config,
 ) -> Result<AppManager> {
     validate_app_names(&actor.config.apps)?;
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        return AppManager::new(core_apps(&system));
+    if actor.role == crate::actors::ActorRole::Session {
+        return AppManager::new(core_apps(&system, &actor.id));
     }
     let state_dir = system.actor_state_dir(&actor.id);
     let mut apps: Vec<Box<dyn App>> = Vec::new();
@@ -139,12 +136,14 @@ pub fn create_apps(
                 vision_support(actor, config)?,
             )),
             "artifacts" => Box::new(ArtifactsApp::new(actor.id.clone(), system.clone())),
-            #[cfg(any(
-                all(windows, target_arch = "x86_64"),
-                target_os = "android",
-                target_os = "macos"
-            ))]
-            "computer_use" | "phone_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
+            #[cfg(target_os = "macos")]
+            "computer_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
+                actor.id.clone(),
+                system.clone(),
+                vision_support(actor, config)?,
+            )),
+            #[cfg(target_os = "android")]
+            "phone_use" => Box::new(crate::computer_use_app::ComputerUseApp::new(
                 actor.id.clone(),
                 system.clone(),
                 vision_support(actor, config)?,
@@ -171,6 +170,61 @@ pub fn create_apps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[cfg(any(windows, target_os = "macos", target_os = "android"))]
+    async fn desktop_platform_app_surface_keeps_browser_and_limits_gui_control_to_supported_hosts()
+    {
+        let dir = crate::sandbox::test_support::scoped_directory();
+        let system = ActorSystem::open(
+            dir.path().join("state"),
+            dir.path().join("workspace"),
+            Config::default(),
+        )
+        .await
+        .unwrap();
+        system.seed_test_actor("worker");
+        let actor = system.actor("worker").unwrap();
+        let mut config = system.config();
+        config.main_model = "fixture".into();
+        config.models.insert(
+            "fixture".into(),
+            crate::config::ModelConfig {
+                model_id: "fixture".into(),
+                supports_vision: Some(true),
+                ..Default::default()
+            },
+        );
+        let apps = create_apps(&actor, system.clone(), &config).unwrap();
+        let tools = apps.model_tool_specs().unwrap();
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name.starts_with("browser_use__"))
+        );
+        #[cfg(windows)]
+        {
+            assert!(
+                tools
+                    .iter()
+                    .all(|tool| !tool.name.starts_with("computer_use__")
+                        && !tool.name.starts_with("phone_use__"))
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name.starts_with("computer_use__"))
+        );
+        #[cfg(target_os = "android")]
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name.starts_with("phone_use__"))
+        );
+        system.shutdown().await;
+    }
+
     #[test]
     fn unknown_and_duplicate_app_configs_fail() {
         assert!(validate_app_names(&["unknown".into()]).is_err());
@@ -186,8 +240,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let core = system.actor(crate::stage::shared::ACTOR_ID).unwrap();
-        create_apps(&core, system.clone(), &system.config()).unwrap();
+        system.seed_test_actor("root");
+        let actor = system.actor("core").unwrap();
+        create_apps(&actor, system.clone(), &system.config()).unwrap();
         system.shutdown().await;
     }
 }

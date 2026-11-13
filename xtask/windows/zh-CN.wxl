@@ -18,27 +18,23 @@
   <String Id="AppDetail" Value="安装到你的账户下；如缺少 Microsoft Edge WebView2，也会一并安装。"/>
   <String Id="WorkspaceItem" Value="工作区分支"/>
   <String Id="WorkspaceDetail" Value="让 Actor 在项目的隔离副本中尝试修改。将安装已签名的 WinFsp 2.2 Beta 5 驱动（© Bill Zissimopoulos），并允许本机的 cmd 在网络文件夹中启动。"/>
-  <String Id="DisplayItem" Value="虚拟显示器"/>
-  <String Id="DisplayDetail" Value="让 Actor 在你无需盯着的屏幕上使用应用。将把 Daat Locus 的自签名证书添加到本机的「受信任的根证书颁发机构」和「受信任的发布者」。"/>
   <String Id="ItemReady" Value="已安装"/>
   <String Id="ItemApproval" Value="需要管理员授权"/>
-  <String Id="ApprovalNotice" Value="Windows 会请你授权一次驱动更改。需要重启时，安装器会先询问。"/>
-  <String Id="NoApprovalNotice" Value="其余组件均已就绪，无需管理员授权。"/>
+  <String Id="ApprovalNotice" Value="如果尚未安装 WinFsp，工作区支持需要管理员授权。"/>
   <String Id="InstallButton" Value="授权并安装"/>
-  <String Id="InstallOnlyButton" Value="安装"/>
   <String Id="ProgressHeading" Value="正在安装 Daat Locus"/>
-  <String Id="ProgressNotice" Value="如果 Windows 请求授权，请选择「是」以便安装驱动。完成前请保持此窗口开启。"/>
+  <String Id="ProgressNotice" Value="如果 Windows 请求授权，请批准安装 WinFsp。完成前请保持此窗口开启。"/>
   <String Id="ModifyHeading" Value="Daat Locus 已安装"/>
-  <String Id="ModifyNotice" Value="如果使用中出现问题，修复会重新安装应用及其驱动；更改驱动需要管理员授权。&#10;&#10;卸载会移除应用，保留你的数据和共用驱动。"/>
+  <String Id="ModifyNotice" Value="如果使用中出现问题，修复会重新安装应用及工作区支持；更改 WinFsp 可能需要管理员授权。&#10;&#10;卸载会移除应用，保留你的数据和共用的 WinFsp。"/>
   <String Id="Repair" Value="修复 Daat Locus"/>
   <String Id="Uninstall" Value="卸载 Daat Locus"/>
   <String Id="SuccessHeading" Value="Daat Locus 已准备就绪"/>
   <String Id="RepairSuccess" Value="修复完成"/>
   <String Id="LayoutSuccess" Value="安装文件已备妥"/>
   <String Id="UninstallSuccess" Value="已卸载 Daat Locus"/>
-  <String Id="SuccessNotice" Value="打开 Daat Locus 即可开始，之后也可以从开始菜单打开。"/>
-  <String Id="UninstallNotice" Value="你的数据和共用驱动仍保留在这台电脑上。"/>
-  <String Id="RestartNotice" Value="重启 Windows 以完成驱动更改。请先保存工作，然后立即重启或稍后重启。"/>
+  <String Id="SuccessNotice" Value="使用 GUI 工具前请注销并重新登录 Windows。现在即可打开 Daat Locus，也可从开始菜单打开。"/>
+  <String Id="UninstallNotice" Value="你的数据和共用的 WinFsp 仍保留在这台电脑上。"/>
+  <String Id="RestartNotice" Value="重启 Windows 以完成安装更改。请先保存工作，然后立即重启或稍后重启。"/>
   <String Id="Launch" Value="打开 Daat Locus(&amp;O)"/>
   <String Id="Restart" Value="立即重启(&amp;R)"/>
   <String Id="FailureHeading" Value="安装未能完成"/>

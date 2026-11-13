@@ -172,37 +172,6 @@ pub(crate) fn materialize(tx: &Transaction<'_>, actor: &str, reference: &BlobRef
         touch(tx, &reference.hash)?;
         return Ok(());
     }
-    let core: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_rows')",
-        [],
-        |r| r.get(0),
-    )?;
-    if actor == super::shared::ACTOR_ID && core {
-        let record: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT record FROM core_rows WHERE content_hash=?1",
-                [&reference.hash],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(record) = record {
-            if digest(&record) != reference.hash || record.len() as u64 != reference.size {
-                return Err(StageError::Conflict("Canonical content changed"));
-            }
-            put(tx, actor, &record)?;
-            return Ok(());
-        }
-    }
-    if actor == super::shared::ACTOR_ID {
-        let snapshots: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_snapshot_rows')",
-            [],
-            |r| r.get(0),
-        )?;
-        if snapshots && let Some(record)=tx.query_row("SELECT record FROM core_snapshot_rows WHERE json_extract(change,'$.content.hash')=?1 LIMIT 1",[&reference.hash],|r|r.get::<_,Vec<u8>>(0)).optional()? {
-            if digest(&record)!=reference.hash || record.len() as u64!=reference.size{return Err(StageError::Conflict("Snapshot content changed"));}put(tx,actor,&record)?;return Ok(());
-        }
-    }
     let resources: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='stage_resource_files')",
         [],

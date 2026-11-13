@@ -71,7 +71,7 @@ async fn model_preferences_switch_at_the_next_inference_without_restarting_work_
         dir.path().join("data"),
         dir.path().join("work"),
         config,
-        Arc::new(CoordinatorFactory {
+        Arc::new(ModelSwitchFactory {
             core: previous.clone(),
             worker: next.clone(),
         }),
@@ -82,12 +82,22 @@ async fn model_preferences_switch_at_the_next_inference_without_restarting_work_
     let before = system.actor("root").unwrap();
     let input = enqueue_root(&system, "Finish this exact request");
     previous.started.notified().await;
+    let core_input = system
+        .send_user("core", "Change the worker model".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
+    let caller = crate::app::ActorCallContext {
+        remote_read_only: false,
+        actor_id: "core".into(),
+        message_id: core_input.id,
+        device_policy: None,
+    };
     let invalid = system
-        .patch_owned_preferences("root", Some(Some("missing".into())))
+        .set_model_from_core("root", Some("missing".into()), &caller)
         .await;
     assert!(invalid.is_err());
     system
-        .patch_owned_preferences("root", Some(Some("worker".into())))
+        .set_model_from_core("root", Some("worker".into()), &caller)
         .await
         .unwrap();
     assert_eq!(
@@ -163,7 +173,7 @@ async fn instruction_edits_do_not_interrupt_inference_and_apply_to_the_next_mode
     let old = system.actor("root").unwrap();
     std::fs::write(old.config.workspace.join("check.txt"), "An existing file").unwrap();
     let input = system
-        .send_user("root", "Inspect the workspace".into(), vec![], None)
+        .test_actor_input("root", "Inspect the workspace".into(), vec![], None)
         .unwrap();
     provider.started.notified().await;
     let file = system
@@ -243,9 +253,8 @@ async fn approval_rejection_is_not_a_tool_or_input_failure() {
         .lock()
         .push_back(json!({"decision":"deny","reason":reason}));
     let (_dir, system) = runtime(provider.clone()).await;
-    system.install_local_core().unwrap();
     let input = system
-        .send_user("root", "Create the output".into(), vec![], None)
+        .test_actor_input("root", "Create the output".into(), vec![], None)
         .unwrap();
 
     let finished = wait_completed(&system, &input.id).await;
@@ -324,9 +333,8 @@ async fn filesystem_boundary_approval_resumes_original_call_without_a_model_retr
         .push_back(json!({"decision":"approve","reason":"Requested output"}));
     let (_dir, system) = runtime(provider.clone()).await;
     system.suspend_execution().await.unwrap();
-    system.install_local_core().unwrap();
     let task = system
-        .send_user("root", "Create the output".into(), vec![], None)
+        .test_actor_input("root", "Create the output".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     system
@@ -414,7 +422,7 @@ async fn images_from_any_app_expose_reusable_references_to_the_model() {
     )
     .unwrap();
     let input = system
-        .send_user("root", "Inspect the image".into(), vec![], None)
+        .test_actor_input("root", "Inspect the image".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &input.id).await.status,
@@ -461,7 +469,7 @@ async fn app_installation_refreshes_tools_between_protocol_groups_without_replay
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user("root", "Install the requested App".into(), vec![], None)
+        .test_actor_input("root", "Install the requested App".into(), vec![], None)
         .unwrap();
     let done = wait_completed(&system, &input.id).await;
     assert_eq!(done.status, MessageStatus::Completed);
@@ -530,7 +538,7 @@ async fn apps_manager_queries_and_refresh_preserve_installed_apps() {
     let (_dir, system) = runtime(provider).await;
 
     let input = system
-        .send_user("root", "Inspect available Apps".into(), vec![], None)
+        .test_actor_input("root", "Inspect available Apps".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &input.id).await.status,
@@ -582,7 +590,7 @@ async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Test the browser and record progress".into(),
             vec![],
@@ -668,14 +676,17 @@ async fn invalid_browser_arguments_do_not_abort_the_tool_group_or_input() {
     system.shutdown().await;
 }
 
-async fn wait_passivated(system: &ActorSystem) {
+async fn wait_idle(system: &ActorSystem) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while system.resident_workers() != 0 {
+        while system
+            .actor("root")
+            .is_ok_and(|actor| actor.status != ActorStatus::Idle)
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("Idle workers must release their App instances and registry entries");
+    .expect("Actor must settle at the idle boundary");
 }
 
 #[tokio::test]
@@ -686,6 +697,9 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
+    let mut root_config = system.actor("root").unwrap();
+    root_config.config.apps = vec!["files".into()];
+    system.store().save_actor(&root_config).unwrap();
     let root = system.actor("root").unwrap();
     for index in 0..64 {
         let mut config = root.config.clone();
@@ -695,13 +709,13 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
     assert_eq!(system.resident_workers(), 0);
     assert_eq!(system.store().actor_count().unwrap(), 66);
     let first = system
-        .send_user("root", "Remember this request".into(), vec![], None)
+        .test_actor_input("root", "Remember this request".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &first.id).await.status,
         MessageStatus::Completed
     );
-    wait_passivated(&system).await;
+    wait_idle(&system).await;
     let context = system.actor("root").unwrap().context;
     assert_eq!(system.store().actor_count().unwrap(), 66);
     assert_eq!(
@@ -709,13 +723,13 @@ async fn idle_actors_activate_on_demand_and_reload_durable_history() {
         Some("First")
     );
     let second = system
-        .send_user("root", "Continue".into(), vec![], None)
+        .test_actor_input("root", "Continue".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &second.id).await.status,
         MessageStatus::Completed
     );
-    wait_passivated(&system).await;
+    wait_idle(&system).await;
     {
         let requests = provider.requests.lock();
         assert_eq!(requests.len(), 2);
@@ -737,13 +751,16 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
     )]));
     let (_dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(1));
+    let mut root_config = system.actor("root").unwrap();
+    root_config.config.apps = vec!["files".into()];
+    system.store().save_actor(&root_config).unwrap();
     for round in 0..6 {
         let mut sends = tokio::task::JoinSet::new();
         for input in 0..4 {
             let system = system.clone();
             sends.spawn(async move {
                 system
-                    .send_user("root", format!("{round}/{input}"), vec![], None)
+                    .test_actor_input("root", format!("{round}/{input}"), vec![], None)
                     .unwrap()
             });
         }
@@ -770,7 +787,7 @@ async fn concurrent_wakes_execute_each_input_once_across_idle_retirement() {
                 1
             );
         }
-        wait_passivated(&system).await;
+        wait_idle(&system).await;
     }
     let messages = system.store().messages("root", None, 100).unwrap().items;
     assert_eq!(messages.len(), 24);
@@ -789,20 +806,23 @@ async fn reopening_starts_only_queued_actors_and_never_replays_completed_input()
     ]));
     let (dir, system) = runtime(provider.clone()).await;
     system.set_idle_timeout(Duration::from_millis(20));
+    let mut root_config = system.actor("root").unwrap();
+    root_config.config.apps = vec!["files".into()];
+    system.store().save_actor(&root_config).unwrap();
     let root = system.actor("root").unwrap();
     let mut config = root.config.clone();
     config.name = "Queued worker".into();
     let child = system.create_owned("root", config).unwrap();
     let first = system
-        .send_user("root", "First".into(), vec![], None)
+        .test_actor_input("root", "First".into(), vec![], None)
         .unwrap();
     wait_completed(&system, &first.id).await;
-    wait_passivated(&system).await;
+    wait_idle(&system).await;
     system.suspend_execution().await.unwrap();
     let queued = system
-        .send_user(&child.id, "Queued".into(), vec![], None)
+        .test_actor_input(&child.id, "Queued".into(), vec![], None)
         .unwrap();
-    assert_eq!(system.resident_workers(), 0);
+    assert_eq!(system.actor("root").unwrap().status, ActorStatus::Idle);
     system.shutdown().await;
     drop(system);
     let reopened = ActorSystem::open_with_factory(
@@ -840,7 +860,7 @@ async fn partial_answers_and_reasoning_continue_until_a_final_response() {
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user("root", "Finish the request".into(), vec![], None)
+        .test_actor_input("root", "Finish the request".into(), vec![], None)
         .unwrap();
     let completed = wait_completed(&system, &input.id).await;
     assert_eq!(completed.reply.as_deref(), Some("Final answer"));
@@ -869,7 +889,7 @@ async fn empty_model_responses_retry_inference_without_replaying_completed_tool_
     ]));
     let (_directory, system) = runtime(provider.clone()).await;
     let request = system
-        .send_user("root", "Complete the task".into(), vec![], None)
+        .test_actor_input("root", "Complete the task".into(), vec![], None)
         .unwrap();
     let done = wait_completed(&system, &request.id).await;
     assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
@@ -918,7 +938,7 @@ async fn empty_model_response_retry_exhaustion_is_a_model_failure_with_private_d
     ));
     let (_directory, system) = runtime(provider.clone()).await;
     let request = system
-        .send_user("root", "Complete the task".into(), vec![], None)
+        .test_actor_input("root", "Complete the task".into(), vec![], None)
         .unwrap();
     let done = wait_completed(&system, &request.id).await;
     assert_eq!(done.status, MessageStatus::Failed);
@@ -948,7 +968,7 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user("root", "Finish".into(), vec![], None)
+        .test_actor_input("root", "Finish".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &input.id).await.status,
@@ -965,7 +985,7 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
     ]));
     let (_dir, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user("root", "Retry".into(), vec![], None)
+        .test_actor_input("root", "Retry".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &input.id).await.reply.as_deref(),
@@ -986,7 +1006,7 @@ async fn empty_reasoning_has_a_fuse_and_transient_requests_can_reach_the_fifth_a
 async fn queued_inputs_and_actor_replies_survive_beyond_the_former_mailbox_quota() {
     let (_directory, system, _provider) = paused_runtime().await;
     let original = system
-        .send_user("root", "Coordinate work".into(), vec![], None)
+        .test_actor_input("root", "Coordinate work".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let child = system
@@ -998,7 +1018,7 @@ async fn queued_inputs_and_actor_replies_survive_beyond_the_former_mailbox_quota
     system.store().claim_next(&child.id).unwrap().unwrap();
     for index in 0..300 {
         system
-            .send_user("root", format!("Pending input {index}"), vec![], None)
+            .test_actor_input("root", format!("Pending input {index}"), vec![], None)
             .unwrap();
     }
     let progress = system
@@ -1072,7 +1092,7 @@ async fn actor_listing_spills_to_temporary_storage_without_failing_a_nearly_full
         })
         .unwrap();
     let request = system
-        .send_user("root", "Inspect the roster".into(), vec![], None)
+        .test_actor_input("root", "Inspect the roster".into(), vec![], None)
         .unwrap();
     let done = wait_completed(&system, &request.id).await;
     assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
@@ -1119,7 +1139,7 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
     assert!(bounded.contains(&resource.id));
     assert!(bounded.contains(&resource.uri("root")));
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             format!(
                 "Inspect {} and redact unused-test-key",
@@ -1181,7 +1201,7 @@ async fn complete_output_remains_readable_after_truncation_and_usage_and_diagnos
         original.as_bytes()
     );
     let input = system
-        .send_user("root", "Next".into(), vec![], None)
+        .test_actor_input("root", "Next".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &input.id).await.status,
@@ -1406,338 +1426,24 @@ impl ModelProvider for ReplayProvider {
 
 struct ReplayFactory(Arc<ReplayProvider>);
 
-#[tokio::test]
-#[ignore = "requires DAAT_LOCUS_TEST_RELAY with a WSS relay"]
-async fn public_account_connection_syncs_messages_and_model_configuration() {
-    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("daat_locus::stage=debug,daat_locus::accounts=debug,openraft=warn")
-            .with_test_writer()
-            .try_init();
-    }
-    use crate::stage::{connection::Route, host::Host, runtime::Runtime, shared};
-    let endpoint = std::env::var("DAAT_LOCUS_TEST_RELAY").unwrap();
-    let (_a_dir, a) = runtime(Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Public sync fixture reply",
-    )])))
-    .await;
-    let (_b_dir, b) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
-    let mut config = a.config();
-    config.models.get_mut("mock").unwrap().context_window_tokens = 123_456;
-    a.update_config(config).await.unwrap();
-    let a_host = Host::load(a.clone()).unwrap();
-    let b_host = Host::load(b.clone()).unwrap();
-    a_host.initialize(true).unwrap();
-    for host in [&a_host, &b_host] {
-        let mut settings = host.settings();
-        settings.mode = crate::stage::host::Connectivity::Relay;
-        settings.relay_origin = Some(endpoint.clone());
-
-        host.save_settings(settings).unwrap();
-    }
-    let a_runtime = Runtime::new(a_host.clone());
-    a_runtime.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !a_runtime.core.read().as_ref().unwrap().permitted() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let input = a
-        .send_user(
-            shared::ACTOR_ID,
-            "Message before public sync".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    let result = wait_completed(&a, &input.id).await;
-    assert_eq!(result.reply.as_deref(), Some("Public sync fixture reply"));
-    let join = b_host.initialize(false).unwrap();
-    let own = a_host.enrollment().unwrap();
-    b_host
-        .join(
-            a_host.enroll_authenticated_device(&join).unwrap(),
-            &own.root.group_id,
-        )
-        .unwrap();
-    let b_runtime = Runtime::new(b_host.clone());
-    b_runtime.start().await.unwrap();
-    let synced = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if b.store()
-                .message(&input.id)
-                .is_ok_and(|message| message.reply.as_deref() == Some("Public sync fixture reply"))
-                && b.config()
-                    .models
-                    .get("mock")
-                    .is_some_and(|model| model.context_window_tokens == 123_456)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    let a_state = a_runtime.state(b_host.local);
-    let b_state = b_runtime.state(a_host.local);
-    let errors = (
-        a_runtime.last_error(b_host.local),
-        b_runtime.last_error(a_host.local),
-    );
-    a_runtime.stop().await;
-    b_runtime.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-    assert!(
-        synced.is_ok()
-            && a_state.route == Some(Route::Relay)
-            && b_state.route == Some(Route::Relay),
-        "messages and configuration did not synchronize automatically over public relay: {a_state:?}, {b_state:?}, {errors:?}"
-    );
-}
 impl ModelFactory for ReplayFactory {
     fn build(&self, _: &str, _: &crate::config::Config) -> Result<Arc<dyn ModelProvider>> {
         Ok(self.0.clone())
     }
 }
 
-#[tokio::test]
-async fn single_device_account_actor_runs_without_cloud_services() {
-    use crate::stage::{host::Host, runtime::Runtime, shared};
-    let model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Local account execution completed.",
-    )]));
-    let (_directory, system) = runtime(model.clone()).await;
-    let host = Host::load(system.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let network = Runtime::new(host);
-    network.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(network.coordination.read().is_none());
-    assert!(network.core.read().is_none());
-    assert!(network.relay_tx.read().is_none());
-    let input = system
-        .send_user(shared::ACTOR_ID, "Work locally.".into(), vec![], None)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while system.store().message(&input.id).unwrap().status != MessageStatus::Completed {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        system.store().message(&input.id).unwrap().reply.as_deref(),
-        Some("Local account execution completed.")
-    );
-    assert_eq!(model.requests.lock().len(), 1);
-    network.stop().await;
-    system.shutdown().await;
+struct ModelSwitchFactory {
+    core: Arc<ReplayProvider>,
+    worker: Arc<ReplayProvider>,
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn single_device_configuration_updates_keep_local_readiness() {
-    use crate::stage::{host::Host, runtime::Runtime};
-    let model = Arc::new(ReplayProvider::new(vec![]));
-    let (_directory, system) = runtime(model.clone()).await;
-    let host = Host::load(system.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let network = Runtime::new(host);
-    network.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("single-device Core did not become ready");
-    let epoch = network.core_status().unwrap()["epoch"].clone();
-    let mut configuration = system.config();
-    configuration.models.get_mut("mock").unwrap().temperature = 0.4;
-    let alternate = configuration.models["mock"].clone();
-    configuration.models.insert("alternate".into(), alternate);
-    configuration.main_model = "alternate".into();
-    let persistent = configuration.clone();
-    let host = network.host.clone();
-    system
-        .update_config_with(configuration, async move {
-            host.configurations.publish(&host, &persistent)?;
-            Ok(())
+impl ModelFactory for ModelSwitchFactory {
+    fn build(&self, name: &str, _: &crate::config::Config) -> Result<Arc<dyn ModelProvider>> {
+        Ok(if name == "worker" {
+            self.worker.clone()
+        } else {
+            self.core.clone()
         })
-        .await
-        .unwrap();
-    let configured = network.core_status().unwrap();
-    let mut empty = system.config();
-    empty.models.clear();
-    empty.providers.clear();
-    empty.main_model.clear();
-    empty.approval_model = None;
-    system.update_config(empty).await.unwrap();
-    let unconfigured = network.core_status().unwrap();
-    network.stop().await;
-    system.shutdown().await;
-    assert_eq!(configured["ready"], true, "{configured}");
-    assert_eq!(configured["epoch"], epoch, "{configured}");
-    assert_eq!(unconfigured["model_ready"], false);
-    assert_eq!(unconfigured["ready"], false);
-    assert_eq!(unconfigured["synchronized"], true);
-    assert_eq!(unconfigured["state"], "model_required", "{unconfigured}");
-    assert!(model.requests.lock().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn single_device_core_resumes_after_foreground_suspend() {
-    use crate::stage::{host::Host, runtime::Runtime, shared};
-    let model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Resumed local execution.",
-    )]));
-    let (_directory, system) = runtime(model.clone()).await;
-    let host = Host::load(system.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let network = Runtime::new(host);
-    network.start().await.unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        while !system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let previous_epoch = network.core_status().unwrap()["epoch"].clone();
-        system.suspend_execution().await.unwrap();
-        // Local execution pauses immediately without acquiring a distributed lease.
-        while system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        system.resume_execution().await.unwrap();
-        network.connectivity_changed();
-        while !system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(network.core_status().unwrap()["epoch"], previous_epoch);
-        let input = system
-            .send_user(shared::ACTOR_ID, "Continue locally.".into(), vec![], None)
-            .unwrap();
-        while system.store().message(&input.id).unwrap().status != MessageStatus::Completed {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        system.store().message(&input.id).unwrap().reply
-    })
-    .await;
-    let status = network.core_status().unwrap();
-    network.stop().await;
-    system.shutdown().await;
-    assert_eq!(
-        outcome.unwrap_or_else(|_| panic!("Core did not resume: {status}")),
-        Some("Resumed local execution.".into())
-    );
-    assert_eq!(model.requests.lock().len(), 1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn switching_local_core_to_relay_preserves_existing_history_without_replay() {
-    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("daat_locus::stage=debug,openraft=warn")
-            .with_test_writer()
-            .try_init();
     }
-
-    use crate::stage::{
-        host::{Connectivity, Host},
-        runtime::Runtime,
-        shared,
-    };
-    let model = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "A result created before enabling relay.",
-    )]));
-    let (_a_dir, a) = runtime(model.clone()).await;
-    let host = Host::load(a.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let original_id = host.local;
-    let account = host.account_id().unwrap();
-    let network = Runtime::new(host.clone());
-    network.start().await.unwrap();
-    let input = a
-        .send_user(shared::ACTOR_ID, "Keep this history.".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        wait_completed(&a, &input.id).await.reply.as_deref(),
-        Some("A result created before enabling relay.")
-    );
-    let relay = crate::stage::test_relay::Relay::new().await;
-    let mut settings = host.settings();
-    settings.mode = Connectivity::Relay;
-    settings.relay_origin = Some(relay.endpoint.clone());
-    network.reconfigure(settings).await.unwrap();
-    crate::stage::test_relay::wait(|| a.core_permitted())
-        .await
-        .unwrap();
-    let mut local = host.settings();
-    local.mode = Connectivity::Local;
-    network.reconfigure(local).await.unwrap();
-    model
-        .replies
-        .lock()
-        .push_back(MockReply::Answer("A result between relay connections."));
-    let additional = a
-        .send_user(
-            shared::ACTOR_ID,
-            "Continue locally once more.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        wait_completed(&a, &additional.id).await.reply.as_deref(),
-        Some("A result between relay connections.")
-    );
-    let mut connected = host.settings();
-    connected.mode = Connectivity::Relay;
-    network.reconfigure(connected).await.unwrap();
-    assert_eq!(host.local, original_id);
-    assert_eq!(host.account_id().as_deref(), Some(account.as_str()));
-    let (_b_dir, b) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
-    let remote = Host::load(b.clone()).unwrap();
-    let request = remote.initialize(false).unwrap();
-    remote
-        .join(
-            fixture_enrollment(&host, &request, true, Default::default()).unwrap(),
-            &account,
-        )
-        .unwrap();
-    remote.discover_member(host.enrollment().unwrap()).unwrap();
-    let mut settings = remote.settings();
-    settings.mode = Connectivity::Relay;
-    settings.relay_origin = Some(relay.endpoint.clone());
-    settings.compute_priority = 200;
-    remote.save_settings(settings).unwrap();
-    let second = Runtime::new(remote);
-    second.start().await.unwrap();
-    crate::stage::test_relay::wait(|| {
-        b.store().message(&input.id).is_ok_and(|message| {
-            message.reply.as_deref() == Some("A result created before enabling relay.")
-        }) && b.store().message(&additional.id).is_ok_and(|message|message.reply.as_deref()==Some("A result between relay connections."))
-    })
-    .await
-    .unwrap_or_else(|error|panic!("{error}; source={:?}; target={:?}; source_link={:?}; target_link={:?}; source_error={:?}; target_error={:?}",network.core_status(),second.core_status(),network.state(second.host.local),second.state(network.host.local),network.last_error(second.host.local),second.last_error(network.host.local)));
-    assert_eq!(
-        model.requests.lock().len(),
-        2,
-        "enabling relay must not repeat a completed request"
-    );
-    let restarted = Host::load(a.clone()).unwrap();
-    assert_eq!(restarted.settings().mode, Connectivity::Relay);
-    assert_eq!(restarted.local, original_id);
-    second.stop().await;
-    network.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
 }
 
 async fn device_pair(
@@ -1758,12 +1464,6 @@ async fn device_pair(
 ) {
     let relay = crate::stage::test_relay::Relay::new().await;
     use crate::stage::{host::Host, ledger::StageLedger, runtime::Runtime};
-    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("daat_locus::stage=debug,openraft=warn")
-            .with_test_writer()
-            .try_init();
-    }
     let (a_dir, a) = runtime(model_a).await;
     let (b_dir, b) = runtime(model_b).await;
     let host_a = Host::load(a.clone()).unwrap();
@@ -1783,11 +1483,10 @@ async fn device_pair(
             chrono::Utc::now().timestamp_millis(),
         )
         .unwrap();
-    for (host, priority) in [(&host_a, 100), (&host_b, 200)] {
+    for host in [&host_a, &host_b] {
         let mut settings = host.settings();
         settings.mode = crate::stage::host::Connectivity::Relay;
         settings.relay_origin = Some(relay.endpoint.clone());
-        settings.compute_priority = priority;
         host.save_settings(settings).unwrap();
     }
     let net_a = Runtime::new(host_a);
@@ -1797,1335 +1496,18 @@ async fn device_pair(
     crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_a.core.read().as_ref().unwrap().permitted()
-            || !net_b.core.read().as_ref().unwrap().accepts_input()
-            || net_b.core.read().as_ref().unwrap().status()["synchronized"] != true
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("device pair did not synchronize");
     ((a_dir, a, net_a), (b_dir, b, net_b), relay)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_device_small_control_round_trip_uses_no_content_transfer() {
-    use crate::stage::{
-        core_wire::{Request, Response},
-        shared_store,
-    };
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) = device_pair(
-        Arc::new(ReplayProvider::new(vec![])),
-        Arc::new(ReplayProvider::new(vec![])),
-    )
-    .await;
-    assert!(net_b.handle(net_a.host.local).unwrap().packed_sync());
-    let request = Request::RecoveryStatus;
-    let hash = crate::stage::digest(&serde_json::to_vec(&request).unwrap());
-    let controller = net_b.core.read().as_ref().unwrap().clone();
-    let Response::RecoveryStatus { status } =
-        controller.request(net_a.host.local, request).await.unwrap()
-    else {
-        panic!("expected native control reply")
-    };
-    assert_eq!(status.head, shared_store::head(a.store()).unwrap());
-    let stored: bool = b
-        .store()
-        .stage_transaction(|tx| {
-            Ok(tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM stage_blobs WHERE hash=?1)",
-                [&hash],
-                |row| row.get(0),
-            )?)
-        })
+fn assert_shared_actor_instructions(prompt: &str) {
+    let instructions = include_str!("../prompts/actors.md")
+        .split("{{models}}")
+        .next()
         .unwrap();
-    assert!(
-        !stored,
-        "a tiny control request still incurred a persisted content upload"
-    );
-    net_b.stop().await;
-    net_a.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn messages_route_to_a_busy_worker_on_another_device() {
-    let core_gate = Arc::new(tokio::sync::Notify::new());
-    let worker_gate = Arc::new(tokio::sync::Notify::new());
-    let core_model = Arc::new(ReplayProvider::new(vec![]));
-    let worker_model = Arc::new(ReplayProvider::new(vec![
-        MockReply::Gated(
-            Box::new(MockReply::Answer("Remote task handled")),
-            worker_gate.clone(),
-        ),
-        MockReply::Answer("Remote guidance handled"),
-    ]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(core_model.clone(), worker_model.clone()).await;
-    core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"remote-delegation".into(), name:"actors__message".into(),
-            arguments:json!({"reply_to":null,"stage_id":net_b.host.local,"actor_id":"root","content":"Original remote task"})}]),
-        MockReply::Gated(Box::new(MockReply::Calls(vec![AgentToolCall {id:"inspect-inbox".into(),name:"actors__list".into(),arguments:json!({"stage_id":null,"cursor":null,"limit":8})}])), core_gate.clone()),
-    ]);
-    let original = a
-        .send_user("core", "Delegate remotely".into(), vec![], None)
-        .unwrap();
-    let target = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if core_model.requests.lock().len() >= 2
-                && !worker_model.requests.lock().is_empty()
-                && let Some(target) = b
-                    .store()
-                    .messages("root", None, 10)
-                    .unwrap()
-                    .items
-                    .into_iter()
-                    .find(|message| {
-                        message.status == MessageStatus::Running
-                            && message.content == "Original remote task"
-                    })
-            {
-                break target;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let epoch = net_a.core.read().as_ref().unwrap().epoch();
-    let policy = b.execution_actor(&target).unwrap().config;
-    core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"remote-guidance".into(),name:"actors__message".into(),
-            arguments:json!({"stage_id":net_b.host.local,"actor_id":"root","reply_to":target.id,"content":"REMOTE_CORE_GUIDANCE"})}]),
-        MockReply::Answer("Guidance sent"),
-        MockReply::PendingOnEveryRequest,
-    ]);
-    let update = a
-        .send_user(
-            "core",
-            "Add the new constraint to that task".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        a.store().message(&update.id).unwrap().status,
-        MessageStatus::Queued
-    );
-    assert_eq!(core_model.requests.lock().len(), 2);
-    core_gate.notify_one();
-    assert_eq!(wait_completed(&a, &update.id).await.reply, None);
-    assert_eq!(
-        wait_completed(&a, &original.id).await.reply.as_deref(),
-        Some("Guidance sent")
-    );
-    let guide = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(guide) = b
-                .store()
-                .messages("root", None, 10)
-                .unwrap()
-                .items
-                .into_iter()
-                .find(|message| message.content == "REMOTE_CORE_GUIDANCE")
-            {
-                break guide;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(guide.status, MessageStatus::Queued);
-    assert_eq!(worker_model.requests.lock().len(), 1);
-    worker_gate.notify_one();
-    assert_eq!(
-        wait_completed(&b, &target.id).await.reply.as_deref(),
-        Some("Remote task handled")
-    );
-    assert_eq!(
-        wait_completed(&b, &guide.id).await.reply.as_deref(),
-        Some("Remote guidance handled")
-    );
-    assert_eq!(guide.in_reply_to.as_deref(), Some(target.id.as_str()));
-    assert!(!worker_model.dropped.load(Ordering::Acquire));
-    assert!(worker_model.requests.lock()[1].messages.iter().any(|row| matches!(row,AgentMessage::User {content} if content.as_text().contains("REMOTE_CORE_GUIDANCE") && content.as_text().contains("Source: Actor core"))));
-    assert_eq!(b.execution_actor(&target).unwrap().config, policy);
-    let result = a
-        .store()
-        .tool_summaries("core", &original.id, None, 10)
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|tool| tool.call_id == "remote-guidance")
-        .unwrap();
-    assert!(result.error.is_none());
-    let outcome = result.outcome.as_ref().unwrap();
-    assert_eq!(outcome["stage_id"], net_b.host.local.to_string());
-    assert_eq!(outcome["reply_to"], target.id);
-    assert_eq!(outcome["sent_message"], json!(true));
-    let delegation = a
-        .store()
-        .tool_summaries("core", &original.id, None, 10)
-        .unwrap()
-        .items;
-    assert_eq!(
-        delegation[0].outcome.as_ref().unwrap()["sent_message"],
-        json!(true)
-    );
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    // The compatible coordination inputs settle together; delegated work remains independent.
-    assert_eq!(
-        a.store().message(&original.id).unwrap().status,
-        MessageStatus::Completed
-    );
-    net_a.stop().await;
-    net_b.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_core_creation_grants_initial_authorization_without_review_on_target_device() {
-    let core_model = Arc::new(ReplayProvider::new(vec![]));
-    let device_model = Arc::new(ReplayProvider::new(vec![]));
-    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
-        device_pair(core_model.clone(), device_model.clone()).await;
-
-    let baseline_a = a.store().sandbox_scopes().unwrap();
-    let baseline_b = b.store().sandbox_scopes().unwrap();
-    let workspace = b_dir.path().join("unapproved-project");
-    let additional = b_dir.path().join("additional-sources");
-    std::fs::create_dir(&workspace).unwrap();
-    std::fs::create_dir(&additional).unwrap();
-    let reason = "This reviewer must not be consulted for Core creation";
-    core_model
-        .review_replies
-        .lock()
-        .push_back(json!({"decision":"deny","reason":reason}));
-    core_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "create-on-b".into(),
-            name: "actors__create".into(),
-            arguments: json!({"stage_id":net_b.host.local,"name":"Unapproved project",
-                "workspace":workspace,"instructions":null,"model":"mock",
-                "initial_authorization":{"readable_roots":[additional],"writable_roots":[]}}),
-        }]),
-        MockReply::Answer("Permission decision received."),
-    ]);
-    let epoch = net_a.core.read().as_ref().unwrap().epoch();
-    let input = a
-        .send_user("core", "Create the project".into(), vec![], None)
-        .unwrap();
-    let finished = wait_completed(&a, &input.id).await;
-    assert_eq!(
-        finished.status,
-        MessageStatus::Completed,
-        "{:?}",
-        finished.error
-    );
-    assert!(finished.error.is_none());
-    let tools = a
-        .store()
-        .tool_summaries("core", &input.id, None, 10)
-        .unwrap()
-        .items;
-    assert_eq!(tools.len(), 1);
-    assert!(tools.iter().all(|tool| tool.error.is_none()));
-    assert!(
-        b.store()
-            .approvals(Some("core"), None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        b.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .any(|actor| actor.config.name == "Unapproved project")
-    );
-    assert_ne!(b.store().sandbox_scopes().unwrap(), baseline_b);
-    assert!(
-        b.store()
-            .sandbox_scopes()
-            .unwrap()
-            .iter()
-            .any(|scope| scope.path == workspace.canonicalize().unwrap())
-    );
-    assert_eq!(a.store().sandbox_scopes().unwrap(), baseline_a);
-    assert!(
-        b.store()
-            .sandbox_scopes()
-            .unwrap()
-            .iter()
-            .any(|scope| scope.path == additional.canonicalize().unwrap()
-                && !scope.write
-                && scope.recursive)
-    );
-    assert!(core_model.review_requests.lock().is_empty());
-    assert!(device_model.review_requests.lock().is_empty());
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    net_a.stop().await;
-    net_b.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_automatic_review_uses_busy_core_worker_without_moving_it_or_sharing_device_grants()
-{
-    let core_model = Arc::new(ReplayProvider::new(vec![MockReply::Pending]));
-    let device_model = Arc::new(ReplayProvider::new(vec![]));
-    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
-        device_pair(core_model.clone(), device_model.clone()).await;
-
-    let thinking = a
-        .send_user(
-            "core",
-            "Think while the other device works".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), core_model.started.notified())
-        .await
-        .unwrap();
-    let before_epoch = net_a.core.read().as_ref().unwrap().epoch();
-    let outside = b_dir.path().join("requested-output");
-    std::fs::create_dir(&outside).unwrap();
-    let target = outside.join("result.txt");
-    core_model
-        .review_replies
-        .lock()
-        .push_back(json!({"decision":"approve","reason":"Write the requested output folder"}));
-    device_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "write-on-device-b".into(),
-            name: "files__write_file".into(),
-            arguments: json!({"path":target,"content":"device B output"}),
-        }]),
-        MockReply::Answer("Output created"),
-    ]);
-    let request = b
-        .send_user(
-            "root",
-            "Create the requested output file".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    let finished = wait_completed(&b, &request.id).await;
-    assert_eq!(
-        finished.status,
-        MessageStatus::Completed,
-        "{:?}",
-        finished.error
-    );
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "device B output");
-    assert_eq!(core_model.review_requests.lock().len(), 1);
-    assert!(
-        device_model.review_requests.lock().is_empty(),
-        "the App device must not run the review model"
-    );
-    {
-        let reviews = core_model.review_requests.lock();
-        assert!(reviews[0].history_messages.is_empty());
-        let facts: serde_json::Value =
-            serde_json::from_str(&reviews[0].current_user_message).unwrap();
-        assert_eq!(
-            facts["application"]["task"],
-            b.store().message(&request.id).unwrap().content
-        );
-        assert_eq!(facts["source_call"]["arguments"]["path"], json!(target));
-    }
-    assert!(!b.store().sandbox_scopes().unwrap().is_empty());
-    assert!(
-        !a.store()
-            .sandbox_scopes()
-            .unwrap()
-            .iter()
-            .any(|scope| target.starts_with(&scope.path))
-    );
-    assert_eq!(
-        a.store().message(&thinking.id).unwrap().status,
-        MessageStatus::Running
-    );
-    assert_eq!(
-        core_model.requests.lock().len(),
-        1,
-        "review must not enter the Core inbox"
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let permitted = net_a.core.read().as_ref().unwrap().permitted();
-            if permitted {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the same Core worker must renew its healthy affinity after review");
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), before_epoch);
-    assert!(!net_b.core.read().as_ref().unwrap().permitted());
-    device_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "read-after-grant".into(),
-            name: "files__read_file".into(),
-            arguments: json!({"path":target,"start_line":null,"line_count":null}),
-        }]),
-        MockReply::Answer("Read through remembered permission"),
-    ]);
-    let repeat = b
-        .send_user("root", "Read the output again".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        wait_completed(&b, &repeat.id).await.status,
-        MessageStatus::Completed
-    );
-    let tool = b
-        .store()
-        .tool_summaries("root", &repeat.id, None, 10)
-        .unwrap()
-        .items
-        .pop()
-        .unwrap();
-    assert_eq!(
-        b.store().tool_result(&tool.id).unwrap().payload["content"],
-        "device B output"
-    );
-    assert_eq!(
-        core_model.review_requests.lock().len(),
-        1,
-        "remembered permissions must not invoke the account reviewer again"
-    );
-    net_b.stop_abruptly().await;
-    net_a.stop_abruptly().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unresponsive_learner_does_not_block_the_existing_worker_renewal_or_inbox() {
-    use crate::stage::shared;
-    let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "The worker remained usable.",
-    )]));
-    let model_b = Arc::new(ReplayProvider::new(vec![]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(model_a.clone(), model_b).await;
-    let coordinator = net_b.coordination.read().clone().unwrap();
-    coordinator.stop().await;
-    let core = net_a.core.read().clone().unwrap();
-    for _ in 0..35 {
-        assert!(
-            core.permitted(),
-            "a lagging learner interrupted a healthy worker"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    let input = a
-        .send_user(
-            shared::ACTOR_ID,
-            "Work while the replica cannot acknowledge.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        wait_completed(&a, &input.id).await.reply.as_deref(),
-        Some("The worker remained usable.")
-    );
-    assert_eq!(model_a.requests.lock().len(), 1);
-    net_b.stop_abruptly().await;
-    net_a.stop_abruptly().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_device_graceful_exit_transfers_authority_and_keeps_the_remaining_device_usable() {
-    use crate::stage::{shared, shared_store};
-    let model_a = Arc::new(ReplayProvider::new(vec![]));
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Continued after the other device exited.",
-    )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(model_a, model_b.clone()).await;
-    assert_eq!(
-        net_b.voting_member(net_b.host.local),
-        Some(false),
-        "joining must not add a voting dependency"
-    );
-    net_a.stop().await;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_b.core.read().as_ref().unwrap().permitted() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("remaining device did not become ready");
-    assert_eq!(
-        net_b.voting_member(net_b.host.local),
-        Some(true),
-        "graceful handoff must commit real membership"
-    );
-    assert!(
-        crate::stage::recovery::branch(b.store()).unwrap().is_none(),
-        "normal handoff must not need an isolated branch"
-    );
-    let input = b
-        .send_user(shared::ACTOR_ID, "Continue here.".into(), vec![], None)
-        .unwrap();
-    let completed = wait_completed(&b, &input.id).await;
-    assert_eq!(
-        completed.reply.as_deref(),
-        Some("Continued after the other device exited."),
-        "{:?}",
-        completed.error
-    );
-    assert!(shared_store::head(b.store()).unwrap().sequence > 0);
-    assert_eq!(model_b.requests.lock().len(), 1);
-    net_b.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_device_abrupt_loss_runs_locally_and_reconnects_without_repeating_completed_work() {
-    use crate::stage::{shared, shared_store};
-    let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Before disconnection.",
-    )]));
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Completed while disconnected.",
-    )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(model_a.clone(), model_b.clone()).await;
-    let first = a
-        .send_user(
-            shared::ACTOR_ID,
-            "Remember this conversation.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    let completed = wait_completed(&a, &first.id).await;
-    assert_eq!(
-        completed.reply.as_deref(),
-        Some("Before disconnection."),
-        "{:?}",
-        completed.error
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
-            || !b
-                .store()
-                .message(&first.id)
-                .is_ok_and(|message| message.status == MessageStatus::Completed)
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    net_a.stop_abruptly().await;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_b.core.read().as_ref().unwrap().permitted() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("local recovery did not start");
-    assert_eq!(
-        net_b.core.read().as_ref().unwrap().status()["state"],
-        "local_recovery"
-    );
-    assert_eq!(
-        net_b.voting_member(net_b.host.local),
-        Some(false),
-        "local recovery must not invent a Raft voter"
-    );
-    let second = b
-        .send_user(
-            shared::ACTOR_ID,
-            "Work without the other device.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    assert_eq!(
-        wait_completed(&b, &second.id).await.reply.as_deref(),
-        Some("Completed while disconnected.")
-    );
-    net_a.start().await.unwrap();
-    crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
-            || crate::stage::recovery::branch(b.store()).unwrap().is_some()
-            || !net_a.core.read().as_ref().unwrap().accepts_input()
-            || !net_b.core.read().as_ref().unwrap().accepts_input()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("recovered branch did not rejoin");
-    assert_eq!(
-        a.store().message(&second.id).unwrap().reply.as_deref(),
-        Some("Completed while disconnected.")
-    );
-    assert_eq!(model_a.requests.lock().len(), 1);
-    assert_eq!(model_b.requests.lock().len(), 1);
-    net_b.stop().await;
-    net_a.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn connected_learners_continue_after_authority_loss_and_rejoin_without_replaying_work() {
-    use crate::stage::{host::Host, recovery, runtime::Runtime, shared, shared_store};
-    let model_a = Arc::new(ReplayProvider::new(vec![]));
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "The first surviving replica completed its request.",
-    )]));
-    let model_c = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "The second surviving replica completed its request.",
-    )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(model_a.clone(), model_b.clone()).await;
-    let (_c_dir, c) = runtime(model_c.clone()).await;
-    let host_c = Host::load(c.clone()).unwrap();
-    let enrollment_request = host_c.initialize(false).unwrap();
-    host_c
-        .join(
-            fixture_enrollment(&net_a.host, &enrollment_request, true, Default::default()).unwrap(),
-            &net_a.host.account_id().unwrap(),
-        )
-        .unwrap();
-    host_c
-        .discover_member(net_a.host.enrollment().unwrap())
-        .unwrap();
-    host_c
-        .discover_member(net_b.host.enrollment().unwrap())
-        .unwrap();
-    for host in [&net_a.host, &net_b.host] {
-        host.discover_member(host_c.enrollment().unwrap()).unwrap();
-    }
-    let mut settings = host_c.settings();
-    settings.mode = crate::stage::host::Connectivity::Relay;
-    settings.relay_origin = net_a.host.settings().relay_origin;
-    settings.compute_priority = 300;
-    host_c.save_settings(settings).unwrap();
-    let net_c = Runtime::new(host_c);
-    net_c.start().await.unwrap();
-    crate::stage::test_relay::wait(|| net_c.handle(net_a.host.local).is_ok())
-        .await
-        .unwrap();
-    crate::stage::test_relay::wait(|| net_c.handle(net_b.host.local).is_ok())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_c.core.read().as_ref().unwrap().accepts_input()
-            || !net_b.connected(net_c.host.local)
-            || !recovery::synchronized(c.store()).unwrap()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("third replica did not synchronize");
-    net_a.stop_abruptly().await;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_b.core.read().as_ref().unwrap().permitted()
-            || !net_c.core.read().as_ref().unwrap().permitted()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("connected learners waited indefinitely for the lost authority");
-    assert!(net_b.connected(net_c.host.local));
-    assert!(net_c.connected(net_b.host.local));
-    for network in [&net_b, &net_c] {
-        assert_eq!(network.voting_member(network.host.local), Some(false));
-        assert_eq!(
-            network.core.read().as_ref().unwrap().status()["state"],
-            "local_recovery"
-        );
-    }
-    for (system, reply) in [
-        (&b, "The first surviving replica completed its request."),
-        (&c, "The second surviving replica completed its request."),
-    ] {
-        let input = system
-            .send_user(shared::ACTOR_ID, "Continue here.".into(), vec![], None)
-            .unwrap();
-        assert_eq!(
-            wait_completed(system, &input.id).await.reply.as_deref(),
-            Some(reply)
-        );
-    }
-    net_a.start().await.unwrap();
-    for network in [&net_b, &net_c] {
-        crate::stage::test_relay::wait(|| network.handle(net_a.host.local).is_ok())
-            .await
-            .unwrap();
-    }
-    let reconciled = tokio::time::timeout(Duration::from_secs(30), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
-            || shared_store::head(a.store()).unwrap() != shared_store::head(c.store()).unwrap()
-            || recovery::branch(b.store()).unwrap().is_some()
-            || recovery::branch(c.store()).unwrap().is_some()
-            || !net_b.core.read().as_ref().unwrap().accepts_input()
-            || !net_c.core.read().as_ref().unwrap().accepts_input()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-    assert!(
-        reconciled.is_ok(),
-        "surviving replica branches did not reconcile: a={} b={} c={}, heads={:?}, branches={:?}",
-        net_a.core.read().as_ref().unwrap().status(),
-        net_b.core.read().as_ref().unwrap().status(),
-        net_c.core.read().as_ref().unwrap().status(),
-        [&a, &b, &c].map(|system| shared_store::head(system.store()).unwrap()),
-        [&a, &b, &c].map(|system| recovery::branch(system.store()).unwrap())
-    );
-    for system in [&a, &b, &c] {
-        let replies = system
-            .store()
-            .messages(shared::ACTOR_ID, None, 100)
-            .unwrap()
-            .items
-            .into_iter()
-            .filter_map(|message| message.reply)
-            .collect::<std::collections::HashSet<_>>();
-        assert!(replies.contains("The first surviving replica completed its request."));
-        assert!(replies.contains("The second surviving replica completed its request."));
-        assert!(!recovery::archives_pending(system.store()).unwrap());
-    }
-    assert!(model_a.requests.lock().is_empty());
-    assert_eq!(model_b.requests.lock().len(), 1);
-    assert_eq!(model_c.requests.lock().len(), 1);
-    net_c.stop_abruptly().await;
-    net_b.stop_abruptly().await;
-    net_a.stop_abruptly().await;
-    for system in [&a, &b, &c] {
-        system.shutdown().await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_device_partition_preserves_both_branches_and_does_not_replay_the_losing_branch() {
-    use crate::stage::{recovery, shared, shared_store};
-    let model_a = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "The first offline outcome.",
-    )]));
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "The second offline outcome.",
-    )]));
-    let ((_a_dir, a, net_a), (_b_dir, b, net_b), _relay) =
-        device_pair(model_a.clone(), model_b.clone()).await;
-    _relay.isolate(net_a.host.local);
-    _relay.isolate(net_b.host.local);
-    net_a.disconnect_peers();
-    net_b.disconnect_peers();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !net_b.core.read().as_ref().unwrap().permitted() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let left = a
-        .send_user(
-            shared::ACTOR_ID,
-            "First offline request.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    let right = b
-        .send_user(
-            shared::ACTOR_ID,
-            "Second offline request.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    wait_completed(&a, &left.id).await;
-    wait_completed(&b, &right.id).await;
-    assert_ne!(
-        shared_store::head(a.store()).unwrap(),
-        shared_store::head(b.store()).unwrap()
-    );
-    _relay.allow(net_a.host.local);
-    _relay.allow(net_b.host.local);
-    crate::stage::test_relay::wait(|| net_b.handle(net_a.host.local).is_ok())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap()
-            || recovery::branch(b.store()).unwrap().is_some()
-            || !net_a.core.read().as_ref().unwrap().accepts_input()
-            || !net_b.core.read().as_ref().unwrap().accepts_input()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("partition branches did not reconcile");
-    for system in [&a, &b] {
-        let replies = system
-            .store()
-            .messages(shared::ACTOR_ID, None, 100)
-            .unwrap()
-            .items
-            .into_iter()
-            .filter_map(|message| message.reply)
-            .collect::<std::collections::HashSet<_>>();
-        assert!(replies.contains("The first offline outcome."));
-        assert!(replies.contains("The second offline outcome."));
-        assert!(!recovery::archives_pending(system.store()).unwrap());
-    }
-    assert_eq!(model_a.requests.lock().len(), 1);
-    assert_eq!(model_b.requests.lock().len(), 1);
-    assert!(
-        recovery::archive_count(a.store()).unwrap() + recovery::archive_count(b.store()).unwrap()
-            > 0
-    );
-    net_b.stop().await;
-    net_a.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-}
-
-// Each device has an independent multithreaded runtime in production. Keep
-// their heartbeats runnable while another device performs synchronous I/O.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn three_device_core_preserves_resources_context_and_effects_across_sequential_takeover() {
-    let relay = crate::stage::test_relay::Relay::new().await;
-    if std::env::var("DAAT_LOCUS_TEST_STAGE_TRACE").as_deref() == Ok("1") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                "daat_locus::stage=debug,daat_locus::actors::store=debug,openraft=info",
-            )
-            .with_test_writer()
-            .try_init();
-    }
-    use crate::stage::{host::Host, ledger::StageLedger, runtime::Runtime, shared, shared_store};
-    let model_a = Arc::new(ReplayProvider::new(vec![]));
-    let (_a_dir, a) = runtime(model_a.clone()).await;
-    let model_b = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Continued on the next device without repeating Actor creation.",
-    )]));
-    let (_b_dir, b) = runtime(model_b.clone()).await;
-    let model_c = Arc::new(ReplayProvider::new(vec![MockReply::Answer(
-        "Continued on the third device with the same account context.",
-    )]));
-    let (_c_dir, c) = runtime(model_c.clone()).await;
-    for system in [&a, &b, &c] {
-        let mut config = system.config();
-        config.models.get_mut("mock").unwrap().supports_vision = Some(true);
-        system.update_config(config).await.unwrap();
-    }
-    let host_c = Host::load(c.clone()).unwrap();
-    let host_a = Host::load(a.clone()).unwrap();
-    let host_b = Host::load(b.clone()).unwrap();
-    host_a.initialize(true).unwrap();
-    let request_b = host_b.initialize(false).unwrap();
-    let enrollment = fixture_enrollment(&host_a, &request_b, true, Default::default()).unwrap();
-    host_b
-        .join(enrollment, &host_a.account_id().unwrap())
-        .unwrap();
-    StageLedger::attach(b.store(), host_b.local)
-        .import_peer(
-            host_a.enrollment().unwrap(),
-            Default::default(),
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .unwrap();
-    let request_c = host_c.initialize(false).unwrap();
-    host_c
-        .join(
-            fixture_enrollment(&host_a, &request_c, true, Default::default()).unwrap(),
-            &host_a.account_id().unwrap(),
-        )
-        .unwrap();
-    host_b
-        .discover_member(host_c.enrollment().unwrap())
-        .unwrap();
-    host_c
-        .discover_member(host_b.enrollment().unwrap())
-        .unwrap();
-    for (host, priority) in [(&host_a, 100), (&host_b, 200), (&host_c, 300)] {
-        let mut settings = host.settings();
-        // All three devices reconnect through this isolated relay.
-
-        settings.compute_priority = priority;
-        settings.mode = crate::stage::host::Connectivity::Relay;
-        settings.relay_origin = Some(relay.endpoint.clone());
-        host.save_settings(settings).unwrap();
-    }
-    let net_a = Runtime::new(host_a.clone());
-    let net_b = Runtime::new(host_b.clone());
-    let net_c = Runtime::new(host_c.clone());
-    net_a.start().await.unwrap();
-    net_b.start().await.unwrap();
-    net_c.start().await.unwrap();
-    crate::stage::test_relay::wait(|| net_a.handle(host_b.local).is_ok())
-        .await
-        .unwrap();
-    crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok())
-        .await
-        .unwrap();
-    crate::stage::test_relay::wait(|| net_b.handle(host_c.local).is_ok())
-        .await
-        .unwrap();
-    for _ in 0..100 {
-        if net_a
-            .core
-            .read()
-            .as_ref()
-            .is_some_and(|core| core.permitted())
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        net_a.core.read().as_ref().unwrap().permitted(),
-        "initial worker was not acquired: a={} b={} c={}",
-        net_a.core.read().as_ref().unwrap().status(),
-        net_b.core.read().as_ref().unwrap().status(),
-        net_c.core.read().as_ref().unwrap().status()
-    );
-    let mut settings = host_b.settings();
-    settings.compute_priority = 0;
-    host_b.save_settings(settings).unwrap();
-    tokio::time::sleep(Duration::from_millis(2200)).await;
-    assert!(
-        net_a.core.read().as_ref().unwrap().permitted(),
-        "a healthy worker must retain affinity"
-    );
-    assert!(
-        !net_b.core.read().as_ref().unwrap().permitted(),
-        "higher priority must not preempt a healthy worker"
-    );
-    let constraints = a.actor(shared::ACTOR_ID).unwrap().config;
-    b.patch_owned_preferences(shared::ACTOR_ID, None)
-        .await
-        .unwrap();
-    let saved = a.actor(shared::ACTOR_ID).unwrap().config;
-    let expected = constraints;
-    assert_eq!(
-        saved, expected,
-        "shared mode preference must not rewrite creation constraints"
-    );
-    model_a.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "one-device-effect".into(), name: "actors__create".into(),
-            arguments: json!({"stage_id":host_b.local,"name":"Hosted project","workspace":null,"instructions":null,"model":"mock","initial_authorization":null}),
-        }]),
-        MockReply::Calls(vec![AgentToolCall {
-            id: "remote-image".into(), name: "actors__read_resource".into(),
-            arguments: json!({"resource_id":"remote-image","offset":null,"limit":1024,"region":null,"resolution":null}),
-        }]),
-        MockReply::PendingOnEveryRequest,
-    ]);
-    model_a.usage_bias.store(37, Ordering::Relaxed);
-    let image_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
-    let image = image_bytes.as_slice();
-    let image_path = b.actor_data_dir(shared::ACTOR_ID).join("inspect.png");
-    std::fs::write(&image_path, image).unwrap();
-    b.store()
-        .register_resource(super::super::StoredResource {
-            expires_at_ms: None,
-            id: "remote-image".into(),
-            actor_id: shared::ACTOR_ID.into(),
-            path: image_path,
-            name: "inspect.png".into(),
-            media_type: "image/png".into(),
-            size_bytes: image.len() as u64,
-            uri: "/v1/actors/core/resources/remote-image".into(),
-        })
-        .unwrap();
-    let attachment_path = b.actor_data_dir(shared::ACTOR_ID).join("fixture.txt");
-    std::fs::write(&attachment_path, b"cross device attachment").unwrap();
-    let attachment = super::super::Attachment {
-        id: "cross-device".into(),
-        name: "fixture.txt".into(),
-        media_type: "text/plain".into(),
-        size_bytes: 23,
-        uri: "/v1/actors/core/resources/cross-device".into(),
-    };
-    b.store()
-        .register_resource(super::super::StoredResource {
-            expires_at_ms: None,
-            id: attachment.id.clone(),
-            actor_id: shared::ACTOR_ID.into(),
-            path: attachment_path,
-            name: attachment.name.clone(),
-            media_type: attachment.media_type.clone(),
-            size_bytes: attachment.size_bytes,
-            uri: attachment.uri.clone(),
-        })
-        .unwrap();
-    // User input from a non-worker device joins the same serial inbox.
-    let input = b
-        .send_user(
-            shared::ACTOR_ID,
-            "Create a hosted project on B, then continue if this worker disconnects.".into(),
-            vec![attachment.clone()],
-            Some("shared-user-input".into()),
-        )
-        .unwrap();
-    for _ in 0..150 {
-        if model_a.requests.lock().len() >= 3 {
-            break;
-        }
-        if let Ok(state) = a.store().message(&input.id)
-            && state.status != MessageStatus::Running
-        {
-            assert!(
-                state.status == MessageStatus::Queued,
-                "before transfer: {:?} {:?}",
-                state.status,
-                state.error
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        b.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .any(|actor| actor.config.name == "Hosted project"),
-        "no effect: A {:?}, B {:?}, C {:?}, requests A {}, errors AB {:?} AC {:?} BC {:?}, message A {:?}, message B {:?}, tools A {:?}",
-        net_a.core.read().as_ref().unwrap().status(),
-        net_b.core.read().as_ref().unwrap().status(),
-        net_c.core.read().as_ref().unwrap().status(),
-        model_a.requests.lock().len(),
-        net_a.last_error(host_b.local),
-        net_a.last_error(host_c.local),
-        net_b.last_error(host_c.local),
-        a.store()
-            .message(&input.id)
-            .map(|message| (message.status, message.error)),
-        b.store()
-            .message(&input.id)
-            .map(|message| (message.status, message.error)),
-        a.store()
-            .tool_summaries(shared::ACTOR_ID, &input.id, None, 30)
-    );
-    let hosted = b
-        .store()
-        .actors()
-        .unwrap()
-        .into_iter()
-        .find(|actor| actor.config.name == "Hosted project")
-        .unwrap();
-    let address = crate::stage::ActorAddress {
-        stage_id: host_b.local,
-        actor_id: hosted.id.clone(),
-    };
-    let detail = crate::stage::observation::read(
-        &b,
-        host_c.local,
-        &address,
-        &crate::stage::observation::Query::Actor,
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .unwrap();
-    assert_eq!(
-        detail["access"]["manage"], true,
-        "a third account device can access the actual dispatched Actor"
-    );
-    assert_eq!(detail["conversation_url"], address.conversation_url());
-    let outcomes = a
-        .store()
-        .tool_summaries(shared::ACTOR_ID, &input.id, None, 30)
-        .unwrap();
-    let created = outcomes
-        .items
-        .iter()
-        .find(|tool| tool.name == "actors__create")
-        .unwrap();
-    assert_eq!(
-        created.outcome.as_ref().unwrap()["conversation_url"],
-        address.conversation_url()
-    );
-    assert_eq!(
-        b.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .filter(|actor| actor.config.name == "Hosted project")
-            .count(),
-        1
-    );
-    assert!(
-        !a.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .any(|actor| actor.config.name == "Hosted project")
-    );
-    // This includes replaying multiple journal pages and fetching resource
-    // bytes. Match the bounded convergence budget used after reconnection;
-    // the assertion checks replicated state, not a 10-second performance SLA.
-    let synchronized = tokio::time::timeout(Duration::from_secs(30), async {
-        while shared_store::head(a.store()).unwrap() != shared_store::head(b.store()).unwrap() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-    assert!(
-        synchronized.is_ok(),
-        "checkpoint did not replicate: head A {:?}, head B {:?}, A {}, B {}, AB {:?}, BA {:?}",
-        shared_store::head(a.store()).unwrap(),
-        shared_store::head(b.store()).unwrap(),
-        net_a.core.read().as_ref().unwrap().status(),
-        net_b.core.read().as_ref().unwrap().status(),
-        net_a.last_error(host_b.local),
-        net_b.last_error(host_a.local),
-    );
-    let guidance = b
-        .send_user(
-            shared::ACTOR_ID,
-            "Keep the original request and answer in Chinese.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while a.store().message(&guidance.id).is_err() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!model_a.requests.lock().iter().any(|request| request.messages.iter().any(|message| matches!(message,
-        AgentMessage::User { content } if content.as_text().contains("Keep the original request and answer in Chinese.")
-    ))));
-    let original = a.store().message(&input.id).unwrap();
-    assert_eq!(original.status, MessageStatus::Running);
-    assert!(original.reply.is_none());
-    assert!(original.error.is_none());
-    let active = a.store().message(&guidance.id).unwrap();
-    assert_eq!(active.status, MessageStatus::Queued);
-    assert_eq!(active.kind, MessageKind::Request);
-    assert!(!model_a.dropped.load(Ordering::Acquire));
-    net_a.stop().await;
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let input = b.store().message(&guidance.id).unwrap();
-            if input.status == MessageStatus::Completed {
-                break input;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(result.reply, None);
-    assert!(model_a.dropped.load(Ordering::Acquire));
-    assert_eq!(
-        model_a.pending.load(Ordering::Acquire),
-        0,
-        "the retired worker must not retain pending inference"
-    );
-    // The compatible incoming instruction and original request finish together.
-    let retained = wait_core_completed(&b, &input.id).await;
-    assert_eq!(model_b.requests.lock().len(), 1);
-    assert_eq!(retained.status, MessageStatus::Completed);
-    assert_eq!(
-        retained.reply.as_deref(),
-        Some("Continued on the next device without repeating Actor creation.")
-    );
-    for request in model_b.requests.lock().iter() {
-        assert!(request.messages.iter().any(|message| matches!(message,
-            AgentMessage::User { content }
-                if content.as_text().contains("Create a hosted project on B")
-        )));
-        let paths: Vec<_> = request
-            .messages
-            .iter()
-            .filter_map(|row| {
-                if let AgentMessage::User { content } = row {
-                    Some(content.parts())
-                } else {
-                    None
-                }
-            })
-            .flatten()
-            .filter_map(|part| {
-                if let AgentContentPart::ImageData { data_base64, .. } = part {
-                    Some(data_base64)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(paths.len(), 1);
-        use base64::Engine;
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(paths[0])
-                .unwrap(),
-            image
-        );
-    }
-    assert!(
-        b.actor(shared::ACTOR_ID)
-            .unwrap()
-            .context
-            .usage
-            .total_token_usage
-            .input_tokens
-            > 0
-    );
-    assert!(model_b.requests.lock()[0].messages.iter().any(|message|matches!(message,AgentMessage::User{content} if content.as_text().contains("answer in Chinese"))));
-    assert!(model_b.requests.lock()[0].messages.iter().any(|message|matches!(message,AgentMessage::Tool{tool_call_id,..} if tool_call_id=="one-device-effect")));
-    assert_eq!(
-        b.store()
-            .actors()
-            .unwrap()
-            .iter()
-            .filter(|actor| actor.config.name == "Hosted project")
-            .count(),
-        1
-    );
-    let replicated = tokio::time::timeout(Duration::from_secs(12), async {
-        loop {
-            if c.store()
-                .message(&guidance.id)
-                .is_ok_and(|m| m.status == MessageStatus::Completed)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        replicated.is_ok(),
-        "completed input did not replicate: B {}, C {}, head B {:?}, head C {:?}, input C {:?}, BC {:?}, CB {:?}",
-        net_b.core.read().as_ref().unwrap().status(),
-        net_c.core.read().as_ref().unwrap().status(),
-        shared_store::head(b.store()).unwrap(),
-        shared_store::head(c.store()).unwrap(),
-        c.store().message(&guidance.id),
-        net_b.last_error(host_c.local),
-        net_c.last_error(host_b.local),
-    );
-    let received = c
-        .store()
-        .resource(shared::ACTOR_ID, &attachment.id)
-        .unwrap();
-    assert_eq!(
-        std::fs::read(received.path).unwrap(),
-        b"cross device attachment"
-    );
-    model_b.replies.lock().push_back(MockReply::Pending);
-    let next = c
-        .send_user(
-            shared::ACTOR_ID,
-            "Continue after the second worker goes offline.".into(),
-            vec![],
-            None,
-        )
-        .unwrap();
-    let started = tokio::time::timeout(Duration::from_secs(12), async {
-        while model_b.requests.lock().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    assert!(
-        started.is_ok(),
-        "next input did not start on B: B {}, C {}, head B {:?}, head C {:?}, input B {:?}, input C {:?}, requests C {}, BC {:?}, CB {:?}",
-        net_b.core.read().as_ref().unwrap().status(),
-        net_c.core.read().as_ref().unwrap().status(),
-        shared_store::head(b.store()).unwrap(),
-        shared_store::head(c.store()).unwrap(),
-        b.store().message(&next.id),
-        c.store().message(&next.id),
-        model_c.requests.lock().len(),
-        net_b.last_error(host_c.local),
-        net_c.last_error(host_b.local),
-    );
-    net_b.stop().await;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while c.store().message(&next.id).unwrap().status != MessageStatus::Completed {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect(
-        "the last synchronized device must continue without waiting for another device to return",
-    );
-    assert!(net_c.core.read().as_ref().unwrap().permitted());
-    assert_eq!(model_c.requests.lock().len(), 1);
-    let mut returning = host_a.settings();
-    returning.compute_priority = 999;
-    host_a.save_settings(returning).unwrap();
-    net_a.start().await.unwrap();
-    let connected = crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok()).await;
-    if connected.is_err() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !net_a.connected(host_c.local) {
-                let _ = crate::stage::test_relay::wait(|| net_a.handle(host_c.local).is_ok()).await;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("returned device must re-establish its authenticated channel");
-    }
-
-    // A returning replica must learn the completed outcome without requesting
-    // another model turn or repeating the original device effect.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while a.store().message(&next.id).is_err()
-            || shared_store::head(a.store()).unwrap() != shared_store::head(c.store()).unwrap()
-        {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "returning replica must synchronize: {error:?}; A {}, C {}",
-            net_a.core.read().as_ref().unwrap().status(),
-            net_c.core.read().as_ref().unwrap().status()
-        )
-    });
-    assert_eq!(model_c.requests.lock().len(), 1);
-    assert!(model_c.requests.lock()[0].messages.iter().any(|row| matches!(row, AgentMessage::User { content } if content.parts().iter().any(|part| matches!(part, AgentContentPart::ImageData { data_base64, .. } if !data_base64.is_empty())))));
-    assert!(model_c.requests.lock()[0].messages.iter().any(
-        |m| matches!(m,AgentMessage::Tool{tool_call_id,..} if tool_call_id=="one-device-effect")
-    ));
-    assert_eq!(
-        c.store().message(&next.id).unwrap().reply.as_deref(),
-        Some("Continued on the third device with the same account context.")
-    );
-    let effects=b.store().stage_transaction(|tx|Ok(tx.query_row("SELECT COUNT(*) FROM core_app_effects WHERE state='completed' AND call='one-device-effect'",[],|r|r.get::<_,i64>(0))?)).unwrap();
-    assert_eq!(effects, 1);
-    net_c.stop().await;
-    net_a.stop().await;
-    a.shutdown().await;
-    b.shutdown().await;
-    c.shutdown().await;
+    assert_eq!(prompt.matches(instructions).count(), 1);
+    assert!(!prompt.contains(include_str!("../prompts/approval_review.md")));
+    assert!(!prompt.contains("Use report for a material discovery"));
+    assert!(!prompt.contains("Read this Actor's own durable history"));
 }
 
 fn runtime_config() -> crate::config::Config {
@@ -3195,6 +1577,21 @@ async fn remote_delegation_retains_readonly_authority() {
         .unwrap();
     let ledger =
         StageLedger::initialize(system.store(), host.profile().stage_id, &root.root).unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+            tx.execute(
+                "INSERT OR REPLACE INTO stage_account_actors VALUES(?1,?2)",
+                rusqlite::params!["core", root.root.group_id.to_string()],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO stage_account_actors VALUES(?1,?2)",
+                rusqlite::params![child.id, root.root.group_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     ledger
         .import_peer(
             enrollment,
@@ -3207,11 +1604,11 @@ async fn remote_delegation_retains_readonly_authority() {
             now,
         )
         .unwrap();
-    let mut input = MessageRecord {
+    let input = MessageRecord {
         skills: Vec::new(),
         seq: 0,
         id: uuid::Uuid::new_v4().to_string(),
-        actor_id: "root".into(),
+        actor_id: "core".into(),
         source: super::super::MessageSource::RemoteUser {
             stage_id: remote.profile().stage_id,
             invocation_id: uuid::Uuid::new_v4(),
@@ -3220,7 +1617,12 @@ async fn remote_delegation_retains_readonly_authority() {
         kind: super::super::MessageKind::Request,
         in_reply_to: None,
 
-        remote_authority: None,
+        remote_authority: Some(super::super::RemoteAuthority {
+            read_only: true,
+            peer: remote.profile().stage_id,
+            origin_actor: "core".into(),
+            reply_for: None,
+        }),
         content: "Delegate a read-only investigation".into(),
         attachments: vec![],
         status: MessageStatus::Queued,
@@ -3233,16 +1635,10 @@ async fn remote_delegation_retains_readonly_authority() {
         created_at_ms: now,
         updated_at_ms: now,
     };
-    input.remote_authority = Some(super::super::RemoteAuthority {
-        read_only: true,
-        peer: remote.profile().stage_id,
-        origin_actor: "root".into(),
-        reply_for: None,
-    });
     let input = system.store().enqueue(input, None).unwrap();
-    system.store().claim_next("root").unwrap().unwrap();
+    system.store().claim_next("core").unwrap().unwrap();
     let delegated = system
-        .message_from_actor("root", &input.id, &child.id, "Inspect the project".into())
+        .message_from_actor("core", &input.id, &child.id, "Inspect the project".into())
         .unwrap();
     let execution = system.execution_actor(&delegated).unwrap();
     assert!(execution.remote_read_only);
@@ -3295,16 +1691,15 @@ async fn wait_completed(system: &ActorSystem, id: &str) -> MessageRecord {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "Actor request did not finish: {message:?}; actor={:?}; core={:?}",
+            "Actor request did not finish: {message:?}; actor={:?}",
             system.actor(&message.actor_id).map(|a| a.status),
-            system.shared_core().map(|c| c.status())
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
 #[tokio::test]
-async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_view() {
+async fn native_stage_tcp_routes_durable_user_work_to_a_session_core() {
     let relay = crate::stage::test_relay::Relay::new().await;
     use crate::stage::{
         ActorAddress,
@@ -3328,7 +1723,7 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
         read: true,
         converse: true,
         delegate: true,
-        read_only: true,
+        read_only: false,
     };
     let enrollment_b = fixture_enrollment(&host_a, &request_b, false, authority.clone()).unwrap();
     host_b
@@ -3357,16 +1752,16 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
         .unwrap();
     let target = ActorAddress {
         stage_id: host_b.local,
-        actor_id: "root".into(),
+        actor_id: "core".into(),
     };
     let view = uuid::Uuid::new_v4();
     let handle = net_a.handle(host_b.local).unwrap();
     handle
-        .watch("root", view, SubscriptionLevel::Detail)
+        .watch("core", view, SubscriptionLevel::Detail)
         .unwrap();
     let send = || {
         crate::stage::delivery::Deliveries::new(a.store(), host_a.local).queue(
-            &a.core_device_actor().unwrap(),
+            &a.actor("core").unwrap(),
             None,
             target.clone(),
             ("Respond over the native peer channel.".into(), vec![]),
@@ -3418,7 +1813,7 @@ async fn native_stage_tcp_routes_durable_user_work_and_resumes_a_shared_actor_vi
     assert!(
         matches!(directory,Body::Directory{actors,..}if actors.len()==2 && actors.iter().any(|actor| actor.address.actor_id=="root") && actors.iter().any(|actor|actor.address.actor_id=="core"))
     );
-    handle.unwatch("root", view);
+    handle.unwatch("core", view);
     net_a.stop().await;
     net_b.stop().await;
     a.shutdown().await;
@@ -3495,6 +1890,15 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     let nonce = uuid::Uuid::new_v4();
     ledger_a.commit_generation(b_id, 0, 1, nonce, now).unwrap();
     ledger_b.commit_generation(a_id, 0, 1, nonce, now).unwrap();
+    b.store()
+        .stage_transaction(|tx| {
+            tx.execute(
+                "INSERT OR REPLACE INTO actor_session_hosts(actor,host) VALUES('root',?1)",
+                [a_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let acceptor = tls::server(&identity_b, &[identity_a.profile()]).unwrap();
     let connector = tls::client(&identity_a, &identity_b.profile()).unwrap();
     let (left, right) = tokio::io::duplex(65536);
@@ -3507,7 +1911,7 @@ async fn remote_delegation_delivers_a_correlated_reply_without_peer_owner_author
     let incoming_a = tls::identify_server(&client, &identity_b.profile()).unwrap();
     let incoming_b = tls::identify_client(&server, &[identity_a.profile()]).unwrap();
     let original = a
-        .send_user(
+        .test_actor_input(
             "root",
             "Delegate one task.".into(),
             vec![],
@@ -3752,13 +2156,28 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         .unwrap();
     let ledger =
         StageLedger::initialize(system.store(), host.profile().stage_id, &root.root).unwrap();
+    system
+        .store()
+        .stage_transaction(|tx| {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_account_actors(actor TEXT PRIMARY KEY REFERENCES actors(id) ON DELETE CASCADE,account TEXT NOT NULL);")?;
+            tx.execute(
+                "INSERT OR REPLACE INTO stage_account_actors VALUES(?1,?2)",
+                rusqlite::params!["core", root.root.group_id.to_string()],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO stage_account_actors VALUES(?1,?2)",
+                rusqlite::params![child.id, root.root.group_id.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     ledger
         .import_peer(
             enrollment,
             DeviceAuthority {
                 read: true,
                 converse: true,
-                delegate: false,
+                delegate: true,
                 read_only: true,
             },
             now,
@@ -3776,7 +2195,7 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
     );
     let server = server.unwrap();
     let _client = client.unwrap();
-    let peer = tls::identify_client(&server, &[remote.profile()]).unwrap();
+    let _peer = tls::identify_client(&server, &[remote.profile()]).unwrap();
     let content = "Attempt a write.".to_owned();
     let frame = Envelope {
         version: 1,
@@ -3790,10 +2209,19 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
         expires_at_ms: now + 60000,
         body: Body::Invoke {
             related_message: None,
-            origin: Origin::User,
+            origin: Origin::Actor {
+                actor: ActorAddress {
+                    stage_id: remote.profile().stage_id,
+                    actor_id: "core".into(),
+                },
+                session_id: "core".into(),
+                session_host: host.profile().stage_id,
+                request_id: uuid::Uuid::new_v4(),
+                ceiling: crate::stage::protocol::RemoteCeiling { read_only: true },
+            },
             target: ActorAddress {
                 stage_id: host.profile().stage_id,
-                actor_id: "root".into(),
+                actor_id: child.id.clone(),
             },
             content: BlobRef {
                 hash: crate::stage::digest(content.as_bytes()),
@@ -3803,80 +2231,14 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
             attachments: vec![],
         },
     };
-    let received = crate::stage::receiver::StageReceiver::new(system.clone())
-        .receive_verified_content(&peer, &frame, content)
-        .unwrap();
-    let message = wait_completed(&system, received.message_id.as_ref().unwrap()).await;
-    let receiver = crate::stage::receiver::StageReceiver::new(system.clone());
-    let mut query = frame.clone();
-    query.message_id = uuid::Uuid::new_v4();
-    query.body = Body::ResultQuery {
-        invocation: frame.invocation_id.unwrap(),
-    };
-    let result = receiver.handle_request(&peer, &query).unwrap();
-    assert_eq!(result.in_reply_to, Some(query.message_id));
-    let Body::Result {
-        content: Some(reference),
-        ..
-    } = result.body
-    else {
-        panic!("Expected completed result reference");
-    };
-    query.body = Body::BlobManifestQuery {
-        access: crate::stage::protocol::BlobAccess::Actor {
-            actor: ActorAddress {
-                stage_id: host.profile().stage_id,
-                actor_id: "root".into(),
-            },
-        },
-        content: reference.clone(),
-    };
-    assert!(matches!(
-        receiver.handle_request(&peer, &query).unwrap().body,
-        Body::BlobManifest { .. }
-    ));
-    query.body = Body::BlobRead {
-        access: crate::stage::protocol::BlobAccess::Actor {
-            actor: ActorAddress {
-                stage_id: host.profile().stage_id,
-                actor_id: "root".into(),
-            },
-        },
-        content: reference,
-        chunk: 0,
-    };
-    let Body::BlobChunk { bytes, .. } = receiver.handle_request(&peer, &query).unwrap().body else {
-        panic!("Expected original result bytes");
-    };
-    assert_eq!(bytes, b"The write was denied.");
-    assert_eq!(message.status, MessageStatus::Completed);
-    assert!(!approved.join("forbidden.txt").exists());
-    {
-        let requests = provider.requests.lock();
-        let follow_up = &requests[1].messages;
-        assert!(follow_up.iter().any(|row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
-            if tool_call_id == "remote-read-memory" && content.contains("remembered remote reference"))));
-        for denied in ["remote-write", "remote-write-memory", "remote-delegation"] {
-            assert!(follow_up.iter().any(
-                |row| matches!(row, AgentMessage::Tool { tool_call_id, content, .. }
-                if tool_call_id == denied && content.contains("App error"))
-            ));
-        }
-    }
-    assert!(matches!(
-        message.source,
-        super::super::MessageSource::RemoteUser { .. }
-    ));
+    let error = crate::stage::ledger::StageLedger::attach(system.store(), host.profile().stage_id)
+        .accept_actor_input(remote.profile().stage_id, &frame, content, now)
+        .unwrap_err();
     assert!(
-        !system
-            .actor("root")
-            .unwrap()
-            .config
-            .workspace
-            .join("forbidden.txt")
-            .exists()
+        error
+            .to_string()
+            .contains("Device cannot invoke this Actor")
     );
-    assert!(message.remote_authority.is_some());
     assert!(
         system
             .store()
@@ -3885,53 +2247,14 @@ async fn remote_readonly_input_is_not_owner_and_cannot_write_through_a_none_mode
             .items
             .is_empty()
     );
-    let result = ledger
-        .result(
-            remote.profile().stage_id,
-            frame.invocation_id.unwrap(),
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .unwrap();
-    assert_eq!(
-        result.state,
-        crate::stage::protocol::InvocationState::Completed
-    );
+    assert!(!approved.join("forbidden.txt").exists());
     system.shutdown().await;
 }
 
 fn enqueue_root(system: &ActorSystem, content: &str) -> MessageRecord {
-    let now = chrono::Utc::now().timestamp_millis();
-    let message = system
-        .store()
-        .enqueue(
-            MessageRecord {
-                skills: Vec::new(),
-                seq: 0,
-                id: uuid::Uuid::new_v4().to_string(),
-                actor_id: "root".into(),
-                source: super::super::MessageSource::User,
-                reply_to: super::super::ReplyTarget::User,
-                kind: super::super::MessageKind::Request,
-                in_reply_to: None,
-
-                remote_authority: None,
-                content: content.into(),
-                attachments: vec![],
-                status: MessageStatus::Queued,
-                cancel_requested: false,
-                final_generation: None,
-                started_at_ms: None,
-                finished_at_ms: None,
-                reply: None,
-                error: None,
-                created_at_ms: now,
-                updated_at_ms: now,
-            },
-            None,
-        )
-        .unwrap();
-    system.wake("root");
-    message
+    system
+        .test_actor_input("root", content.into(), vec![], None)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -4158,7 +2481,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
     let final_constraint =
         "Full original constraint: retain local data and never publish the report";
     let original = system
-        .send_user(
+        .test_actor_input(
             "root",
             format!(
                 "Delegate the project task\n{}\n{final_constraint}",
@@ -4173,7 +2496,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         .message_from_actor("root", &original.id, &child.id, "Delegated work".into())
         .unwrap();
     let direct = system
-        .send_user(&child.id, "Separate direct user work".into(), vec![], None)
+        .test_actor_input(&child.id, "Separate Core-routed work".into(), vec![], None)
         .unwrap();
     system
         .store()
@@ -4185,7 +2508,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
         )
         .unwrap();
     let newer = system
-        .send_user("root", "A newer independent request".into(), vec![], None)
+        .test_actor_input("root", "A newer independent request".into(), vec![], None)
         .unwrap();
     assert_eq!(
         system.store().claim_next("root").unwrap().unwrap().id,
@@ -4206,7 +2529,7 @@ async fn delegated_and_direct_inputs_keep_their_original_reply_targets() {
     assert_eq!(routed.kind, MessageKind::Progress);
     assert_eq!(routed.content, "Delegated result");
     assert_eq!(routed.in_reply_to.as_deref(), Some(original.id.as_str()));
-    assert!(matches!(routed.reply_to, ReplyTarget::User));
+    assert!(matches!(routed.reply_to, ReplyTarget::Actor { .. }));
     assert_eq!(
         system.store().claim_next(&child.id).unwrap().unwrap().id,
         direct.id
@@ -4274,7 +2597,7 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
     let config = project_config(&system, "persistent");
     let child = system.create_owned("root", config).unwrap();
     let completed = system
-        .send_user(
+        .test_actor_input(
             &child.id,
             "Previously completed request".into(),
             vec![],
@@ -4303,7 +2626,7 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
         )
         .unwrap();
     let active = system
-        .send_user(
+        .test_actor_input(
             &child.id,
             "Interrupted pending approval".into(),
             vec![],
@@ -4344,7 +2667,7 @@ async fn actor_identity_history_and_queued_work_survive_crash_recovery() {
         })
         .unwrap();
     let queued = system
-        .send_user(&child.id, "Queued work survives".into(), vec![], None)
+        .test_actor_input(&child.id, "Queued work survives".into(), vec![], None)
         .unwrap();
     let workspace = system.actor("root").unwrap().config.workspace;
     system.shutdown().await;
@@ -4402,7 +2725,7 @@ async fn hosted_actors_delegate_to_account_peers_without_capability_or_recipient
         .create_owned("root", project_config(&system, "receiver"))
         .unwrap();
     let input = system
-        .send_user(&sender.id, "Coordinate work".into(), vec![], None)
+        .test_actor_input(&sender.id, "Coordinate work".into(), vec![], None)
         .unwrap();
     system.store().claim_next(&sender.id).unwrap().unwrap();
     let delegated = system
@@ -4474,7 +2797,7 @@ async fn removing_recipient_lists_preserves_account_ownership_including_foreign_
             .any(|actor| actor.id == foreign.id || actor.id == child.id)
     );
     let input = system
-        .send_user(
+        .test_actor_input(
             &sender.id,
             "Coordinate this account's work".into(),
             vec![],
@@ -4518,7 +2841,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
     parent_config.apps.push("actors".into());
     let parent = system.create_owned("root", parent_config).unwrap();
     let original = system
-        .send_user("root", "Produce an HTML report".into(), vec![], None)
+        .test_actor_input("root", "Produce an HTML report".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let delegated = system
@@ -4622,7 +2945,7 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
             .contains(&format!("/v1/actors/root/resources/{resource_id}"))
     );
     let direct = system
-        .send_user(
+        .test_actor_input(
             &deep.id,
             "Direct owner question through the Actor link".into(),
             vec![],
@@ -4630,7 +2953,10 @@ async fn deep_actor_artifact_results_are_rebound_to_parent_resource_scope() {
         )
         .unwrap();
     assert_eq!(direct.actor_id, deep.id);
-    assert!(matches!(direct.reply_to, super::super::ReplyTarget::User));
+    assert!(matches!(
+        direct.reply_to,
+        super::super::ReplyTarget::Actor { .. }
+    ));
     system.shutdown().await;
 }
 
@@ -4797,7 +3123,7 @@ fn window_preserves_complete_multi_tool_protocol_and_encrypted_reasoning() {
 async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
     let (_directory, system, _) = paused_runtime().await;
     system
-        .send_user("root", "Inspect the files.".into(), vec![], None)
+        .test_actor_input("root", "Inspect the files.".into(), vec![], None)
         .unwrap();
     let first = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&first).unwrap();
@@ -4866,7 +3192,7 @@ async fn model_context_preserves_cached_prefix_across_paged_tool_groups() {
         )
         .unwrap();
     system
-        .send_user("root", "Inspect the next file.".into(), vec![], None)
+        .test_actor_input("root", "Inspect the next file.".into(), vec![], None)
         .unwrap();
     let second = system.store().claim_next("root").unwrap().unwrap();
     let context = system.execution_context(&actor, &second).unwrap();
@@ -5023,7 +3349,7 @@ async fn valid_agent_execution_can_pass_sixty_four_steps_and_large_call_groups()
     let provider = Arc::new(ReplayProvider::new(replies));
     let (_dir, system) = runtime(provider.clone()).await;
     let message = system
-        .send_user("root", "keep working".into(), vec![], None)
+        .test_actor_input("root", "keep working".into(), vec![], None)
         .unwrap();
     let result = wait_completed(&system, &message.id).await;
     assert_eq!(result.status, MessageStatus::Completed);
@@ -5041,7 +3367,7 @@ async fn working_history_is_not_limited_to_five_hundred_twelve_messages() {
         .collect();
     system.store().append_history("root", "past", &old).unwrap();
     let message = system
-        .send_user("root", "continue".into(), vec![], None)
+        .test_actor_input("root", "continue".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &message.id).await.status,
@@ -5072,7 +3398,7 @@ async fn full_context_is_cleared_with_an_archive_recovery_prompt_and_persistent_
         .append_history("root", "past", std::slice::from_ref(&original))
         .unwrap();
     let message = system
-        .send_user("root", "recover this task".into(), vec![], None)
+        .test_actor_input("root", "recover this task".into(), vec![], None)
         .unwrap();
     let result = wait_completed(&system, &message.id).await;
     assert_eq!(
@@ -5147,7 +3473,7 @@ async fn failed_or_invalid_handoff_never_resets_context_or_executes_tools() {
             .append_history("root", "past", std::slice::from_ref(&original))
             .unwrap();
         let message = system
-            .send_user("root", "Continue the task".into(), vec![], None)
+            .test_actor_input("root", "Continue the task".into(), vec![], None)
             .unwrap();
         let result = wait_completed(&system, &message.id).await;
         assert_eq!(result.status, MessageStatus::Failed);
@@ -5245,7 +3571,7 @@ async fn cancelling_handoff_preserves_the_old_context() {
         .append_history("root", "past", std::slice::from_ref(&original))
         .unwrap();
     let message = system
-        .send_user("root", "Continue the task".into(), vec![], None)
+        .test_actor_input("root", "Continue the task".into(), vec![], None)
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while provider.pending.load(Ordering::Acquire) == 0 {
@@ -5311,7 +3637,7 @@ async fn token_calibration_survives_restart_and_is_bound_to_the_model() {
     provider.usage_bias.store(1234, Ordering::Relaxed);
     let (dir, system) = runtime(provider.clone()).await;
     let first = system
-        .send_user("root", "first".into(), vec![], None)
+        .test_actor_input("root", "first".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&system, &first.id).await.status,
@@ -5340,7 +3666,7 @@ async fn token_calibration_survives_restart_and_is_bound_to_the_model() {
     );
     provider.usage_bias.store(0, Ordering::Relaxed);
     let second = reopened
-        .send_user("root", "second".into(), vec![], None)
+        .test_actor_input("root", "second".into(), vec![], None)
         .unwrap();
     assert_eq!(
         wait_completed(&reopened, &second.id).await.status,
@@ -5384,7 +3710,7 @@ async fn actor_archive_is_own_actor_scoped_paged_and_has_no_provider_reasoning()
         )
         .unwrap();
     let message = system
-        .send_user("root", "wait".into(), vec![], None)
+        .test_actor_input("root", "wait".into(), vec![], None)
         .unwrap();
     provider.started.notified().await;
     let actor = system.actor("root").unwrap();
@@ -5405,793 +3731,6 @@ async fn actor_archive_is_own_actor_scoped_paged_and_has_no_provider_reasoning()
     let second = app.execute_tool(&query, &context).await.unwrap();
     assert!(second.payload["entries"][0]["offset"].as_u64().unwrap() > 0);
     system.shutdown().await;
-}
-
-async fn start_core_fixture(system: &ActorSystem) -> Arc<crate::stage::runtime::Runtime> {
-    let core = system.actor("core").unwrap();
-    system.store().save_actor(&core).unwrap();
-    let host = crate::stage::host::Host::load(system.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let network = crate::stage::runtime::Runtime::new(host);
-    network.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while !system.core_permitted() {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
-    network
-}
-
-#[tokio::test]
-async fn core_import_routes_through_device_permissions_and_never_starts_the_imported_actor() {
-    let provider = Arc::new(ReplayProvider::new(vec![]));
-    let (_dir, system) = runtime(provider.clone()).await;
-    let network = start_core_fixture(&system).await;
-    let transcript = crate::conversation_import::parse_codex(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"core-import-fixture\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Preserve original UI context\"}}\n").unwrap();
-    let evidence = crate::resources::publish(
-        &system,
-        "core",
-        "UI context",
-        crate::conversation_import::MEDIA_TYPE,
-        &serde_json::to_vec(&transcript).unwrap(),
-    )
-    .unwrap();
-    provider.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {id:"read-import".into(),name:"actors__read_resource".into(),arguments:json!({"resource_id":evidence.id,"offset":null,"limit":4096,"region":null,"resolution":null})}]),
-        MockReply::Calls(vec![AgentToolCall {id:"prepare-import".into(),name:"actors__import_conversation".into(),arguments:json!({"stage_id":network.host.local,"resource_id":evidence.id,"name":"Athena","model":"mock","instructions":"Preserve UI context; wait for a new request."})}]),
-        MockReply::Answer("Imported; waiting for the owner."),
-    ]);
-    let input = system
-        .send_user(
-            "core",
-            "Import this conversation; do not start it.".into(),
-            vec![super::super::Attachment {
-                id: evidence.id.clone(),
-                name: evidence.name.clone(),
-                media_type: evidence.media_type.clone(),
-                size_bytes: evidence.content.size,
-                uri: format!("/v1/actors/core/resources/{}", evidence.id),
-            }],
-            None,
-        )
-        .unwrap();
-    let done = wait_core_completed(&system, &input.id).await;
-    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
-    let imported = system
-        .store()
-        .actors()
-        .unwrap()
-        .into_iter()
-        .find(|actor| actor.config.name == "Athena")
-        .expect("Core created the imported Actor");
-    assert_eq!(imported.status, ActorStatus::Idle);
-    assert!(
-        system
-            .store()
-            .messages(&imported.id, None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        system
-            .store()
-            .messages("root", None, 10)
-            .unwrap()
-            .items
-            .is_empty(),
-        "Import cannot start another Actor either"
-    );
-    assert!(crate::resources::export(&system, &imported.id, &evidence.id).is_ok());
-    let tools = system
-        .store()
-        .tool_summaries("core", &input.id, None, 10)
-        .unwrap()
-        .items;
-    let created = tools
-        .iter()
-        .find(|tool| tool.name == "actors__import_conversation")
-        .unwrap();
-    assert!(created.error.is_none(), "{:?}", created.error);
-    assert_eq!(created.outcome.as_ref().unwrap()["id"], imported.id);
-    assert!(tools.iter().all(|tool| tool.name != "actors__message"));
-    assert_eq!(
-        provider.requests.lock().len(),
-        3,
-        "Only Core performed inference"
-    );
-    network.stop().await;
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn core_delivery_is_visible_before_the_originating_turn_finishes() {
-    let provider = Arc::new(ReplayProvider::new(vec![
-        MockReply::Calls(vec![AgentToolCall {
-            id: "early".into(),
-            name: "actors__reply".into(),
-            arguments: json!({"content":"I have started coordinating."}),
-        }]),
-        MockReply::Pending,
-    ]));
-    let (_dir, system) = runtime(provider.clone()).await;
-    let network = start_core_fixture(&system).await;
-    assert!(system.core_permitted());
-    let input = system
-        .send_user("core", "Start".into(), vec![], None)
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while provider.requests.lock().len() < 2 {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        system.store().message(&input.id).unwrap().status,
-        MessageStatus::Running
-    );
-    let receipt = system
-        .store()
-        .delivery_receipt("core", &input.id, "early")
-        .unwrap()
-        .expect("committed delivery");
-    assert_eq!(
-        receipt.reply.as_deref(),
-        Some("I have started coordinating.")
-    );
-    assert_eq!(receipt.in_reply_to.as_deref(), Some(input.id.as_str()));
-    assert!(system.store().events(0,Some("core"),true,100).unwrap().iter().any(|event|matches!(&event.event,ActorEvent::MessageAdded{message_id} if message_id==&receipt.id)));
-    {
-        let requests = provider.requests.lock();
-        assert!(
-            requests[0]
-                .tools
-                .iter()
-                .any(|tool| tool.name == "actors__reply")
-        );
-    }
-    system.cancel("core", &input.id).unwrap();
-    assert!(
-        system
-            .deliver_from_actor("core", &input.id, "late", "Too late")
-            .is_err()
-    );
-    network.stop().await;
-    system.shutdown().await;
-}
-
-struct CoordinatorFactory {
-    core: Arc<ReplayProvider>,
-    worker: Arc<ReplayProvider>,
-}
-impl ModelFactory for CoordinatorFactory {
-    fn build(&self, name: &str, _: &crate::config::Config) -> Result<Arc<dyn ModelProvider>> {
-        Ok(if name == "worker" {
-            self.worker.clone()
-        } else {
-            self.core.clone()
-        })
-    }
-}
-
-#[tokio::test]
-async fn forwarded_delegation_without_a_reply_wakes_the_requester_with_one_runtime_notice() {
-    let requester = Arc::new(ReplayProvider::new(vec![]));
-    let worker_gate = Arc::new(tokio::sync::Notify::new());
-    let worker = Arc::new(ReplayProvider::new(vec![MockReply::Gated(
-        Box::new(MockReply::Answer("Finished without using reply")),
-        worker_gate.clone(),
-    )]));
-    let dir = crate::sandbox::test_support::scoped_directory();
-    let mut config = runtime_config();
-    config
-        .models
-        .insert("worker".into(), config.models["mock"].clone());
-    let system = ActorSystem::open_with_factory(
-        dir.path().join("data"),
-        dir.path().join("work"),
-        config,
-        Arc::new(CoordinatorFactory {
-            core: requester.clone(),
-            worker: worker.clone(),
-        }),
-    )
-    .await
-    .unwrap();
-    system.seed_test_actor("root");
-    let mut child_config = project_config(&system, "worker");
-    child_config.model = Some("worker".into());
-    let child = system.create_owned("root", child_config).unwrap();
-    requester.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "delegate".into(),
-            name: "actors__message".into(),
-            arguments: json!({"actor_id":child.id,"stage_id":null,"reply_to":null,
-                "content":"Route note","title":"  Inspect   the cache  ","forward_input":true}),
-        }]),
-        MockReply::Answer("Delegated"),
-        MockReply::Answer("Reported the silent finish"),
-    ]);
-    let input = system
-        .send_user("root", "ORIGINAL USER REQUEST".into(), vec![], None)
-        .unwrap();
-    assert_eq!(
-        wait_completed(&system, &input.id).await.status,
-        MessageStatus::Completed
-    );
-    let delegated = system
-        .store()
-        .messages(&child.id, None, 10)
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|message| message.kind == MessageKind::Request)
-        .unwrap();
-    assert!(delegated.content.starts_with("Route note"));
-    assert!(delegated.content.contains("ORIGINAL USER REQUEST"));
-    let outcome = system
-        .store()
-        .tool_summaries("root", &input.id, None, 10)
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|tool| tool.name == "actors__message")
-        .and_then(|tool| tool.outcome)
-        .unwrap();
-    assert_eq!(outcome["title"], "Inspect the cache");
-    assert_eq!(outcome["message_id"], delegated.id.as_str());
-    assert_eq!(outcome["sent_message"], true);
-
-    worker_gate.notify_one();
-    assert_eq!(
-        wait_completed(&system, &delegated.id).await.status,
-        MessageStatus::Completed
-    );
-    let notices = || {
-        system
-            .store()
-            .messages("root", None, 20)
-            .unwrap()
-            .items
-            .into_iter()
-            .filter(|message| message.kind == MessageKind::Result)
-            .collect::<Vec<_>>()
-    };
-    let notice = notices().pop().expect("requester was not notified");
-    assert_eq!(notice.in_reply_to.as_deref(), Some(input.id.as_str()));
-    assert!(matches!(&notice.source, MessageSource::Actor { actor_id } if *actor_id == child.id));
-    assert!(!notice.content.contains("Finished without using reply"));
-    assert_eq!(
-        wait_completed(&system, &notice.id).await.status,
-        MessageStatus::Completed
-    );
-    assert_eq!(notices().len(), 1);
-    {
-        let requests = requester.requests.lock();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2].messages.iter().any(|message| matches!(message,
-            AgentMessage::User { content } if content.as_text().contains("without replying"))));
-    }
-    system.shutdown().await;
-}
-async fn wait_core_completed(system: &ActorSystem, id: &str) -> MessageRecord {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            let message = system.store().message(id).unwrap();
-            if !matches!(
-                message.status,
-                MessageStatus::Queued | MessageStatus::Running
-            ) {
-                return message;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "Core did not finish: {error}; message={:?}; core={:?}",
-            system.store().message(id),
-            system.shared_core().map(|core| core.status())
-        )
-    })
-}
-
-#[tokio::test]
-async fn core_prompt_injects_role_and_account_name_once_for_local_and_shared_hosts() {
-    use crate::{
-        accounts::CredentialBundle,
-        stage::{host::Host, runtime::Runtime, shared_runtime::Controller},
-    };
-    let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
-    let host = Host::load(system.clone()).unwrap();
-    host.initialize(true).unwrap();
-    let account_id = host.account_id().unwrap();
-    let setup = daat_locus_auth::new_setup();
-    let client =
-        daat_locus_auth::RegistrationClient::start(b"prompt fixture password".to_vec()).unwrap();
-    let response = daat_locus_auth::registration_response(
-        &setup,
-        format!("DaatLocus.Account.v1/{account_id}/alice").as_bytes(),
-        &client.request(),
-    )
-    .unwrap();
-    let password = daat_locus_auth::password_file(&client.finish(&response).unwrap()).unwrap();
-    let record =
-        CredentialBundle::new(account_id.clone(), "Alice".into(), &setup, &password, None).unwrap();
-    let private = serde_json::to_value(&record).unwrap();
-    host.accounts.install(record, &account_id).unwrap();
-
-    let actor = system.actor("core").unwrap();
-    let context = system.owner_app_context().unwrap();
-    std::fs::write(
-        actor.config.workspace.join("AGENTS.md"),
-        "Device project instructions must stay out of Core.",
-    )
-    .unwrap();
-    let network = Runtime::new(host);
-    let controller = Controller::new(&network).unwrap();
-    let mut previous_prompt = None;
-    for local in [true, false] {
-        if local {
-            system.install_local_core().unwrap();
-        } else {
-            system.disable_local_core();
-            system.install_shared_core(&controller);
-        }
-        assert_eq!(system.local_core(), local);
-        let assembled = SystemPrompt::load(&system, &actor, &context).await.unwrap();
-        assert!(
-            assembled
-                .files
-                .iter()
-                .all(|file| !file.name.starts_with("os/")),
-            "Core must not receive execution-device platform patches"
-        );
-        let prompt = assembled.render();
-        assert_shared_actor_instructions(&prompt);
-        assert!(prompt.contains("Default workspace for new Actors:"));
-        assert!(!prompt.contains("\nWorkspace: ") && !prompt.contains("device sandbox"));
-        assert!(!prompt.contains("Device project instructions must stay out of Core."));
-        assert!(!prompt.contains("Workspace instructions (AGENTS.md):"));
-        let role = include_str!("../prompts/core.md").replace("{{account_name}}", "alice");
-        assert_eq!(prompt.matches(&role).count(), 1);
-        assert_eq!(
-            prompt
-                .matches("You are DaatLocus, alice's assistant.")
-                .count(),
-            1
-        );
-        if let Some(previous) = &previous_prompt {
-            assert_eq!(&prompt, previous);
-        }
-        previous_prompt = Some(prompt.clone());
-        assert!(!prompt.contains("{{account_name}}"));
-        assert!(!prompt.contains(&account_id));
-        for field in ["setup", "record"] {
-            assert!(!prompt.contains(&private[field].to_string()));
-        }
-    }
-    system.shutdown().await;
-}
-
-#[tokio::test]
-async fn prompt_account_lookup_is_core_only_and_distinguishes_missing_from_invalid_records() {
-    let (_directory, system) = runtime(Arc::new(ReplayProvider::new(vec![]))).await;
-    let actor = system.actor("core").unwrap();
-    let context = system.owner_app_context().unwrap();
-    let prompt = SystemPrompt::load(&system, &actor, &context)
-        .await
-        .unwrap()
-        .render();
-    assert!(prompt.contains("You are DaatLocus, the user's assistant."));
-    assert!(!prompt.contains("{{account_name}}"));
-
-    std::fs::write(
-        system.account_credentials_dir().join("credentials.json"),
-        "invalid account fixture",
-    )
-    .unwrap();
-    assert!(SystemPrompt::load(&system, &actor, &context).await.is_err());
-
-    let worker = system.actor("root").unwrap();
-    let prompt = SystemPrompt::load(&system, &worker, &context)
-        .await
-        .unwrap()
-        .render();
-    assert_shared_actor_instructions(&prompt);
-    system.shutdown().await;
-}
-
-fn assert_shared_actor_instructions(prompt: &str) {
-    let instructions = include_str!("../prompts/actors.md")
-        .split("{{models}}")
-        .next()
-        .unwrap();
-    assert_eq!(prompt.matches(instructions).count(), 1);
-    assert!(!prompt.contains(include_str!("../prompts/approval_review.md")));
-    assert!(!prompt.contains("Use report for a material discovery"));
-    assert!(!prompt.contains("Read this Actor's own durable history"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn follower_http_import_forwards_original_evidence_without_local_execution() {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-    use reqwest::{Method, StatusCode};
-    use serde_json::Value;
-
-    let executor_model = Arc::new(ReplayProvider::new(vec![]));
-    let submitting_model = Arc::new(ReplayProvider::new(vec![]));
-    let ((_a_dir, a, net_a), (b_dir, b, net_b), _relay) =
-        device_pair(executor_model.clone(), submitting_model.clone()).await;
-    // Finish the initial account-definition import before clearing this device's
-    // model configuration, so an in-flight first synchronization cannot restore it.
-    let config_revision = net_a
-        .host
-        .configurations
-        .revision(&net_a.host)
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while net_b
-            .host
-            .configurations
-            .revision(&net_b.host)
-            .unwrap()
-            .as_ref()
-            != Some(&config_revision)
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("account definitions did not initially synchronize");
-    b.suspend_execution().await.unwrap();
-    let mut config = b.config();
-    config.models.clear();
-    config.providers.clear();
-    config.main_model.clear();
-    b.update_config(config).await.unwrap();
-    assert!(!b.workers_enabled());
-    assert!(!b.core_permitted());
-    assert!(b.config().validate().is_err());
-
-    // Install the same isolated account credential on both enrolled devices.
-    // No authentication shortcut: subsequent requests use the real HTTP OPAQUE login.
-    let password = b"isolated import fixture password";
-    let setup = daat_locus_auth::new_setup();
-    let account = net_a.host.account_id().unwrap();
-    let registration = daat_locus_auth::RegistrationClient::start(password.to_vec()).unwrap();
-    let response = daat_locus_auth::registration_response(
-        &setup,
-        format!("DaatLocus.Account.v1/{account}/fixture").as_bytes(),
-        &registration.request(),
-    )
-    .unwrap();
-    let record = daat_locus_auth::password_file(&registration.finish(&response).unwrap()).unwrap();
-    let bundle = crate::accounts::CredentialBundle::new(
-        account.clone(),
-        "fixture".into(),
-        &setup,
-        &record,
-        None,
-    )
-    .unwrap();
-    net_a
-        .host
-        .accounts
-        .install(bundle.clone(), &account)
-        .unwrap();
-    net_b.host.accounts.install(bundle, &account).unwrap();
-
-    let original = "Preserve <layout> 🔵\n\nOriginal spacing and text.";
-    let answer = "The UI context remains historical evidence, not a new task.";
-    let session = "00000000-0000-4000-8000-000000000042";
-    let rollout = [
-        json!({"type":"session_meta","payload":{"id":session,"cwd":"FOREIGN_WORKSPACE","instructions":"FOREIGN_GRANTS"}}),
-        json!({"type":"event_msg","payload":{"type":"user_message","message":original}}),
-        json!({"type":"event_msg","payload":{"type":"agent_message","message":answer}}),
-        json!({"type":"response_item","payload":{"type":"function_call","arguments":"PRIVATE_TOOL_ARGUMENTS"}}),
-    ]
-    .iter()
-    .map(Value::to_string)
-    .collect::<Vec<_>>()
-    .join("\n");
-    let home = b_dir.path().join("codex");
-    std::fs::create_dir_all(home.join("sessions")).unwrap();
-    std::fs::write(
-        home.join("sessions")
-            .join(format!("rollout-{session}.jsonl")),
-        rollout,
-    )
-    .unwrap();
-
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .unwrap();
-    let address = listener.local_addr().unwrap();
-    let url = format!("http://{address}");
-    let mut state = crate::service::ServiceState::new(b.clone(), url.clone())
-        .unwrap()
-        .with_listen_address(address)
-        .with_codex_home(home);
-    // Reuse the paired, running transport and its Core controller.
-    state.stage = Some(net_b.clone());
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            crate::service::router(state)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-    let client = crate::http_client::builder().build().unwrap();
-    let login = daat_locus_auth::LoginClient::start(password.to_vec()).unwrap();
-    let response = client
-        .post(format!("{url}/v1/account/login/start"))
-        .header("origin", &url)
-        .header("x-daat-request", "1")
-        .json(&json!({"name":"fixture","request":B64.encode(login.request())}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let response: Value = response.json().await.unwrap();
-    let proof = login
-        .finish(
-            &B64.decode(response["response"].as_str().unwrap()).unwrap(),
-            &B64.decode(response["context"].as_str().unwrap()).unwrap(),
-        )
-        .unwrap();
-    let response = client
-        .post(format!("{url}/v1/account/login/finish"))
-        .header("origin", &url)
-        .header("x-daat-request", "1")
-        .json(&json!({"id":response["id"],"message":B64.encode(proof)}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let cookie = response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned();
-    let owner = |method: Method, path: &str| {
-        client
-            .request(method, format!("{url}{path}"))
-            .header("cookie", &cookie)
-            .header("origin", &url)
-            .header("x-daat-request", "1")
-    };
-    let list: Value = owner(Method::GET, "/v1/imports/codex")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(list["items"].as_array().unwrap().len(), 1);
-    let response = owner(Method::POST, "/v1/imports/codex/preview")
-        .json(&json!({"source_id":list["items"][0]["id"]}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let preview: Value = response.json().await.unwrap();
-    let resource_id = preview["resource_id"].as_str().unwrap().to_owned();
-    let resource = crate::resources::export(&b, "core", &resource_id).unwrap();
-    let expected_bytes = crate::resources::bytes(&b, "core", &resource).unwrap();
-    let evidence: Value = serde_json::from_slice(&expected_bytes).unwrap();
-    assert_eq!(
-        evidence["messages"],
-        json!([
-            {"role":"user","text":original}, {"role":"assistant","text":answer}
-        ])
-    );
-    for forbidden in [
-        "FOREIGN_WORKSPACE",
-        "FOREIGN_GRANTS",
-        "PRIVATE_TOOL_ARGUMENTS",
-    ] {
-        assert!(!evidence.to_string().contains(forbidden));
-    }
-    assert!(crate::resources::export(&a, "core", &resource_id).is_err());
-    assert!(
-        a.store()
-            .messages("core", None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        b.store()
-            .messages("core", None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-
-    executor_model.replies.lock().extend([
-        MockReply::Calls(vec![AgentToolCall {
-            id: "read-forwarded-import".into(),
-            name: "actors__read_resource".into(),
-            arguments: json!({"resource_id":resource_id,"offset":null,"limit":4096,"region":null,"resolution":null}),
-        }]),
-        MockReply::Calls(vec![AgentToolCall {
-            id: "prepare-forwarded-import".into(),
-            name: "actors__import_conversation".into(),
-            arguments: json!({"stage_id":net_a.host.local,"resource_id":resource_id,
-                "name":"Forwarded Athena","model":"mock","instructions":"Preserve the UI context."}),
-        }]),
-        MockReply::Answer("Imported; waiting for the owner."),
-    ]);
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while !net_b.core.read().as_ref().unwrap().accepts_input() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("model-less follower must accept routed input");
-    assert!(
-        b.config().validate().is_err(),
-        "the follower must have no local model"
-    );
-    assert!(!b.core_permitted());
-    let epoch = net_a.core.read().as_ref().unwrap().epoch();
-    let response = owner(Method::POST, "/v1/imports/codex")
-        .json(&json!({"resource_id":resource_id}))
-        .send()
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = response.text().await.unwrap();
-    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    let submitted: Value = serde_json::from_str(&body).unwrap();
-    let input_id = submitted["id"].as_str().unwrap();
-    assert_eq!(submitted["attachments"][0]["id"], resource_id);
-
-    // HTTP admission precedes transport delivery; do not call wait_core_completed
-    // until the execution endpoint's durable inbox actually contains the input.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while a.store().message(input_id).is_err() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the executing device did not receive the import");
-    let done = wait_core_completed(&a, input_id).await;
-    assert_eq!(done.status, MessageStatus::Completed, "{:?}", done.error);
-    assert_eq!(done.content, submitted["content"].as_str().unwrap());
-    assert_eq!(done.attachments.len(), 1);
-    assert_eq!(done.attachments[0].id, resource_id);
-    assert!(done.remote_authority.is_none());
-    assert!(matches!(done.source, MessageSource::User));
-    let received = crate::resources::export(&a, "core", &resource_id).unwrap();
-    assert_eq!(
-        crate::resources::bytes(&a, "core", &received).unwrap(),
-        expected_bytes
-    );
-    let imported: Vec<_> = a
-        .store()
-        .actors()
-        .unwrap()
-        .into_iter()
-        .filter(|actor| actor.config.name == "Forwarded Athena")
-        .collect();
-    assert_eq!(imported.len(), 1);
-    let imported = &imported[0];
-    assert_eq!(imported.status, ActorStatus::Idle);
-    assert_eq!(imported.parent_id.as_deref(), Some("core"));
-    assert!(
-        a.store()
-            .messages(&imported.id, None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        a.store()
-            .messages("root", None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    assert!(
-        b.store()
-            .messages("root", None, 10)
-            .unwrap()
-            .items
-            .is_empty()
-    );
-    let parent = a.core_device_actor().unwrap();
-    assert_eq!(imported.config.workspace, parent.config.workspace);
-    assert_ne!(
-        imported.config.workspace,
-        b.core_device_actor().unwrap().config.workspace
-    );
-    let retained = crate::resources::export(&a, &imported.id, &resource_id).unwrap();
-    assert_eq!(
-        crate::resources::bytes(&a, &imported.id, &retained).unwrap(),
-        expected_bytes
-    );
-    assert!(crate::resources::export(&a, "root", &resource_id).is_err());
-    assert_eq!(net_a.core.read().as_ref().unwrap().epoch(), epoch);
-    assert!(!b.core_permitted());
-    assert!(b.config().validate().is_err());
-    assert!(submitting_model.requests.lock().is_empty());
-    assert_eq!(executor_model.requests.lock().len(), 3);
-    let tools = a
-        .store()
-        .tool_summaries("core", input_id, None, 10)
-        .unwrap()
-        .items;
-    assert!(
-        tools
-            .iter()
-            .all(|tool| tool.error.is_none() && tool.name != "actors__message")
-    );
-    let read = tools
-        .iter()
-        .find(|tool| tool.name == "actors__read_resource")
-        .unwrap();
-    let read = a.store().tool_result(&read.id).unwrap();
-    assert!(read.model_content.contains("Original spacing and text."));
-    let creation = tools
-        .iter()
-        .find(|tool| tool.name == "actors__import_conversation")
-        .unwrap();
-    assert_eq!(creation.outcome.as_ref().unwrap()["id"], imported.id);
-
-    // Wait for the completion checkpoint before retrying the same HTTP request.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if net_b.core.read().as_ref().unwrap().accepts_input()
-                && b.store()
-                    .message(input_id)
-                    .is_ok_and(|record| record.status == MessageStatus::Completed)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the follower did not observe the completed import");
-    let response = owner(Method::POST, "/v1/imports/codex")
-        .json(&json!({"resource_id":resource_id}))
-        .send()
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = response.text().await.unwrap();
-    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    let repeated: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(repeated["id"], input_id);
-    assert_eq!(repeated["status"], "completed");
-    assert_eq!(
-        a.store()
-            .actors()
-            .unwrap()
-            .into_iter()
-            .filter(|actor| actor.config.name == "Forwarded Athena")
-            .count(),
-        1
-    );
-    assert!(submitting_model.requests.lock().is_empty());
-    assert_eq!(executor_model.requests.lock().len(), 3);
-
-    server.abort();
-    net_b.stop().await;
-    net_a.stop().await;
-    b.shutdown().await;
-    a.shutdown().await;
 }
 
 #[tokio::test]
@@ -6244,7 +3783,7 @@ async fn runner_prompt_keeps_identity_stable_across_request_authority() {
 
 #[tokio::test]
 async fn runner_preserves_cached_prefix_across_input_boundaries() {
-    for actor_id in [crate::stage::shared::ACTOR_ID, "root"] {
+    for actor_id in ["root"] {
         for reset in [false, true] {
             let provider = Arc::new(ReplayProvider::new(vec![
                 MockReply::Answer("First response."),
@@ -6254,13 +3793,12 @@ async fn runner_preserves_cached_prefix_across_input_boundaries() {
             let (_directory, system) = runtime(provider.clone()).await;
             let host = crate::stage::host::Host::load(system.clone()).unwrap();
             host.initialize(true).unwrap();
-            system.install_local_core().unwrap();
             for (index, content) in ["First input.", "Second input.", "Third input."]
                 .into_iter()
                 .enumerate()
             {
                 let input = system
-                    .send_user(actor_id, content.into(), vec![], None)
+                    .test_actor_input(actor_id, content.into(), vec![], None)
                     .unwrap();
                 let result = wait_completed(&system, &input.id).await;
                 assert_eq!(
@@ -6302,7 +3840,7 @@ async fn runner_keeps_runtime_ids_out_of_ordinary_inputs() {
     let provider = Arc::new(ReplayProvider::new(vec![MockReply::Answer("Done.")]));
     let (_directory, system) = runtime(provider.clone()).await;
     let input = system
-        .send_user("root", "Answer from this context.".into(), vec![], None)
+        .test_actor_input("root", "Answer from this context.".into(), vec![], None)
         .unwrap();
     let completed = wait_completed(&system, &input.id).await;
     assert_eq!(completed.status, MessageStatus::Completed);
@@ -6365,12 +3903,7 @@ async fn builtin_skill_metadata_is_discovered_by_workers_but_not_core() {
         .render();
     assert!(!prompt.contains("builtin-prompt-fixture"));
     assert_shared_actor_instructions(&prompt);
-    assert_eq!(
-        prompt
-            .matches("You are DaatLocus, the user's assistant.")
-            .count(),
-        1
-    );
+    assert_eq!(prompt.matches("You are DaatLocus,").count(), 1);
     system.shutdown().await;
 }
 
@@ -6424,13 +3957,12 @@ impl crate::app::App for RuntimeScopeFixture {
 #[tokio::test]
 async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app() {
     let (directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     provider
         .review_replies
         .lock()
         .push_back(json!({"decision":"approve","reason":"requested fixture scope"}));
     let queued = system
-        .send_user("root", "Inspect fixture".into(), vec![], None)
+        .test_actor_input("root", "Inspect fixture".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     assert_eq!(message.id, queued.id);
@@ -6557,7 +4089,7 @@ async fn runtime_scope_reference_preserves_generic_output_and_never_replays_app(
 async fn runtime_scope_typed_app_denial_and_bounded_output_keep_consumable_references() {
     let (directory, system, _) = paused_runtime().await;
     system
-        .send_user("root", "Inspect fixture".into(), vec![], None)
+        .test_actor_input("root", "Inspect fixture".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -6677,7 +4209,7 @@ fn sudo_write_call(id: &str, path: &std::path::Path, approval: Option<&str>) -> 
 async fn native_capture_failures_preserve_output_and_late_scope_evidence_in_saved_results() {
     let (directory, system, _) = paused_runtime().await;
     system
-        .send_user("root", "Check package setup".into(), vec![], None)
+        .test_actor_input("root", "Check package setup".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -6766,7 +4298,6 @@ fn sudo_fixture_apps() -> AppManager {
 #[tokio::test]
 async fn sudo_review_buffers_incoming_input_and_executes_once_without_device_scope_memory() {
     let (directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     provider
         .review_replies
         .lock()
@@ -6777,7 +4308,7 @@ async fn sudo_review_buffers_incoming_input_and_executes_once_without_device_sco
         .lock()
         .push_back(MockReply::Answer("Received the new instructions"));
     system
-        .send_user("root", "Write the report".into(), vec![], None)
+        .test_actor_input("root", "Write the report".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -6809,7 +4340,7 @@ async fn sudo_review_buffers_incoming_input_and_executes_once_without_device_sco
         }
         assert!(!path.exists(), "effects must wait for Auto");
         let incoming = system
-            .send_user(
+            .test_actor_input(
                 "root",
                 "Keep the requested report concise".into(),
                 vec![],
@@ -6880,13 +4411,12 @@ async fn sudo_review_buffers_incoming_input_and_executes_once_without_device_sco
 #[tokio::test]
 async fn sudo_denial_goes_to_core_and_consent_requires_an_explicit_unchanged_invocation() {
     let (directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     provider
         .review_replies
         .lock()
         .push_back(json!({"decision":"deny","reason":"Core should confirm authorization"}));
     system
-        .send_user("root", "Write the report".into(), vec![], None)
+        .test_actor_input("root", "Write the report".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -6952,7 +4482,7 @@ async fn sudo_denial_goes_to_core_and_consent_requires_an_explicit_unchanged_inv
     .unwrap();
     assert_eq!(provider.review_requests.lock().len(), 1);
     let core_input = system.store().claim_next("core").unwrap().unwrap();
-    let core = system.core_device_actor().unwrap();
+    let core = system.actor("core").unwrap();
     let context = system.execution_context(&core, &core_input).unwrap();
     system
         .resolve_appeal_from_core(
@@ -7011,9 +4541,8 @@ async fn sudo_denial_goes_to_core_and_consent_requires_an_explicit_unchanged_inv
 #[tokio::test]
 async fn sudo_rejects_hard_authority_and_invalid_targets_before_automatic_review() {
     let (directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     system
-        .send_user("root", "Write a report".into(), vec![], None)
+        .test_actor_input("root", "Write a report".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -7069,14 +4598,13 @@ async fn sudo_rejects_hard_authority_and_invalid_targets_before_automatic_review
 #[tokio::test]
 async fn sudo_cancelled_while_waiting_for_auto_never_executes() {
     let (directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     provider.review_blocked.store(true, Ordering::Release);
     provider
         .review_replies
         .lock()
         .push_back(json!({"decision":"approve","reason":"Owner requested it"}));
     system
-        .send_user("root", "Write a report".into(), vec![], None)
+        .test_actor_input("root", "Write a report".into(), vec![], None)
         .unwrap();
     let message = system.store().claim_next("root").unwrap().unwrap();
     let actor = system.execution_actor(&message).unwrap();
@@ -7136,10 +4664,9 @@ async fn sudo_runs_packaged_winget_without_uac_after_native_container_refuses_it
     assert!(expected.status.success());
     let expected = String::from_utf8(expected.stdout).unwrap();
     let (_directory, system, provider) = paused_runtime().await;
-    system.install_local_core().unwrap();
     provider.review_replies.lock().push_back(json!({"decision":"approve","reason":"Owner requested verification of the installed package manager"}));
     system
-        .send_user(
+        .test_actor_input(
             "root",
             "Check the installed winget version".into(),
             vec![],

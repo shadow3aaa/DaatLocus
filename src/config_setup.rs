@@ -179,6 +179,8 @@ pub struct SetupModelRequest {
     pub tool_output_max_tokens: Option<usize>,
     #[serde(default)]
     pub api_style: Option<String>,
+    #[serde(default)]
+    pub native_web_search: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -814,6 +816,7 @@ fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest
         effective_context_window_percent: Some(model.effective_context_window_percent),
         tool_output_max_tokens: Some(model.tool_output_max_tokens),
         api_style: model.api_style.clone(),
+        native_web_search: model.native_web_search,
     }
 }
 
@@ -1593,6 +1596,7 @@ fn model_from_setup_model(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        native_web_search: model.native_web_search,
     })
 }
 

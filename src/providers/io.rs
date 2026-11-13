@@ -610,13 +610,7 @@ pub fn responses_safe_call_id(call_id: &str) -> String {
     }
     let digest = hex::encode(Sha256::digest(call_id.as_bytes()));
     let prefix_budget = MAX_CALL_ID_LEN - DIGEST_LEN - 1;
-    let mut prefix = String::new();
-    for ch in call_id.chars() {
-        if prefix.len() + ch.len_utf8() > prefix_budget {
-            break;
-        }
-        prefix.push(ch);
-    }
+    let prefix = crate::context_budget::utf8_prefix(call_id, prefix_budget);
     format!("{prefix}#{}", &digest[..DIGEST_LEN])
 }
 

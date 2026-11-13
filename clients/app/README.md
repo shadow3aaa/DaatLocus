@@ -33,21 +33,7 @@ cargo xtask package windows
 cargo xtask package macos
 ```
 
-Outputs are written to `target/<triple>/release/package`. Windows setup includes the WebView2 bootstrapper; installing the bare MSI needs WebView2 already installed. The service archive works without WebView2 when only the HTTP web reader is needed.
-
-Windows x64 GUI packaging also needs the signed virtual-display driver, Hook DLL and setup helper. Supply `--windows-certificate-thumbprint <thumbprint>` for the required signing identity, or `--idd-package <directory>` for an existing matching package. Run `cargo xtask package windows --help` for all options.
-
-For local driver development, install MSVC x64 tools, a Windows SDK and libclang, then use:
-
-```sh
-cargo xtask idd-driver --check
-cargo xtask idd-driver --test
-cargo xtask idd-driver
-```
-
-The build downloads the pinned WDK dependencies and creates or reuses the local signing identity in `.dev/windows-signing`. It does not install a driver. Preserve that directory; `--check` and `--test` do not create keys. Distribution signing uses `cargo xtask idd-driver --release --certificate-thumbprint <thumbprint>`.
-
-Windows ComputerUse needs Windows 10 1903+ x64 and the matching installed driver. Driver installation and trust changes need an explicitly authorized elevated session.
+Outputs are written to `target/<triple>/release/package`. Windows distributes the Setup executable, which installs WebView2 if needed; its MSI is an internal payload, not a standalone installer. The service archive works without WebView2 when only the HTTP web reader is needed. Windows includes BrowserUse but not desktop GUI control or virtual displays.
 
 macOS packaging uses `--macos-signing-identity <identity>` when selecting a Keychain identity. Sign and notarize distributed packages with your own credentials. ComputerUse needs macOS privacy permissions for the app bundle you run.
 

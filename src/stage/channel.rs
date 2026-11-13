@@ -56,7 +56,6 @@ impl<W: AsyncWrite + Send + Unpin> FrameWriter for StreamWriter<W> {
 }
 #[derive(Clone)]
 pub enum SendScope {
-    Core,
     Connection,
     Actor(String),
     Invocation {
@@ -145,7 +144,6 @@ impl ChannelSender {
 }
 pub struct PeerChannel {
     pub peer: VerifiedPeer,
-    pub(crate) packed_sync: bool,
     pub sender: ChannelSender,
     pub incoming: mpsc::Receiver<Result<Incoming>>,
     pub closed: watch::Receiver<Failure>,
@@ -167,13 +165,12 @@ impl PeerChannel {
         authorize: impl Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
         let (reader, writer) = tokio::io::split(stream);
-        let mut channel = Self::new(
+        let channel = Self::new(
             peer,
             Box::new(StreamReader(reader, format)),
             Box::new(StreamWriter(writer, format)),
             authorize,
         );
-        channel.packed_sync = format == transport::wire::Format::PackedSync;
         channel
     }
     fn new(
@@ -212,13 +209,8 @@ impl PeerChannel {
                                 | super::protocol::Body::ResultQuery { .. }
                                 | super::protocol::Body::Error { .. }
                                 | super::protocol::Body::Heartbeat
-                                | super::protocol::Body::RecoveryStatus { .. }
-                                | super::protocol::Body::CoordinationRequest { .. }
-                                | super::protocol::Body::CoordinationResponse { .. }
-                                | super::protocol::Body::CoreRequest { .. }
-                                | super::protocol::Body::CoreResponse { .. }
-                                | super::protocol::Body::CoreRequestInline { .. }
-                                | super::protocol::Body::CoreResponseInline { .. }
+                                | super::protocol::Body::SessionRequest { .. }
+                                | super::protocol::Body::OwnerSessionRequest { .. }
                         );
                         let permits = if is_control {
                             incoming_control
@@ -288,7 +280,6 @@ impl PeerChannel {
         );
         Self {
             peer,
-            packed_sync: false,
             sender,
             incoming,
             closed,

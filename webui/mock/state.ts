@@ -19,12 +19,12 @@ import type {
   MessageStatus,
   ModelConfig,
   ProviderConfig,
+  SessionSummary,
   SetupConfigRequest,
   ToolResult,
   ToolSummary,
 } from "../src/lib/actor-api";
 import type { DeviceSettings } from "../src/lib/stage-api";
-import { actorNames } from "./actor-names";
 
 export const STAGE_ID = "4f9c1a5e-8b2d-4e6f-9a3c-7d5e1f0b2a4c";
 export const ACCOUNT_ID = "mock-account";
@@ -58,8 +58,18 @@ export type ActorStore = {
 export type StreamItem = EventRecord | { resync: true };
 export type Listener = (item: StreamItem) => void;
 
+/** Owner-facing metadata of a session, keyed by its session Core actor id. */
+export type SessionMeta = {
+  title: string | null;
+  archived: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+  last_activity_at_ms: number;
+};
+
 export type Store = {
   actors: Map<string, ActorStore>;
+  sessions: Map<string, SessionMeta>;
   /** Stable actor insertion order for catalog paging. */
   order: string[];
   catalog: EventRecord[];
@@ -72,6 +82,7 @@ export type Store = {
 
 export const store: Store = {
   actors: new Map(),
+  sessions: new Map(),
   order: [],
   catalog: [],
   catalogSeq: 0,
@@ -175,27 +186,36 @@ export type ActorSeed = {
   model: string | null;
   workspace: string;
   instructions: string;
+  title?: string | null;
 };
 
-export function nextActorName(): string {
-  const used = new Set([...store.actors.values()].map(actor => actor.summary.name));
-  const name = actorNames.find(name => !used.has(name));
-  if (!name) throw new Error("The fixture has exhausted its mythological Actor names");
+/** A short name taken from the task, unique within the session like the backend's name check. */
+export function taskActorName(session: string, task: string): string {
+  const words = task.replace(/[^\p{L}\p{N}\s-]/gu, " ").trim().split(/\s+/).filter(Boolean).slice(0, 3).join(" ");
+  const base = words ? words[0].toUpperCase() + words.slice(1) : "Task";
+  const used = new Set(sessionWorkers(session).map(actor => actor.summary.name.trim().toLowerCase()));
+  let name = base;
+  for (let index = 2; used.has(name.toLowerCase()); index++) name = `${base} ${index}`;
   return name;
 }
 
 export function requestOrigin(actor: ActorStore): Pick<MessageRecord, "source" | "reply_to"> {
-  return actor.summary.id === ROOT_ACTOR_ID
+  const core = actor.summary.session_id;
+  return actor.summary.role === "session"
     ? {source:{kind:"user"},reply_to:{kind:"user"}}
-    : {source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:store.actors.get(ROOT_ACTOR_ID)?.messages.at(-1)?.id ?? "preview-request"}};
+    : {source:{kind:"actor",actor_id:core},reply_to:{kind:"actor",actor_id:core,request_id:store.actors.get(core)?.messages.at(-1)?.id ?? "preview-request"}};
 }
 
 export function createActor(seed: ActorSeed): ActorStore {
   const ts = now();
-  const apps = seed.id === ROOT_ACTOR_ID ? ["actors","admin_actors"] : ["actors","apps_manager","files","web","browser_use","artifacts",...(process.env.DAAT_LOCUS_MOCK_PHONE === "1" ? ["phone_use"] : ["terminal","sudo","computer_use"])];
+  const session_id = seed.parent_id ? store.actors.get(seed.parent_id)?.summary.session_id ?? seed.parent_id : seed.id;
+  const role = seed.parent_id ? "worker" : "session";
+  const apps = role === "session" ? ["actors","admin_actors","super_skills"] : ["actors","apps_manager","files","web","browser_use","artifacts",...(process.env.DAAT_LOCUS_MOCK_PHONE === "1" ? ["phone_use"] : ["terminal","sudo",...(process.env.DAAT_LOCUS_MOCK_MACOS === "1" ? ["computer_use"] : [])])];
   const summary: ActorSummary = {
     id: seed.id,
     parent_id: seed.parent_id,
+    session_id,
+    role,
     conversation_url: `/actors/${seed.id}`,
     name: seed.name,
     status: "idle",
@@ -207,6 +227,8 @@ export function createActor(seed: ActorSeed): ActorStore {
     remote: false,
     id: seed.id,
     parent_id: seed.parent_id,
+    session_id,
+    role,
     conversation_url: `/actors/${seed.id}`,
     name: seed.name,
     config: {
@@ -220,7 +242,6 @@ export function createActor(seed: ActorSeed): ActorStore {
     status: "idle",
     created_at_ms: ts,
     updated_at_ms: ts,
-    access: { view: true, converse: seed.id === ROOT_ACTOR_ID, manage: true },
   };
   const actor: ActorStore = {
     summary,
@@ -235,7 +256,44 @@ export function createActor(seed: ActorSeed): ActorStore {
   };
   store.actors.set(seed.id, actor);
   store.order.push(seed.id);
+  if (role === "session") store.sessions.set(seed.id, { title: seed.title ?? null, archived: false, created_at_ms: ts, updated_at_ms: ts, last_activity_at_ms: ts });
   return actor;
+}
+
+/** Workers of one session in creation order. */
+export function sessionWorkers(session: string): ActorStore[] {
+  return store.order.map(id => store.actors.get(id)!).filter(actor => actor.summary.session_id === session && actor.summary.role === "worker");
+}
+
+const busy = (actor: ActorStore) => actor.summary.status === "running" || actor.messages.some(message => message.status === "queued" || message.status === "running");
+
+export function sessionSummary(id: string): SessionSummary | null {
+  const meta = store.sessions.get(id), core = store.actors.get(id);
+  if (!meta || !core) return null;
+  const workers = sessionWorkers(id);
+  const working = workers.filter(actor => actor.summary.status === "running").length;
+  return {
+    id,
+    stage_id: STAGE_ID,
+    title: meta.title,
+    status: meta.archived ? "archived" : busy(core) || workers.some(busy) ? "running" : "idle",
+    working_actors: meta.archived ? 0 : working,
+    model: core.detail.config?.model ?? null,
+    created_at_ms: meta.created_at_ms,
+    updated_at_ms: meta.updated_at_ms,
+    last_activity_at_ms: meta.last_activity_at_ms,
+    conversation_url: `/actors/${id}`,
+  };
+}
+
+/** Publish the current session summary on the catalog stream. */
+export function emitSessionChanged(id: string, fields: Partial<SessionMeta> = {}): SessionSummary | null {
+  const meta = store.sessions.get(id);
+  if (!meta) return null;
+  Object.assign(meta, fields);
+  const session = sessionSummary(id);
+  if (session) emitEvent(id, { type: "session_changed", session });
+  return session;
 }
 
 export type NewMessage = {
@@ -273,6 +331,11 @@ export function addMessage(actor: ActorStore, input: NewMessage): MessageRecord 
     updated_at_ms: ts,
   };
   actor.messages.push(record);
+  const meta = store.sessions.get(actor.summary.session_id);
+  if (meta) {
+    meta.last_activity_at_ms = ts;
+    if (meta.title === null && actor.summary.role === "session" && input.source.kind === "user") meta.title = [...(input.content.trim().split("\n")[0] ?? "")].slice(0, 80).join("") || null;
+  }
   return record;
 }
 
@@ -286,6 +349,8 @@ export function touchMessage(record: MessageRecord, fields: Partial<MessageRecor
  * actor stream.
  */
 const CATALOG_EVENTS = new Set([
+  "session_changed",
+  "session_deleted",
   "actor_changed",
   "actor_deleted",
   "approval_requested",
@@ -293,12 +358,14 @@ const CATALOG_EVENTS = new Set([
   "message_updated",
   "message_added",
 ]);
+/** Actor facts that can change a session's status, working count or activity time. */
+const SESSION_FACTS = new Set(["actor_changed", "message_added", "message_updated"]);
 
 export function emitEvent(actorId: string, event: ActorEvent): EventRecord | null {
   const actor = store.actors.get(actorId);
   const ts = now();
   let record: EventRecord | null = null;
-  if (actor) {
+  if (actor && !event.type.startsWith("session_")) {
     record = { seq: ++actor.eventSeq, actor_id: actorId, created_at_ms: ts, event };
     actor.events.push(record);
     if (actor.events.length > EVENT_CAP) actor.events.splice(0, actor.events.length - EVENT_CAP);
@@ -309,6 +376,11 @@ export function emitEvent(actorId: string, event: ActorEvent): EventRecord | nul
     store.catalog.push(catalogRecord);
     if (store.catalog.length > EVENT_CAP) store.catalog.splice(0, store.catalog.length - EVENT_CAP);
     pushItem(CATALOG_KEY, catalogRecord);
+  }
+  if (actor && SESSION_FACTS.has(event.type)) {
+    const session = actor.summary.session_id;
+    if (event.type !== "actor_changed") { const meta = store.sessions.get(session); if (meta) meta.last_activity_at_ms = ts; }
+    emitSessionChanged(session);
   }
   return record;
 }

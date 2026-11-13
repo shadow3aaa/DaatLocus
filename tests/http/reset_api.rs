@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 async fn account_reset_removes_actors_approvals_and_resources_but_preserves_identity_and_configuration()
  {
     let fixture = Fixture::new().await;
-    let _core = daat_locus::stage::shared_runtime::Controller::new(&fixture.stage).unwrap();
     let queued = fixture
         .system
         .send_user("core", "discard this context".into(), vec![], None)
@@ -75,8 +74,7 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
     );
     assert!(fixture.system.actor(&actor).is_err());
     assert!(fixture.system.store().approval(&approval.id).is_err());
-    assert_eq!(fixture.system.store().actors().unwrap().len(), 1);
-    fixture.system.actor("core").unwrap();
+    assert!(fixture.system.store().actors().unwrap().is_empty());
     assert!(
         fixture
             .system
@@ -86,6 +84,15 @@ async fn account_reset_removes_actors_approvals_and_resources_but_preserves_iden
             .is_empty()
     );
     assert!(fixture.system.store().message(&queued.id).is_err());
+    let fresh = fixture
+        .owner(Method::POST, "/v1/sessions")
+        .header("idempotency-key", "after-reset")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::CREATED);
+    assert_ne!(fresh.json::<Value>().await.unwrap()["id"], "core");
     assert!(daat_locus::resources::export(&fixture.system, "core", &resource.id).is_err());
     assert_eq!(
         fixture

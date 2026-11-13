@@ -97,33 +97,6 @@ impl TaskHandoff {
             related_message_ids: seen,
         }
     }
-
-    fn valid(&self) -> bool {
-        valid_id(&self.task_message_id)
-            && self
-                .checkpoint
-                .as_ref()
-                .is_none_or(|note| !note.trim().is_empty())
-            && self.related_message_ids.len() <= RELATED_LIMIT
-            && self.related_message_ids.iter().all(|id| valid_id(id))
-    }
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100
-}
-
-impl AgentContext {
-    pub(crate) fn valid(&self) -> bool {
-        self.model_binding.len() <= 64
-            && self.usage.valid()
-            && self.model_usage.iter().all(|model| model.usage.valid())
-            && self.anchor.as_ref().is_none_or(|anchor| {
-                valid_id(&anchor.message_id)
-                    && !anchor.reset_id.is_nil()
-                    && anchor.handoff.as_ref().is_none_or(TaskHandoff::valid)
-            })
-    }
 }
 
 impl HistoryAnchor {

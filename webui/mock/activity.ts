@@ -43,8 +43,8 @@ function edit(file: string): Action {
 }
 
 export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
-  actor.detail.config!.name = "Iris";
-  actor.summary.name = "Iris";
+  actor.detail.config!.name = "Layout fixes";
+  actor.summary.name = "Layout fixes";
   const input = addMessage(actor, {kind:"request",...requestOrigin(actor),content:thinkingOnly?"Plan how to verify the conversation layout.":"Review the conversation layout, fix any issues, and verify desktop and mobile.",status:"running"});
   touchMessage(input, {started_at_ms:now()-48000});
   emitEvent(actor.summary.id,{type:"message_added",message_id:input.id});
@@ -58,7 +58,7 @@ export function seedActivityPreview(actor: ActorStore, thinkingOnly = false) {
   text(state,"assistant","I will check the conversation, activity and composer boundaries, then verify the reading position on narrow screens.");
   text(state,"reasoning","Check the visible reading area, then inspect the relevant layout files.");
   const actions: Action[] = [
-    {name:"web__run",summary:"Review the conversation and activity preview",arguments:{open:[{ref_id:"http://127.0.0.1:5177/",offset:null,source:"rendered",view:null,refresh:false}],click:null,find:null,response_length:"medium"},outcome:{url:"http://127.0.0.1:5177/"},payload:{results:[{operation:"open",result:{ref_id:"web:preview",title:"Work activity · Step-by-step preview",url:"http://127.0.0.1:5177/",offset:0,next_offset:null,content:"Conversation: Iris\nMessage history\nGrouped activity\nComposer\n\nThe conversation remains readable when the composer grows."}}]}},
+    {name:"web__run",summary:"Review the conversation and activity preview",arguments:{open:[{ref_id:"http://127.0.0.1:5177/",offset:null,source:"rendered",view:null,refresh:false}],click:null,find:null,response_length:"medium"},outcome:{url:"http://127.0.0.1:5177/"},payload:{results:[{operation:"open",result:{ref_id:"web:preview",title:"Work activity · Step-by-step preview",url:"http://127.0.0.1:5177/",offset:0,next_offset:null,content:"Conversation: Layout fixes\nMessage history\nGrouped activity\nComposer\n\nThe conversation remains readable when the composer grows."}}]}},
     read("webui/src/components/conversation-pane.tsx"),
     read("webui/src/components/work-activity.tsx"),
     command("rg -n 'padding|gap|overflow' webui/src/index.css"),
@@ -154,8 +154,8 @@ Reviewing stage ${state.phase + 1} in detail.`});
 }
 
 export function seedPaginatedActivityPreview(actor: ActorStore) {
-  actor.detail.config!.name = "Iris";
-  actor.summary.name = "Iris";
+  actor.detail.config!.name = "Layout fixes";
+  actor.summary.name = "Layout fixes";
   const input = addMessage(actor, {kind:"request",...requestOrigin(actor),content:"Review the conversation, activity and composer one at a time, retaining each check.",status:"completed"});
   const state: Preview = {actor,input,generation:0,phase:4};
   emitEvent(actor.summary.id,{type:"message_added",message_id:input.id});

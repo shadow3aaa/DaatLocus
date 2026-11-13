@@ -8,7 +8,7 @@ async fn native_capture_updates_the_running_tool_with_files_and_bytes() {
     let actor = system.actor("root").unwrap();
     std::fs::write(actor.config.workspace.join("file.txt"), b"abc").unwrap();
     let input = system
-        .send_user("root", "Capture a branch".into(), vec![], None)
+        .test_actor_input("root", "Capture a branch".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let call = crate::model_protocol::AgentToolCall {
@@ -41,7 +41,7 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
         "native workspace mount probe failed"
     );
     let input = system
-        .send_user("root", "Develop in a shared branch".into(), vec![], None)
+        .test_actor_input("root", "Develop in a shared branch".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let original = system.actor("root").unwrap();
@@ -276,7 +276,7 @@ async fn workspace_native_app_shares_actor_branches_and_restores_the_selected_di
     .await
     .unwrap();
     let next = reopened
-        .send_user("root", "Continue the existing branch".into(), vec![], None)
+        .test_actor_input("root", "Continue the existing branch".into(), vec![], None)
         .unwrap();
     reopened.store().claim_next("root").unwrap().unwrap();
     let actor = reopened.actor("root").unwrap();
@@ -300,7 +300,7 @@ async fn workspace_versions_and_publication_retain_device_authority() {
     let (directory, system) = fixture().await;
     *system.inner.workspace_backend.lock() = Some(true);
     let input = system
-        .send_user("root", "Inspect a branch".into(), vec![], None)
+        .test_actor_input("root", "Inspect a branch".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let actor = system.actor("root").unwrap();
@@ -407,7 +407,7 @@ async fn workspace_selection_commits_only_the_current_request_and_preserves_othe
     system.seed_test_actor("peer");
     let original = system.actor("root").unwrap();
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Select another execution directory".into(),
             vec![],
@@ -484,7 +484,7 @@ async fn unavailable_workspace_backend_registers_no_app_or_tools() {
     );
     let prompt = super::super::super::prompt::SystemPrompt::for_role(&system, false).unwrap();
     assert!(prompt.files.iter().all(|file| file.name != "workspaces.md"));
-    let core = system.core_device_actor().unwrap();
+    let core = system.actor("core").unwrap();
     let apps = crate::builtin_apps::create_apps(&core, system.clone(), &system.config()).unwrap();
     assert!(apps.app_ids().iter().all(|id| id.as_str() != "workspace"));
     system.shutdown().await;
@@ -522,7 +522,7 @@ async fn workspace_tool_schemas_and_default_migration_retain_native_files_and_au
     *system.inner.workspace_backend.lock() = Some(true);
     let original = system.actor("root").unwrap();
     let input = system
-        .send_user("root", "Use a native directory".into(), vec![], None)
+        .test_actor_input("root", "Use a native directory".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let context = system.execution_context(&original, &input).unwrap();
@@ -580,7 +580,7 @@ async fn project_deletion_waits_for_other_actors_and_keeps_native_files() {
     let (directory, system) = fixture().await;
     system.set_workspace_backend_for_test(true);
     let input = system
-        .send_user("root", "Clean unused projects".into(), vec![], None)
+        .test_actor_input("root", "Clean unused projects".into(), vec![], None)
         .unwrap();
     system.store().claim_next("root").unwrap().unwrap();
     let root = system.actor("root").unwrap();

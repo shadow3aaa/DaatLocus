@@ -223,8 +223,35 @@ impl App for SuperSkillsApp {
             .actor_call
             .as_ref()
             .ok_or_else(|| miette!("Core input is required"))?;
-        self.system
-            .record_for_tool(crate::stage::shared::ACTOR_ID, caller)?;
+        let actor = self.system.record_for_tool(&caller.actor_id, caller)?;
+        if actor.role != crate::actors::ActorRole::Session {
+            return Err(miette!("Skills coordination requires a session Core"));
+        }
+        let stage = call
+            .arguments
+            .get("stage_id")
+            .and_then(serde_json::Value::as_str);
+        if crate::stage::session::target(&self.system, stage)?
+            != self.system.store().public_stage_id()?
+        {
+            let value = crate::stage::session::execute(
+                &self.system,
+                caller,
+                stage,
+                crate::stage::session::Operation::Skills { call: call.clone() },
+            )
+            .await?;
+            return serde_json::from_value(value).into_diagnostic();
+        }
+        self.execute_device(call, context).await
+    }
+}
+impl SuperSkillsApp {
+    pub(crate) async fn execute_device(
+        &mut self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<AppToolExecutionResult> {
         let mut output = match call.name.as_str() {
             "list_skills" => {
                 let args: ListSkillsArgs =

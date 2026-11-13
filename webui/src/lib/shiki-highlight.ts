@@ -89,7 +89,7 @@ async function highlightCodeWithShikiUncached(
       language,
       background: result.bg,
       foreground: result.fg,
-      lines: filledLines.map((line) => line.map(shikiTokenFromThemedToken)),
+      lines: filledLines,
     };
   } catch {
     return null;
@@ -98,7 +98,7 @@ async function highlightCodeWithShikiUncached(
 
 export function resolveShikiLanguage(
   input: string,
-  bundledLanguages?: Record<string, unknown>,
+  bundledLanguages: Record<string, unknown>,
 ): BundledLanguage | null {
   const trimmed = input.trim();
   if (!trimmed) {
@@ -106,12 +106,11 @@ export function resolveShikiLanguage(
   }
 
   for (const candidate of shikiLanguageCandidates(trimmed)) {
-    const direct = shikiLanguage(candidate, bundledLanguages);
-    if (direct) {
-      return direct;
+    if (Object.hasOwn(bundledLanguages, candidate)) {
+      return candidate as BundledLanguage;
     }
     const aliased = shikiLanguageAliases[candidate];
-    if (aliased && shikiLanguage(aliased, bundledLanguages)) {
+    if (aliased && Object.hasOwn(bundledLanguages, aliased)) {
       return aliased;
     }
   }
@@ -134,44 +133,12 @@ function shikiLanguageCandidates(input: string): string[] {
   const fileName = normalized.split("/").filter(Boolean).at(-1) ?? normalized;
   const extension = fileName.includes(".") ? fileName.split(".").at(-1) : null;
 
-  return dedupeStrings([
+  return [...new Set([
     shikiFilenameLanguages[fileName],
     extension,
     fileName,
     normalized,
-  ]);
-}
-
-function shikiLanguage(
-  value: string | undefined,
-  bundledLanguages?: Record<string, unknown>,
-): BundledLanguage | null {
-  if (!value || !bundledLanguages) {
-    return null;
-  }
-  return Object.hasOwn(bundledLanguages, value)
-    ? (value as BundledLanguage)
-    : null;
-}
-
-function shikiTokenFromThemedToken(token: ThemedToken): ShikiHighlightToken {
-  return {
-    content: token.content,
-    color: token.color,
-    fontStyle: token.fontStyle,
-    offset: token.offset,
-  };
-}
-
-function dedupeStrings(values: Array<string | undefined | null>) {
-  const seen = new Set<string>();
-  return values.filter((value): value is string => {
-    if (!value || seen.has(value)) {
-      return false;
-    }
-    seen.add(value);
-    return true;
-  });
+  ].filter((value): value is string => Boolean(value)))];
 }
 
 /**
@@ -195,10 +162,6 @@ function fillTokenGaps(
     let linePos = 0;
 
     for (const token of lineTokens) {
-      if (token.offset === undefined) {
-        filled.push(token);
-        continue;
-      }
       const tokenStart = token.offset - lineStartOffset;
       if (tokenStart > linePos) {
         filled.push({

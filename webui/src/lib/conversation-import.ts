@@ -18,6 +18,7 @@ export const getImportCapabilities = (signal?: AbortSignal) => request<{codex: b
 export const listCodexConversations = (search: string, after?: string, refresh = false, signal?: AbortSignal) =>
   request<{items: CodexConversation[]; next_cursor: string | null}>(`/v1/imports/codex?limit=24&search=${encodeURIComponent(search)}${after?`&after=${encodeURIComponent(after)}`:""}${refresh?"&refresh=true":""}`,{signal});
 export const previewCodexImport = (source_id: string, signal?: AbortSignal) => request<ImportPreview>("/v1/imports/codex/preview",{method:"POST",body:{source_id},signal});
-export function submitCodexImport(resource_id: string) {
-  return request<MessageRecord>("/v1/imports/codex", {method: "POST", body: {resource_id}});
+/** A null session starts a new session; otherwise the conversation joins that local session. */
+export function submitCodexImport(resource_id: string, session_id: string | null) {
+  return request<MessageRecord>("/v1/imports/codex", {method: "POST", body: {resource_id, session_id}});
 }

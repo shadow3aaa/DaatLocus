@@ -15,7 +15,7 @@
 
 - A unified, straightforward interface for moving tasks forward in parallel from one window.
 - Connect devices into a distributed Agent network, or use a single device on its own.
-- Virtual-screen ComputerUse across multiple platforms, so Agents can work with GUI applications without interrupting you.
+- ComputerUse on macOS and Android virtual displays, so Agents can use GUI applications without taking over your main desktop. Windows keeps BrowserUse but does not include desktop GUI control or virtual displays.
 - An Agent browser that also works as an ordinary browser.
 - Very low memory use, even with several Agents working at once.
 - An elegant, simple interface.

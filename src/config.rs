@@ -153,6 +153,10 @@ pub struct ModelConfig {
     /// `None`) uses chat completions.
     #[serde(default)]
     pub api_style: Option<String>,
+    /// Auto probes provider-native search with the first real request, then
+    /// remembers confirmed incompatibility; false disables it for this model.
+    #[serde(default)]
+    pub native_web_search: Option<bool>,
 }
 
 impl Default for ModelConfig {
@@ -173,6 +177,7 @@ impl Default for ModelConfig {
             tool_output_max_tokens: DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
             supports_vision: None,
             api_style: None,
+            native_web_search: None,
         }
     }
 }

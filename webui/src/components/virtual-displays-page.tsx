@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { MonitorIcon, PanelLeftIcon } from "lucide-react";
+import { ExpandIcon, MonitorIcon, PanelLeftIcon, ScanSearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyHeader, EmptyTitle, EmptyMedia } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { t } from "@/lib/i18n";
 import { observeVirtualDisplays, type DisplayPreview, type VirtualDisplay } from "@/lib/virtual-displays";
+import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "./ui/dialog";
 
 const empty: DisplayPreview = { catalog: null, display: null, image: null, failed: false };
 export function VirtualDisplaysPage({ onNavigation, onAccessRevoked }: { onNavigation(): void; onAccessRevoked(): void }) {
@@ -14,6 +15,7 @@ export function VirtualDisplaysPage({ onNavigation, onAccessRevoked }: { onNavig
   const [selected, setSelected] = useState<string | null>(null);
   const [preview, setPreview] = useState(empty);
   const [source, setSource] = useState<string | null>(null);
+  const [scale, setScale] = useState<"fit" | "actual">("fit");
   useEffect(() => {
     let controller: AbortController | undefined;
     function stop() { controller?.abort(); setPreview(old => ({ ...old, image: null })); }
@@ -43,12 +45,14 @@ export function VirtualDisplaysPage({ onNavigation, onAccessRevoked }: { onNavig
       <div className="dl-apps-title"><Button variant="ghost" size="icon-sm" className="dl-apps-mobile-navigation" aria-label={t("navigation.open_sidebar")} onClick={onNavigation}><PanelLeftIcon /></Button><h1>{t("virtual_displays.title")}</h1></div>
       <div className="dl-virtual-displays-selection">
         {displays.length > 1 && <Select value={selectedDisplay?.id ?? ""} onValueChange={setSelected}><SelectTrigger aria-label={t("virtual_displays.select")}><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{displays.map(display => <SelectItem key={display.id} value={display.id}>{label(display)}</SelectItem>)}</SelectGroup></SelectContent></Select>}
-        {selectedDisplay && <span className="dl-virtual-displays-size">{selectedDisplay.width} × {selectedDisplay.height}</span>}
-        <span className="dl-virtual-displays-size">{t("virtual_displays.read_only")}</span>
-      </div>
+         {selectedDisplay && <span className="dl-virtual-displays-size">{selectedDisplay.width} × {selectedDisplay.height}</span>}
+         <span className="dl-virtual-displays-size">{t("virtual_displays.read_only")}</span>
+         {source && <Button variant="ghost" size="sm" aria-pressed={scale === "actual"} onClick={() => setScale(value => value === "fit" ? "actual" : "fit")}><ScanSearchIcon />{t(scale === "fit" ? "virtual_displays.actual_size" : "virtual_displays.fit_view")}</Button>}
+         {source && <Dialog><DialogTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={t("virtual_displays.fullscreen")}><ExpandIcon /></Button></DialogTrigger><DialogContent className="dl-display-viewer" aria-describedby={undefined}><DialogTitle className="sr-only">{selectedDisplay ? label(selectedDisplay) : t("virtual_displays.title")}</DialogTitle><div className="dl-display-viewer-meta">{selectedDisplay && <span>{selectedDisplay.width} × {selectedDisplay.height}</span>}<span>{t("virtual_displays.read_only")}</span></div><div className="dl-display-viewer-frame"><img src={source} alt={selectedDisplay ? label(selectedDisplay) : t("virtual_displays.title")} draggable={false} /></div></DialogContent></Dialog>}
+       </div>
     </header>
-    <div className="dl-virtual-displays-viewport">
-      {source && preview.image ? <img src={source} alt={preview.display ? label(preview.display) : t("virtual_displays.title")} draggable={false} /> : !state ? <Skeleton className="h-full w-full" /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><MonitorIcon /></EmptyMedia><EmptyTitle>{t(`virtual_displays.${state === "ready" ? (preview.display ? "waiting" : "empty") : state}`)}</EmptyTitle></EmptyHeader></Empty>}
+    <div className="dl-virtual-displays-viewport" data-scale={scale}>
+      {source && preview.image ? <img data-scale={scale} src={source} alt={preview.display ? label(preview.display) : t("virtual_displays.title")} draggable={false} /> : !state ? <Skeleton className="h-full w-full" /> : <Empty><EmptyHeader><EmptyMedia variant="icon"><MonitorIcon /></EmptyMedia><EmptyTitle>{t(`virtual_displays.${state === "ready" ? (preview.display ? "waiting" : "empty") : state}`)}</EmptyTitle></EmptyHeader></Empty>}
     </div>
   </section>;
 }

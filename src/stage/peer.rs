@@ -28,9 +28,7 @@ mod backpressure_tests {
     use crate::{
         actors::ActorSystem,
         config::{Config, ModelConfig, ProviderConfig},
-        stage::{
-            identity::DeviceIdentity, runtime::Runtime, shared_runtime::Controller, transport,
-        },
+        stage::{identity::DeviceIdentity, transport},
     };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,13 +293,11 @@ mod backpressure_tests {
         let enrollment = host
             .enroll_authenticated_device(&remote.join_request(now()).unwrap())
             .unwrap();
-        let runtime = Runtime::new(host.clone());
-        let _core = Controller::new(&runtime).unwrap();
         let mut expected = std::collections::HashSet::new();
         for i in 0..128 {
             expected.insert(
                 system
-                    .send_user("root", format!("Existing message {i}"), vec![], None)
+                    .send_user("core", format!("Existing message {i}"), vec![], None)
                     .unwrap()
                     .id,
             );
@@ -439,15 +435,11 @@ pub enum Command {
 }
 #[derive(Clone)]
 pub struct PeerHandle {
-    packed_sync: bool,
     commands: mpsc::Sender<Command>,
     metrics: Arc<parking_lot::Mutex<super::scheduler::Traffic>>,
     stop: tokio::sync::watch::Sender<bool>,
 }
 impl PeerHandle {
-    pub(crate) fn packed_sync(&self) -> bool {
-        self.packed_sync
-    }
     pub(crate) fn disconnect(&self) {
         self.stop.send_replace(true);
     }
@@ -575,12 +567,11 @@ pub struct PeerLink {
     sent_account_binding: Option<String>,
     sent_configuration_binding: Option<String>,
     sent_instruction_binding: Option<String>,
-    sent_recovery_status: Option<super::recovery::Status>,
     notice_cursor: i64,
     sent_revocations: std::collections::HashSet<super::StageId>,
     host: Arc<Host>,
     handle: PeerHandle,
-    core_tasks: Vec<tokio::task::JoinHandle<()>>,
+    background_tasks: Vec<tokio::task::JoinHandle<()>>,
     channel: PeerChannel,
     generation: u64,
     commands: mpsc::Receiver<Command>,
@@ -594,7 +585,7 @@ pub struct PeerLink {
 }
 impl Drop for PeerLink {
     fn drop(&mut self) {
-        for task in self.core_tasks.drain(..) {
+        for task in self.background_tasks.drain(..) {
             task.abort();
         }
     }
@@ -604,7 +595,6 @@ impl PeerLink {
         let (tx, commands) = mpsc::channel(32);
         let (stop_tx, stop) = tokio::sync::watch::channel(false);
         let metrics = channel.metrics.clone();
-        let packed_sync = channel.packed_sync;
         (
             Self {
                 work_generation: None,
@@ -614,17 +604,15 @@ impl PeerLink {
                 sent_account_binding: None,
                 sent_configuration_binding: None,
                 sent_instruction_binding: None,
-                sent_recovery_status: None,
                 notice_cursor: 0,
                 sent_revocations: std::collections::HashSet::new(),
                 host,
                 handle: PeerHandle {
-                    packed_sync,
                     commands: tx.clone(),
                     metrics: metrics.clone(),
                     stop: stop_tx.clone(),
                 },
-                core_tasks: vec![],
+                background_tasks: vec![],
                 channel,
                 generation,
                 commands,
@@ -637,7 +625,6 @@ impl PeerLink {
                 download_cursor: None,
             },
             PeerHandle {
-                packed_sync,
                 commands: tx,
                 metrics,
                 stop: stop_tx,
@@ -900,7 +887,7 @@ impl PeerLink {
             }
         };
         let result = result.map_err(|error| self.channel.failure().unwrap_or(error));
-        for task in self.core_tasks.drain(..) {
+        for task in self.background_tasks.drain(..) {
             task.abort();
             let _ = task.await;
         }
@@ -1116,12 +1103,12 @@ impl PeerLink {
             return Ok(());
         };
         self.account_credential_authority()?;
-        self.core_tasks.retain(|task| !task.is_finished());
-        if self.core_tasks.len() >= 16 {
+        self.background_tasks.retain(|task| !task.is_finished());
+        if self.background_tasks.len() >= 16 {
             return Err(StageError::Capacity("Account import task budget exceeded"));
         }
         let host = self.host.clone();
-        self.core_tasks.push(tokio::spawn(async move {
+        self.background_tasks.push(tokio::spawn(async move {
             if host.configurations.import(&host, record).await.is_err() {
                 tracing::debug!("Account configuration import rejected");
             }
@@ -1209,7 +1196,7 @@ impl PeerLink {
             .map_err(|_| StageError::Conflict("Account credential import rejected"))?
         {
             let system = self.host.system.clone();
-            self.core_tasks.push(tokio::spawn(async move {
+            self.background_tasks.push(tokio::spawn(async move {
                 let _ = system.activate_account_workers().await;
             }));
         }
@@ -1234,27 +1221,6 @@ impl PeerLink {
         self.publish_accounts()?;
         self.publish_configuration()?;
         self.publish_instructions()?;
-        let core = self
-            .host
-            .core
-            .read()
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade);
-        if self.account_credential_authority().is_ok()
-            && let Some(core) = core
-        {
-            let status = core.recovery_status()?;
-            if self.sent_recovery_status.as_ref() != Some(&status) {
-                self.send(
-                    self.frame(Body::RecoveryStatus {
-                        status: status.clone(),
-                    }),
-                    Class::Control,
-                    SendScope::Core,
-                )?;
-                self.sent_recovery_status = Some(status);
-            }
-        }
         let mut after = None;
         let mut outgoing = Vec::new();
         loop {
@@ -1300,18 +1266,6 @@ impl PeerLink {
                 break;
             }
             let sequence = record.seq;
-            // Shared Core messages arrive through the canonical replica stream.
-            // Qualifying them as a remote Actor creates a duplicate identity.
-            if record.actor_id == super::shared::ACTOR_ID
-                && matches!(
-                    record.event,
-                    crate::actors::ActorEvent::MessageAdded { .. }
-                        | crate::actors::ActorEvent::MessageUpdated { .. }
-                )
-            {
-                self.notice_cursor = sequence;
-                continue;
-            }
             if record.actor_id.contains('~') {
                 self.notice_cursor = sequence;
                 continue;
@@ -1397,15 +1351,86 @@ impl PeerLink {
                     | Body::ActorAdminResult { .. }
                     | Body::ConversationResult { .. }
                     | Body::ResourceStored { .. }
-                    | Body::CoordinationResponse { .. }
-                    | Body::CoreResponse { .. }
-                    | Body::CoreResponseInline { .. }
+                    | Body::OwnerSessionReply { .. }
+                    | Body::SessionReply { .. }
             )
         {
             return Ok(());
         }
         let receiver = StageReceiver::new(self.host.system.clone());
         match &frame.body {
+            Body::SessionRequest { content, export } => {
+                super::owner_http::authorize(&self.host, self.channel.peer.stage_id())?;
+                let host = self.host.clone();
+                let handle = self.handle.clone();
+                let sender = self.channel.sender.clone();
+                let peer = self.channel.peer.stage_id();
+                let content = content.clone();
+                let export = *export;
+                let mut response = self.frame(Body::Heartbeat);
+                response.in_reply_to = Some(frame.message_id);
+                self.background_tasks.retain(|task| !task.is_finished());
+                self.background_tasks.push(tokio::spawn(async move {
+                    let result = async {
+                        let bytes = handle.exported_content(export, content).await?;
+                        super::owner_http::authorize(&host, peer)?;
+                        let request = serde_json::from_slice(&bytes)
+                            .map_err(|_| StageError::Invalid("Invalid session operation"))?;
+                        let reply =
+                            super::session::dispatch(host.system.clone(), peer, request).await?;
+                        let bytes = serde_json::to_vec(&reply)
+                            .map_err(|_| StageError::Invalid("Invalid session result"))?;
+                        let (content, export) = super::owner_http::export(&host, peer, &bytes)?;
+                        Ok::<_, StageError>(Body::SessionReply { content, export })
+                    }
+                    .await;
+                    response.body = result.unwrap_or_else(|e| Body::Error {
+                        request: response.in_reply_to.unwrap(),
+                        code: error_code(&e).into(),
+                    });
+                    let _ = sender
+                        .send_wait(response, Class::Control, SendScope::Connection)
+                        .await;
+                }));
+                Ok(())
+            }
+            Body::OwnerSessionRequest { content, export } => {
+                super::owner_http::authorize(&self.host, self.channel.peer.stage_id())?;
+                let host = self.host.clone();
+                let handle = self.handle.clone();
+                let sender = self.channel.sender.clone();
+                let peer = self.channel.peer.stage_id();
+                let content = content.clone();
+                let export = *export;
+                let mut response = self.frame(Body::Heartbeat);
+                response.in_reply_to = Some(frame.message_id);
+                self.background_tasks.retain(|task| !task.is_finished());
+                self.background_tasks.push(tokio::spawn(async move {
+                    let result = async {
+                        let bytes = handle.exported_content(export, content).await?;
+                        let request = serde_json::from_slice(&bytes)
+                            .map_err(|_| StageError::Invalid("Invalid session request"))?;
+                        let reply =
+                            crate::service::relay_request(host.clone(), peer, request).await?;
+                        let bytes = serde_json::to_vec(&reply)
+                            .map_err(|_| StageError::Invalid("Invalid session response"))?;
+                        let (content, export) = super::owner_http::export(&host, peer, &bytes)?;
+                        Ok::<_, StageError>(Body::OwnerSessionReply { content, export })
+                    }
+                    .await;
+                    response.body = result.unwrap_or_else(|e| {
+                        tracing::debug!(reason=%e,"Session relay request rejected");
+                        Body::Error {
+                            request: response.in_reply_to.unwrap(),
+                            code: error_code(&e).into(),
+                        }
+                    });
+                    let _ = sender
+                        .send_wait(response, Class::Control, SendScope::Connection)
+                        .await;
+                }));
+                Ok(())
+            }
             Body::AccountWorkReset { .. } => {
                 Err(StageError::Conflict("Reset negotiation already completed"))
             }
@@ -1471,8 +1496,8 @@ impl PeerLink {
                 {
                     return self.reject(frame.message_id, "forbidden");
                 }
-                self.core_tasks.retain(|task| !task.is_finished());
-                if self.core_tasks.len() >= 8 {
+                self.background_tasks.retain(|task| !task.is_finished());
+                if self.background_tasks.len() >= 8 {
                     return self.reject(frame.message_id, "capacity");
                 }
                 let host = self.host.clone();
@@ -1482,7 +1507,7 @@ impl PeerLink {
                 let action = action.clone();
                 let request = frame.message_id;
                 let generation = self.generation;
-                self.core_tasks.push(tokio::spawn(async move {
+                self.background_tasks.push(tokio::spawn(async move {
                     let result = async {
                         if !StageLedger::attach(host.system.store(), host.local).manages_actor(
                             peer,
@@ -1569,8 +1594,8 @@ impl PeerLink {
                 {
                     return self.reject(frame.message_id, "forbidden");
                 }
-                self.core_tasks.retain(|task| !task.is_finished());
-                if self.core_tasks.len() >= 8 {
+                self.background_tasks.retain(|task| !task.is_finished());
+                if self.background_tasks.len() >= 8 {
                     return self.reject(frame.message_id, "capacity");
                 }
                 let host = self.host.clone();
@@ -1582,7 +1607,7 @@ impl PeerLink {
                 let export = *export;
                 let generation = self.generation;
                 let request = frame.message_id;
-                self.core_tasks.push(tokio::spawn(async move {
+                self.background_tasks.push(tokio::spawn(async move {
                     let result = async {
                         let bytes = handle
                             .exported_content(export, resource.content.clone())
@@ -1631,148 +1656,6 @@ impl PeerLink {
                     .store()
                     .receive_notice(self.channel.peer.stage_id(), record)
                     .map_err(|_| StageError::Unavailable("Cannot persist account notice"))?;
-                Ok(())
-            }
-            Body::CoordinationRequest { request } => {
-                let coordinator = self
-                    .host
-                    .coordination
-                    .read()
-                    .as_ref()
-                    .and_then(std::sync::Weak::upgrade);
-                let Some(coordinator) = coordinator else {
-                    return self.reject(frame.message_id, "unavailable");
-                };
-                let peer = self.channel.peer.stage_id();
-                if coordinator.authorize(peer).is_err() {
-                    return self.reject(frame.message_id, "forbidden");
-                }
-                self.core_tasks.retain(|task| !task.is_finished());
-                if self.core_tasks.len() >= 16 {
-                    return self.reject(frame.message_id, "capacity");
-                }
-                let sender = self.channel.sender.clone();
-                let mut reply = self.frame(Body::Heartbeat);
-                reply.in_reply_to = Some(frame.message_id);
-                let request = *request.clone();
-                self.core_tasks.push(tokio::spawn(async move {
-                    let response = coordinator
-                        .handle(peer, request)
-                        .await
-                        .unwrap_or(super::coordination::Response::Rejected);
-                    reply.body = Body::CoordinationResponse {
-                        response: Box::new(response),
-                    };
-                    let _ = sender
-                        .send_wait(reply, Class::Control, SendScope::Connection)
-                        .await;
-                }));
-                Ok(())
-            }
-            Body::CoreRequest { .. } | Body::CoreRequestInline { .. } => {
-                self.account_credential_authority()?;
-                if matches!(frame.body, Body::CoreRequestInline { .. })
-                    && !self.handle.packed_sync()
-                {
-                    return Err(StageError::Forbidden(
-                        "Inline Core calls require protocol negotiation",
-                    ));
-                }
-                self.core_tasks.retain(|task| !task.is_finished());
-                if self.core_tasks.len() >= 8 {
-                    return Err(StageError::Capacity("Core control task budget reached"));
-                }
-                let core = self
-                    .host
-                    .core
-                    .read()
-                    .as_ref()
-                    .and_then(std::sync::Weak::upgrade)
-                    .ok_or(StageError::Unavailable("Account Actor is not enabled"))?;
-                let host = self.host.clone();
-                let handle = self.handle.clone();
-                let sender = self.channel.sender.clone();
-                let body = frame.body.clone();
-                let peer = self.channel.peer.stage_id();
-                let generation = self.generation;
-                let request_id = frame.message_id;
-                self.core_tasks.push(tokio::spawn(async move {
-                    let result = async {
-                        let bytes = match body {
-                            Body::CoreRequestInline { bytes } => bytes,
-                            Body::CoreRequest { content } => {
-                                handle
-                                    .content(
-                                        ActorAddress {
-                                            stage_id: peer,
-                                            actor_id: super::shared::ACTOR_ID.into(),
-                                        },
-                                        content,
-                                    )
-                                    .await?
-                            }
-                            _ => unreachable!(),
-                        };
-                        let request = super::core_transfer::decode_request(
-                            host.system.store(),
-                            &bytes,
-                            handle.packed_sync(),
-                        )?;
-                        core.handle(peer, request).await
-                    }
-                    .await;
-                    let response = result.unwrap_or_else(|error| {
-                        tracing::debug!(peer=%peer,reason=%error,"Shared Actor request rejected");
-                        if let StageError::ApprovalDenied(mut rejection) = error {
-                            rejection.reason = host
-                                .system
-                                .safe_error(&rejection.reason)
-                                .chars()
-                                .take(1000)
-                                .collect();
-                            return super::core_wire::Response::ApprovalDenied { rejection };
-                        }
-                        super::core_wire::Response::Error {
-                            code: "core_operation_rejected".into(),
-                        }
-                    });
-                    if let Ok(bytes) = super::core_transfer::encode_response(
-                        host.system.store(),
-                        &response,
-                        handle.packed_sync(),
-                    ) {
-                        let body = if handle.packed_sync()
-                            && bytes.len() <= super::core_transfer::INLINE_BYTES
-                        {
-                            Body::CoreResponseInline { bytes }
-                        } else {
-                            let Ok(manifest) = ContentStore::new(host.system.store())
-                                .store_source(super::shared::ACTOR_ID, &bytes)
-                            else {
-                                return;
-                            };
-                            Body::CoreResponse {
-                                content: manifest.content,
-                            }
-                        };
-                        let time = now();
-                        let response = Envelope {
-                            version: 1,
-                            source: host.local,
-                            target: peer,
-                            generation,
-                            message_id: Uuid::new_v4(),
-                            invocation_id: None,
-                            in_reply_to: Some(request_id),
-                            created_at_ms: time,
-                            expires_at_ms: time + 60000,
-                            body,
-                        };
-                        let _ = sender
-                            .send_wait(response, Class::Control, SendScope::Core)
-                            .await;
-                    }
-                }));
                 Ok(())
             }
             Body::Invoke { content, .. } => {
@@ -1863,19 +1746,6 @@ impl PeerLink {
                 }
                 Replica::new(self.host.system.store()).receive(actor, page, now())?;
                 self.fetch_missing(actor.clone())
-            }
-            Body::RecoveryStatus { status } => {
-                self.account_credential_authority()?;
-                if let Some(core) = self
-                    .host
-                    .core
-                    .read()
-                    .as_ref()
-                    .and_then(std::sync::Weak::upgrade)
-                {
-                    core.note_recovery(self.channel.peer.stage_id(), status.clone())?;
-                }
-                Ok(())
             }
             Body::Heartbeat => {
                 if frame.in_reply_to.is_none() {

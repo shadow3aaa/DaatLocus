@@ -20,8 +20,6 @@ import type { Preferences } from "@/lib/preferences";
 import { ProvidersSettings } from "@/components/settings/providers-settings";
 import { errorText, Picker, StatusNote } from "@/components/settings/controls";
 import { PhoneUseSettings } from "@/components/settings/phone-use-settings";
-import { ComputerUseSettings } from "@/components/settings/computer-use-settings";
-import { getComputerUseCapabilities } from "@/lib/computer-use";
 import { isAndroid } from "@/lib/mobile";
 import { isMacDesktop } from "@/lib/macos-computer-use";
 import { MacComputerUseSettings } from "@/components/settings/macos-computer-use-settings";
@@ -42,10 +40,10 @@ export function settingsTabFromPath(path: string): SettingsTab | null {
 export const SettingsPage = forwardRef<SettingsPageHandle, {
   open: boolean; onOpenChange: (open: boolean) => void;
   onActorChanged: (actorId?: string) => void;
-  onViewCore(): void;
+  onViewSession(id: string): void;
   preferences: Preferences; onPreferencesChanged: (preferences: Preferences) => void;
   initialTab?: SettingsTab; canManage?: boolean; onTabChange(tab: SettingsTab): void;
-}>(function SettingsPage({open, onOpenChange, onActorChanged, onViewCore, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
+}>(function SettingsPage({open, onOpenChange, onActorChanged, onViewSession, preferences, onPreferencesChanged, initialTab = "general", canManage = true, onTabChange}, ref) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [config, setConfig] = useState<SetupConfigRequest | null>(null);
   const [loading, setLoading] = useState(false);
@@ -62,17 +60,6 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
   const [searchPreferences] = useState(() => new WebSearchPreferences());
   const [query, setQuery] = useState("");
   const [importsSupported, setImportsSupported] = useState(false);
-  const [computerUseSupported, setComputerUseSupported] = useState(false);
-  useEffect(() => {
-    if (!open || !canManage || isAndroid() || isMacDesktop()) return;
-    const controller = new AbortController();
-    void getComputerUseCapabilities({signal: controller.signal}).then(status => {
-      if (controller.signal.aborted) return;
-      setComputerUseSupported(status.supported);
-      if (!status.supported && initialTab === "gui") {setTab("general"); onTabChange("general");}
-    }).catch(() => {if (!controller.signal.aborted) setComputerUseSupported(false);});
-    return () => controller.abort();
-  }, [open, canManage]);
   useEffect(() => {
     if (!open || !canManage) return;
     const controller = new AbortController();
@@ -136,7 +123,7 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
       ...(browserSupported()?[{id:"browser" as const,label:t("browser_settings.title"),icon:GlobeIcon,keywords:[t("browser_use.search_engine"),t("browser_settings.language"),t("browser_settings.zoom")].join(" ")}]:[]),
       ...(importsSupported ? [{id: "import" as const, label: t("imports.title"), icon: DownloadIcon, keywords: "Codex"}] : []),
       {id: "account" as const, label: t("settings_dialog.configuration"), icon: UserRoundIcon, keywords: [t("access_gate.account_name"), t("account_editor.devices"), t("account_editor.connectivity"), t("access_gate.public_connection_service"), t("reset_work.title")].join(" ")},
-      ...(isAndroid() || isMacDesktop() || computerUseSupported ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
+      ...(isAndroid() || isMacDesktop() ? [{id: "gui" as const, label: t("gui_use.title"), icon: MonitorIcon, keywords: ["Shizuku Root ComputerUse PhoneUse macOS", t("gui_use.advanced"), t("computer_use_settings.resolution")].join(" ")}] : []),
       {id: "usage" as const, label: t("usage_page.title"), icon: BarChart3Icon, keywords: [t("usage_page.history"), t("usage_page.agent_ranking"), t("usage_page.cache_ranking"), t("usage_page.column_used")].join(" ")},
       {id: "models" as const, label: t("providers_settings.providers"), icon: SlidersHorizontalIcon, keywords: [t("composer.models"), t("composer.default_model"), t("provider_editor.api_key")].join(" ")},
     ] : []),
@@ -163,9 +150,9 @@ export const SettingsPage = forwardRef<SettingsPageHandle, {
         {canManage && tab === "context" && <ContextSettings />}
         {canManage && <div hidden={tab !== "websearch"}>{websearchVisited && <WebSearchSettings preferences={searchPreferences} />}</div>}
         {canManage && browserSupported() && tab==="browser" && <BrowserSettings/>}
-        {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewCore={onViewCore} /></div>}
+        {canManage && importsSupported && <div hidden={tab !== "import"}><ImportSettings onViewSession={onViewSession} /></div>}
         {canManage&&<div hidden={tab !== "account"}>{accountVisited && <AccountEditor onChanged={()=>onActorChanged()}/>}</div>}
-        {canManage && (isAndroid() || isMacDesktop() || computerUseSupported) && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && (isAndroid() ? <PhoneUseSettings /> : isMacDesktop() ? <MacComputerUseSettings /> : <ComputerUseSettings />)}</div>}
+        {canManage && (isAndroid() || isMacDesktop()) && <div hidden={tab !== "gui"}>{(guiVisited || initialTab === "gui") && (isAndroid() ? <PhoneUseSettings /> : <MacComputerUseSettings />)}</div>}
 
         {canManage && <div hidden={tab !== "usage"}>{tab === "usage" && <UsageSettings />}</div>}
         {canManage ? <div hidden={tab !== "models"}>

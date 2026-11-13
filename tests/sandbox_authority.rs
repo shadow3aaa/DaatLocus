@@ -400,6 +400,13 @@ fn legacy_device_actor_lists_become_restrictive_device_authority_without_cross_a
     for id in ["root", "child", "foreign"] {
         store
             .save_actor(&ActorRecord {
+                session_id: "root".into(),
+                role: if id == "root" {
+                    daat_locus::actors::ActorRole::Session
+                } else {
+                    daat_locus::actors::ActorRole::Worker
+                },
+                title: None,
                 remote_read_only: false,
                 context: Default::default(),
                 id: id.into(),

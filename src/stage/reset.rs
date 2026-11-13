@@ -4,10 +4,10 @@ use super::{
     host::Host,
     identity::{Enrollment, Membership, SignedProof, verify_enrollment},
 };
-use crate::actors::{ActorRecord, store::ActorStore};
+use crate::actors::store::ActorStore;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use parking_lot::Mutex;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -186,15 +186,12 @@ pub(crate) fn completed(host: &Host, record: &Record) {
 pub(crate) fn replace(
     store: &ActorStore,
     record: &Record,
-    root: &ActorRecord,
     device_workspace: &std::path::Path,
 ) -> Result<()> {
     store.stage_transaction(|tx| {
-        let has_core: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='core_meta')", [], |row| row.get(0))?;
-        let synchronized = has_core && tx.query_row("SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='synchronized' AND value='1')", [], |row| row.get::<_, bool>(0))?;
-        // Explicitly retain credentials, device identity/enrollment, revocations,
-        // transport generations and Raft votes/logs/membership.
+        // Keep credentials, device trust and transport state, but clear every session.
         const TABLES: &[&str] = &[
+            "owner_imports", "session_creation_keys", "actor_cleanup_pending",
             "sandbox_scopes", "stage_local_approvals", "stage_local_tool_results", "approvals", "tools",
             "idempotency", "resources", "history", "messages", "actor_event_index",
             "events", "actor_event_heads", "actor_text_heads", "actor_journal_meta",
@@ -207,10 +204,6 @@ pub(crate) fn replace(
             "stage_resource_files", "stage_resources", "stage_control_exports",
             "stage_content_sources", "stage_downloads", "stage_blob_parts",
             "stage_download_activity", "stage_blob_actors", "stage_blob_access", "stage_blobs",
-            "core_resource_sent", "core_app_effects", "core_snapshot_content",
-            "core_snapshot_incoming", "core_snapshot_rows", "core_snapshot_age", "core_snapshots",
-            "core_recovery_rows", "core_recovery_merged", "core_recovery_archives",
-            "core_order", "core_prepared", "core_rows", "core_dirty", "core_meta",
         ];
         for table in TABLES {
             let exists: bool = tx.query_row(
@@ -219,17 +212,10 @@ pub(crate) fn replace(
             )?;
             if exists { tx.execute(&format!("DELETE FROM {table}"), [])?; }
         }
-        // A work reset must not remove a previously synchronized device's
-        // eligibility for explicit local recovery while its authority is offline.
-        if synchronized {
-            tx.execute("INSERT INTO core_meta VALUES('synchronized','1')", [])?;
-        }
         let workspace_scope = crate::sandbox::SandboxScope::filesystem(device_workspace, true)
             .map_err(|_| StageError::Invalid("Invalid device workspace after reset"))?;
         crate::sandbox::scopes::remember(tx, &[workspace_scope])
             .map_err(|_| StageError::Invalid("Cannot initialize device sandbox after reset"))?;
-        tx.execute("INSERT INTO actors(id,parent_id,depth,record) VALUES(?1,NULL,0,?2)",
-            params![root.id, serde_json::to_string(root).map_err(|_| StageError::Invalid("Cannot reset Core Actor"))?])?;
         tx.execute("INSERT INTO account_work_reset VALUES(1,?1,1) ON CONFLICT(singleton) DO UPDATE SET record=excluded.record,cleanup_pending=1",
             [serde_json::to_string(record).map_err(|_| StageError::Invalid("Cannot save reset record"))?])?;
         Ok(())
@@ -316,17 +302,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returning_device_applies_reset_before_syncing_its_old_conversation() {
+    async fn returning_device_applies_reset_before_accepting_new_session_work() {
         let directory = tempfile::tempdir().unwrap();
         let (a, b, _relay) = hosts(directory.path()).await;
         a.start().await.unwrap();
         b.start().await.unwrap();
-        super::super::recovery::mark_synchronized(b.host.system.store()).unwrap();
-        b.host
+        let previous = b
+            .host
             .system
-            .send_user("core", "obsolete offline context".into(), vec![], None)
+            .create_session(None, None, Some("offline-context"))
+            .await
             .unwrap();
-        let old = b.host.system.store().messages("core", None, 100).unwrap();
+        let offline_input: crate::actors::MessageRecord =
+            serde_json::from_value(serde_json::json!({
+                "seq":0, "id":uuid::Uuid::new_v4().to_string(), "actor_id":previous.id,
+                "source":{"kind":"user"}, "reply_to":{"kind":"user"}, "kind":"request",
+                "in_reply_to":null, "remote_authority":null, "content":"obsolete offline context",
+                "attachments":[], "status":"queued", "cancel_requested":false,
+                "reply":null, "error":null, "created_at_ms":1, "updated_at_ms":1
+            }))
+            .unwrap();
+        b.host.system.store().enqueue(offline_input, None).unwrap();
+        let old = b
+            .host
+            .system
+            .store()
+            .messages(&previous.id, None, 100)
+            .unwrap();
         assert_eq!(old.items.len(), 1);
         crate::stage::test_relay::wait(|| b.handle(a.host.local).is_ok())
             .await
@@ -352,15 +354,8 @@ mod tests {
         .await
         .expect("offline work must be erased before the device joins the new generation");
         assert!(a.host.system.store().message(&old.items[0].id).is_err());
-        assert!(super::super::recovery::synchronized(b.host.system.store()).unwrap());
-        assert!(
-            b.host
-                .system
-                .store()
-                .history("core", 100)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(b.host.system.actor(&previous.id).is_err());
+        assert!(b.host.system.store().actors().unwrap().is_empty());
         let peers_after = StageLedger::attach(b.host.system.store(), b.host.local)
             .peers(chrono::Utc::now().timestamp_millis())
             .unwrap();
@@ -385,25 +380,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_reset_finishes_resource_cleanup_before_starting_the_new_core() {
+    async fn interrupted_reset_finishes_resource_cleanup_before_a_new_session() {
         let directory = tempfile::tempdir().unwrap();
         let (a, b, _relay) = hosts(directory.path()).await;
+        let prior = a
+            .host
+            .system
+            .create_session(None, None, Some("old-resource"))
+            .await
+            .unwrap();
         let attachment = a
             .host
             .system
-            .actor_data_dir(crate::stage::shared::ACTOR_ID)
+            .actor_data_dir(&prior.id)
             .join("old-attachment.txt");
+        std::fs::create_dir_all(attachment.parent().unwrap()).unwrap();
         std::fs::write(&attachment, "discarded attachment").unwrap();
         let record = issue(&a.host).unwrap();
-        // Crash boundary: the deletion/marker transaction committed, file cleanup
-        // and Core creation did not run. Reopen the real database and device keys.
-        let mut root = a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap();
+        // Crash boundary: deletion committed but resource cleanup did not run.
+        // Reopen the real database and device keys without creating a preset Core.
+        let mut root = a.host.system.actor(&prior.id).unwrap();
         root.config.workspace = directory.path().join("actor-only-directory");
         std::fs::create_dir(&root.config.workspace).unwrap();
         replace(
             a.host.system.store(),
             &record,
-            &root,
             a.host.system.device_workspace(),
         )
         .unwrap();
@@ -432,12 +433,19 @@ mod tests {
             generation(&reopened.host).unwrap(),
             Some(verify(&a.host, &record).unwrap())
         );
-        assert!(reopened.host.system.actor("core").is_ok());
+        assert!(reopened.host.system.store().actors().unwrap().is_empty());
+        let new_session = reopened
+            .host
+            .system
+            .create_session(None, None, Some("fresh-after-reset"))
+            .await
+            .unwrap();
         let fresh = reopened
             .host
             .system
-            .actor_data_dir(crate::stage::shared::ACTOR_ID)
+            .actor_data_dir(&new_session.id)
             .join("fresh.txt");
+        std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
         std::fs::write(&fresh, "new work").unwrap();
         cleanup(&reopened.host.system).unwrap();
         assert_eq!(std::fs::read_to_string(fresh).unwrap(), "new work");
@@ -472,7 +480,6 @@ mod tests {
         replace(
             b.host.system.store(),
             &first,
-            &b.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
             b.host.system.device_workspace(),
         )
         .unwrap();
@@ -485,7 +492,6 @@ mod tests {
         replace(
             a.host.system.store(),
             &applied,
-            &a.host.system.actor(crate::stage::shared::ACTOR_ID).unwrap(),
             a.host.system.device_workspace(),
         )
         .unwrap();
@@ -500,11 +506,18 @@ mod tests {
             offer(&a.host, b.host.local, issue(&b.host).unwrap()).is_err(),
             "a revoked source cannot introduce another reset"
         );
+        let new_session = a
+            .host
+            .system
+            .create_session(None, None, Some("new-work"))
+            .await
+            .unwrap();
         let file = a
             .host
             .system
-            .actor_data_dir(crate::stage::shared::ACTOR_ID)
+            .actor_data_dir(&new_session.id)
             .join("new-work.txt");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "new data").unwrap();
         offer(&a.host, a.host.local, applied).unwrap();
         assert!(a.host.work_reset.record.lock().is_none());

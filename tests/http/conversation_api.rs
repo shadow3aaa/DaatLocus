@@ -67,31 +67,23 @@ async fn owner_inputs_target_only_core_and_cannot_enter_hosted_actors() {
         StatusCode::OK
     );
     let response = fixture
-        .owner(reqwest::Method::POST, "/v1/core/messages")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/messages")
+        .header("idempotency-key", "owner-core-input")
         .json(&json!({"content":"Coordinate this work", "attachments":[]}))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["code"],
-        "core_not_ready"
-    );
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.json::<Value>().await.unwrap()["actor_id"], "core");
 }
 
 #[tokio::test]
 async fn initial_message_page_includes_the_active_input_outside_its_history_window() {
     let fixture = Fixture::new().await;
-    let active = fixture
-        .system
-        .send_user("root", "Long-running input".into(), vec![], None)
-        .unwrap();
+    let active = fixture.delegate("root", "Long-running input");
     fixture.system.store().claim_next("root").unwrap().unwrap();
     for index in 0..5 {
-        fixture
-            .system
-            .send_user("root", format!("Incoming {index}"), vec![], None)
-            .unwrap();
+        fixture.delegate("root", &format!("Incoming {index}"));
     }
     let response = fixture
         .owner(reqwest::Method::GET, "/v1/actors/root/messages?limit=2")
@@ -184,15 +176,15 @@ async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_mutate_running_wor
     fixture.system.store().claim_next("core").unwrap().unwrap();
     let first = send("queued one");
     let second = send("queued two");
-    let edited = fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/edit",first.id)).json(&json!({"content":"updated request","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap();
+    let edited = fixture.owner(reqwest::Method::POST, &format!("/v1/sessions/core/messages/{}/edit",first.id)).json(&json!({"content":"updated request","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap();
     assert_eq!(edited.status(), StatusCode::OK);
     let edited = edited.json::<Value>().await.unwrap();
     assert_eq!(edited["content"], "updated request");
     assert_eq!(edited["source"]["kind"], "user");
-    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/edit",first.id)).json(&json!({"content":"stale overwrite","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap().status(), StatusCode::CONFLICT);
-    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/core/messages/{}/withdraw",active.id)).json(&json!({"expected_updated_at_ms":fixture.system.store().message(&active.id).unwrap().updated_at_ms})).send().await.unwrap().status(),StatusCode::CONFLICT);
+    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/sessions/core/messages/{}/edit",first.id)).json(&json!({"content":"stale overwrite","attachments":[],"expected_updated_at_ms":first.updated_at_ms})).send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(fixture.owner(reqwest::Method::POST, &format!("/v1/sessions/core/messages/{}/withdraw",active.id)).json(&json!({"expected_updated_at_ms":fixture.system.store().message(&active.id).unwrap().updated_at_ms})).send().await.unwrap().status(),StatusCode::CONFLICT);
     let cleared = fixture
-        .owner(reqwest::Method::POST, "/v1/core/queue/clear")
+        .owner(reqwest::Method::POST, "/v1/sessions/core/queue/clear")
         .send()
         .await
         .unwrap()
@@ -222,22 +214,11 @@ async fn queued_edit_withdraw_and_clear_are_atomic_and_do_not_mutate_running_wor
 }
 
 #[tokio::test]
-async fn queued_clear_preserves_actor_requests_and_started_work() {
+async fn worker_queue_paginates_delegations_without_granting_owner_edit_authority() {
     let fixture = Fixture::new().await;
     let actor = fixture.child("queue-target").await;
-    let root = fixture
-        .system
-        .send_user("root", "delegate".into(), vec![], None)
-        .unwrap();
-    fixture.system.store().claim_next("root").unwrap().unwrap();
-    let delegated = fixture
-        .system
-        .message_from_actor("root", &root.id, &actor, "collaboration".into())
-        .unwrap();
-    let own = fixture
-        .system
-        .send_user(&actor, "user input".into(), vec![], None)
-        .unwrap();
+    let delegated = fixture.delegate(&actor, "collaboration");
+    let next = fixture.delegate(&actor, "follow-up collaboration");
     let first_page = fixture
         .owner(
             reqwest::Method::GET,
@@ -253,7 +234,7 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
     assert_eq!(first_page["items"][0]["source"]["kind"], "actor");
     let cursor = first_page["next_cursor"]
         .as_i64()
-        .expect("mixed queue must retain its continuation");
+        .expect("delegated queue must retain its continuation");
     let second_page = fixture
         .owner(
             reqwest::Method::GET,
@@ -265,7 +246,7 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
         .json::<Value>()
         .await
         .unwrap();
-    assert_eq!(second_page["items"][0]["id"], own.id);
+    assert_eq!(second_page["items"][0]["id"], next.id);
     assert!(second_page["next_cursor"].is_null());
     let edit_actor = fixture.owner(reqwest::Method::POST, &format!("/v1/actors/{actor}/messages/{}/edit", delegated.id))
         .json(&json!({"content":"spoofed user input","attachments":[],"expected_updated_at_ms":delegated.updated_at_ms}))
@@ -277,7 +258,7 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
     );
     assert_eq!(
         fixture.system.store().clear_queued_users(&actor).unwrap(),
-        1
+        0
     );
     assert_eq!(
         fixture
@@ -289,8 +270,8 @@ async fn queued_clear_preserves_actor_requests_and_started_work() {
         daat_locus::actors::MessageStatus::Queued
     );
     assert_eq!(
-        fixture.system.store().message(&own.id).unwrap().status,
-        daat_locus::actors::MessageStatus::Cancelled
+        fixture.system.store().message(&next.id).unwrap().status,
+        daat_locus::actors::MessageStatus::Queued
     );
     let claimed = fixture.system.store().claim_next(&actor).unwrap().unwrap();
     assert!(
@@ -320,10 +301,7 @@ async fn chat_search_matches_original_content_and_reply_with_exact_actor_scope()
         ("literal % and _ plus 中文", "fixture-secret-key"),
         ("another needle", "another reply"),
     ] {
-        let message = fixture
-            .system
-            .send_user(&a, content.into(), vec![], None)
-            .unwrap();
+        let message = fixture.delegate(&a, content);
         fixture
             .system
             .store()
@@ -335,16 +313,10 @@ async fn chat_search_matches_original_content_and_reply_with_exact_actor_scope()
             )
             .unwrap();
     }
-    fixture
-        .system
-        .send_user(&b, "needle in another Actor".into(), vec![], None)
-        .unwrap();
+    fixture.delegate(&b, "needle in another Actor");
     // Newer unmatched rows must not starve older matching rows before LIMIT.
     for _ in 0..5 {
-        fixture
-            .system
-            .send_user(&a, "unmatched".into(), vec![], None)
-            .unwrap();
+        fixture.delegate(&a, "unmatched");
     }
     let path = format!("/v1/actors/{a}/messages/search?q=needle&limit=2");
     let page = fixture
@@ -405,6 +377,9 @@ async fn queries_are_bounded_and_every_actor_has_a_link_without_catalog_configur
     let mut config = parent.config.clone();
     config.instructions = "private instructions ".repeat(10_000);
     let spawned = ActorRecord {
+        session_id: "core".into(),
+        role: daat_locus::actors::ActorRole::Worker,
+        title: None,
         remote_read_only: false,
         context: Default::default(),
         id: "spawned".into(),
@@ -566,10 +541,7 @@ async fn owner_can_open_and_control_created_actors() {
     created.depth = 3;
     fixture.system.store().save_actor(&created).unwrap();
     // Seed an owned Actor's delegated input directly; no model is invoked.
-    let mut input = fixture
-        .system
-        .send_user(&a, "permission test".into(), vec![], None)
-        .unwrap();
+    let mut input = fixture.delegate(&a, "permission test");
     let parent_request = input.id.clone();
     input.seq = 0;
     input.id = uuid::Uuid::new_v4().to_string();

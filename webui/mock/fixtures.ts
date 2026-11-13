@@ -15,6 +15,7 @@ import {
   now,
   ROOT_ACTOR_ID,
   requestOrigin,
+  setActorStatus,
   stageSettings,
   store,
   touchMessage,
@@ -37,6 +38,7 @@ type Exchange = { user: string; reply: string; tool?: SeededTool };
 export function resetStore(): void {
   workReset.generation = null;
   store.actors.clear();
+  store.sessions.clear();
   store.order.length = 0;
   store.catalog.length = 0;
   store.catalogSeq = 0;
@@ -57,11 +59,9 @@ export function resetStore(): void {
 
 export function resetAccountWork(): void {
   clearRuns();
-  store.actors.clear(); store.order.length = 0; store.catalog.length = 0;
+  store.actors.clear(); store.sessions.clear(); store.order.length = 0; store.catalog.length = 0;
   store.attachments.clear(); store.idempotency.clear();
   workReset.generation = {revision: (workReset.generation?.revision ?? 0) + 1, writer: STAGE_ID};
-  createActor({id: ROOT_ACTOR_ID, name: "Daat Locus", parent_id: null, apps: ["actors","admin_actors"], model: null,
-    workspace: "~", instructions: ""});
   broadcastResync();
 }
 
@@ -83,7 +83,7 @@ function seed(): void {
   });
   const research = createActor({
     id: "research",
-    name: "Metis",
+    name: "Layout check",
     parent_id: ROOT_ACTOR_ID,
     apps: ["files", "web", "browser_use"],
     model: "mock-mini",
@@ -95,17 +95,17 @@ function seed(): void {
     {
       user: "Please check message scrolling and the composer layout.",
       reply:
-        "Metis is checking it. I will bring the results back here.",
+        "I sent this to Layout check. I will bring the results back here.",
       tool: {
         name: "actors__message",
-        summary: "Message sent to Metis",
+        summary: "Message sent to Layout check",
         arguments: { actor_id: "research", content: "Check message scrolling and the composer layout." },
         payload: {
           message_id: "layout-request",
           sent_message: { conversation_url: "/actors/research", content: "Check message scrolling and the composer layout." },
         },
-        model_content: "Message delivered to Metis.",
-        outcome: { actor_id: "research", name: "Metis" },
+        model_content: "Message delivered to Layout check.",
+        outcome: { actor_id: "research", name: "Layout check" },
       },
     },
     {
@@ -141,6 +141,17 @@ function seed(): void {
       },
     },
   ]);
+
+  for (const [index, session] of [
+    { id: "mcp-plan", user: "Plan how standard MCP servers install as device Apps.", reply: "The plan covers installation, timeouts and process cleanup.", hours: 26, archived: false },
+    { id: "release-notes", user: "Draft the release notes for the session list.", reply: "The draft lists sessions, archival and deletion.", hours: 120, archived: true },
+  ].entries()) {
+    const actor = createActor({ id: session.id, name: "Daat Locus", parent_id: null, apps: [], model: null, workspace: "~", instructions: "" });
+    seedHistory(actor, [{ user: session.user, reply: session.reply }]);
+    if (session.archived) setActorStatus(actor, "archived");
+    const at = now() - session.hours * 3_600_000;
+    Object.assign(store.sessions.get(session.id)!, { archived: session.archived, created_at_ms: at - index * 60_000, updated_at_ms: at, last_activity_at_ms: at });
+  }
 }
 
 function seedHistory(actor: ActorStore, exchanges: Exchange[]): void {

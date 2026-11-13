@@ -2,7 +2,6 @@ import { mentionsSkill, type SkillReference } from "@/lib/skills";
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import * as api from "@/lib/actor-api";
-import { isPrimaryActor } from "@/lib/work-timeline";
 import { clearStoredDrafts, loadDraft, saveDraft } from "@/lib/conversation-drafts";
 export type GenerationDraft = {
   generation: number;
@@ -199,16 +198,15 @@ export type ConversationOptions = {
   enabled?: boolean;
   onAccessRevoked?: () => void;
   sessionKey?: string;
-  includeActivity?: boolean;
 };
 export function sameAccessSession(expected: string | undefined, actual: api.Access): boolean {
   return !expected || expected === api.accessKey(actual);
 }
 export function useActorConversation(actorId: string | null, options: ConversationOptions = {}) {
   const enabled = options.enabled ?? true;
-  const acceptsInput = Boolean(actorId && isPrimaryActor(actorId));
   const draftKey = `${options.sessionKey ?? "session"}:${actorId ?? ""}`;
   const [state, dispatch] = useReducer(conversationReducer, initialConversation(actorId));
+  const acceptsInput = state.actorId === actorId && state.actor?.role === "session";
   const stateRef = useRef(state);
   stateRef.current = state;
   const epoch = useRef(0);
@@ -271,6 +269,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   useEffect(() => {
     if (!acceptsInput) return;
     const sync = () => { const entry = draftEntry(); setDraftState(entry.text); setSkillsState(entry.skills || []); setAttachments([...entry.attachments]); setUploading(Boolean(entry.uploadQueue?.pending)); };
+    sync();
     let listeners = draftListeners.get(draftKey);
     if (!listeners) {
       listeners = new Set();
@@ -291,11 +290,9 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setSending(false);
     setUploading(false);
     setLoadingOlder(false);
-    const entry = acceptsInput ? draftEntry() : {text:"",attachments:[]} as DraftEntry;
-    setDraftState(entry.text);
-    setSkillsState(entry.skills || []);
-    setAttachments([...entry.attachments]);
-    setUploading(Boolean(entry.uploadQueue?.pending));
+    setDraftState("");
+    setSkillsState([]);
+    setAttachments([]);
     if (!actorId || !enabled) {
       setLoading(false);
       setStreamStatus("closed");
@@ -312,6 +309,11 @@ export function useActorConversation(actorId: string | null, options: Conversati
           return;
         dispatch({ type: "page", page, initial: true });
         dispatch({ type: "actor", actor });
+        const entry = actor.role === "session" ? draftEntry() : {text:"",attachments:[]} as DraftEntry;
+        setDraftState(entry.text);
+        setSkillsState(entry.skills || []);
+        setAttachments([...entry.attachments]);
+        setUploading(Boolean(entry.uploadQueue?.pending));
         if (entry.attachments.length) {
           const original = [...entry.attachments];
           void Promise.all(original.map(async item => ({ item, valid: await api.validateAttachment(actorId!, item, { signal: abort.signal }) }))).then(checked => {
@@ -349,10 +351,6 @@ export function useActorConversation(actorId: string | null, options: Conversati
             if (!valid(generation))
               return;
             const event = record.event;
-            if (event.type === "conversation_restored") {
-              setReload(value => value + 1);
-              return;
-            }
             if (event.type === "actor_changed") {
               const actor = await api.getActor(actorId!, { signal: abort.signal });
               if (!valid(generation)) return;
@@ -370,7 +368,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
                 return;
               dispatch({ type: "approval", actorId: actorId!, approval });
             }
-            if (options.includeActivity !== false || !["generation_started", "generation_delta", "tool_started"].includes(event.type)) dispatch({ type: "event", record });
+            if (actor.role !== "session" || !["generation_started", "generation_delta", "tool_started"].includes(event.type)) dispatch({ type: "event", record });
           },
         });
       }
@@ -386,7 +384,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     void initialize();
     return () => { abort.abort(); if (controller.current === abort)
       controller.current = null; };
-  }, [actorId, enabled, draftEntry, valid, reload, accessFailure, options.includeActivity, draftKey, acceptsInput]);
+  }, [actorId, enabled, draftEntry, valid, reload, accessFailure, draftKey]);
   const loadOlder = useCallback(async (pageSignal?: AbortSignal) => {
     const before = stateRef.current.nextCursor;
     if (!actorId || before === null || loadingOlder)
@@ -411,16 +409,6 @@ export function useActorConversation(actorId: string | null, options: Conversati
         setLoadingOlder(false);
     }
   }, [actorId, loadingOlder, valid, loadTools]);
-  const revealMessage = useCallback(async (id:string, signal:AbortSignal) => {
-    if(!actorId)return;
-    const generation=epoch.current;
-    const lifecycle=controller.current?.signal;
-    const requestSignal=lifecycle?AbortSignal.any([signal,lifecycle]):signal;
-    const message=await api.getMessage(actorId,id,{signal:requestSignal});
-    if(requestSignal.aborted||!valid(generation))return;
-    dispatch({type:"message",message});
-    await loadTools(id);
-  },[actorId,valid,loadTools]);
   const refreshActor = useCallback(async () => {
     if (!actorId)
       return;
@@ -444,7 +432,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
     setSending(true);
     setError(null);
     try {
-      const message = await api.sendCoreMessage({ content: submission.content, attachments: submission.attachments, skills: submission.skills }, submission.key, { signal: controller.current?.signal });
+      const message = await api.sendSessionMessage(actorId, { content: submission.content, attachments: submission.attachments, skills: submission.skills }, submission.key, { signal: controller.current?.signal });
       if (entry.pending?.key === submission.key)
         delete entry.pending;
       if (entry.text === submission.content && JSON.stringify(entry.attachments.map(item => item.id)) === JSON.stringify(submission.attachments) && JSON.stringify(entry.skills || []) === JSON.stringify(submission.skills || [])) {
@@ -483,7 +471,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
       await queueAttachmentUploads(entry, files, {
         signal,
         isCurrent: () => valid(generation),
-        upload: (file, uploadSignal) => api.uploadAttachment(file, { signal: uploadSignal }),
+        upload: (file, uploadSignal) => api.uploadSessionAttachment(actorId, file, { signal: uploadSignal }),
         onChanged: () => notifyDraft(draftKey),
       });
     }
@@ -510,7 +498,7 @@ export function useActorConversation(actorId: string | null, options: Conversati
   return { ...(current ? state : initialConversation(actorId)), live: current ? live : new Map<string, GenerationDraft>(),
     skills: current ? skills : acceptsInput ? draftEntry().skills || [] : [], setSkills,
     draft: current ? draft : acceptsInput ? draftEntry().text : "", setDraft, attachments: current ? attachments : acceptsInput ? draftEntry().attachments : [], uploading, addAttachments, removeAttachment,
-    loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder, revealMessage,
+    loading: loading || Boolean(actorId && enabled && !current), loadingOlder, hasMore: current && state.nextCursor !== null, more: current && state.nextCursor !== null, loadOlder, loadMore: loadOlder,
     sending, send, error, streamStatus, connected: streamStatus === "connected", refresh, refreshActor,
     loadTools, loadMoreTools, loadToolDetails, fetchResult: loadToolDetails, toolDetails: current ? toolDetails : {} };
 }

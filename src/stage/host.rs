@@ -59,8 +59,6 @@ impl Settings {
 pub struct Host {
     pub accounts: crate::accounts::AccountStore,
     pub configurations: crate::accounts::configuration::ConfigurationStore,
-    pub(crate) coordination: RwLock<Option<std::sync::Weak<super::coordination::Coordinator>>>,
-    pub(crate) core: RwLock<Option<std::sync::Weak<super::shared_runtime::Controller>>>,
     pub system: ActorSystem,
     pub local: StageId,
     directory: PathBuf,
@@ -214,10 +212,8 @@ impl Host {
                 &system.account_credentials_dir(),
             )
             .map_err(|_| StageError::Invalid("Cannot load private account configuration"))?,
-            coordination: RwLock::new(None),
             accounts: crate::accounts::AccountStore::open(&system.account_credentials_dir())
                 .map_err(|_| StageError::Invalid("Cannot load private account credentials"))?,
-            core: RwLock::new(None),
             system,
             local,
             directory,
@@ -437,7 +433,7 @@ impl Host {
         *self.settings.write() = candidate;
     }
     pub fn device_label(&self, peer: StageId) -> Result<Option<String>> {
-        self.system.store().coordination_transaction(|tx|{
+        self.system.store().stage_transaction(|tx|{
             tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_device_labels(stage TEXT PRIMARY KEY,label TEXT NOT NULL);")?;
             tx.query_row("SELECT label FROM stage_device_labels WHERE stage=?1",[peer.to_string()],|row|row.get(0)).optional().map_err(StageError::from)
         })
@@ -446,7 +442,7 @@ impl Host {
         if label.trim().is_empty() || label.len() > 100 {
             return Err(StageError::Invalid("Invalid device name"));
         }
-        self.system.store().coordination_transaction(|tx|{
+        self.system.store().stage_transaction(|tx|{
             tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_device_labels(stage TEXT PRIMARY KEY,label TEXT NOT NULL);")?;
             tx.execute("INSERT INTO stage_device_labels VALUES(?1,?2) ON CONFLICT(stage) DO UPDATE SET label=excluded.label",params![peer.to_string(),label])?;Ok(())
         })
@@ -465,15 +461,33 @@ mod tests {
             (true, None, Connectivity::Relay),
         ] {
             let directory = tempfile::tempdir().unwrap();
+            let mut config = crate::config::Config::default();
+            config.main_model = "fixture".into();
+            config.models.insert(
+                "fixture".into(),
+                crate::config::ModelConfig {
+                    provider: "fixture".into(),
+                    model_id: "fixture".into(),
+                    ..Default::default()
+                },
+            );
+            config.providers.insert(
+                "fixture".into(),
+                crate::config::ProviderConfig::OpenaiCompatible {
+                    base_url: "https://example.invalid".into(),
+                    api_key: "unused-test-key".into(),
+                },
+            );
             let system = ActorSystem::open_account_gated(
                 directory.path().join("actors"),
                 directory.path().join("workspace"),
-                crate::config::Config::default(),
+                config,
             )
             .await
             .unwrap();
             let host = Host::load(system.clone()).unwrap();
             host.initialize(true).unwrap();
+            let session = system.create_session(None, None, None).await.unwrap();
             let account = host.account_id().unwrap();
             let profile = host.profile().unwrap();
             if peer {
@@ -486,7 +500,12 @@ mod tests {
                 .unwrap();
             }
             let input = system
-                .send_user("core", "Preserve this queued input.".into(), vec![], None)
+                .send_user(
+                    &session.id,
+                    "Preserve this queued input.".into(),
+                    vec![],
+                    None,
+                )
                 .unwrap();
             let legacy = serde_json::json!({"label":"Existing device","listen":"0.0.0.0:0","interfaces":[],"stun":[],"ssh":{},"signaling_origin":origin,"compute_priority":100});
             host.persist("settings", &legacy).unwrap();

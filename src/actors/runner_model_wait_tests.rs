@@ -11,7 +11,7 @@ async fn model_wait_has_no_total_deadline_and_keeps_stop_and_cancel_responsive()
             .lock()
             .push_back(MockReply::Answer("Long inference completed"));
         let input = system
-            .send_user("root", "Think slowly".into(), vec![], None)
+            .test_actor_input("root", "Think slowly".into(), vec![], None)
             .unwrap();
         let input = system.store().claim_next(&input.actor_id).unwrap().unwrap();
         let actor = system.execution_actor(&input).unwrap();
@@ -58,7 +58,7 @@ async fn model_wait_has_no_total_deadline_and_keeps_stop_and_cancel_responsive()
             "stop" => control.stop.store(true, Ordering::Release),
             "buffer" => {
                 system
-                    .send_user("root", "New direction".into(), vec![], None)
+                    .test_actor_input("root", "New direction".into(), vec![], None)
                     .unwrap();
                 tokio::task::yield_now().await;
                 assert!(!task.is_finished());

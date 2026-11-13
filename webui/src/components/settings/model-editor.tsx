@@ -47,13 +47,17 @@ export function ModelEditor({model, metadata, onChange, disabled, onChoose}: {
     <FieldGroup>
       <TextField id="dl-model-name" label={t("model_editor.configuration_name")} value={model.name} disabled={disabled} onChange={event => edit({name: event.target.value})} />
       <AreaField id="dl-model-capabilities" label={t("model_editor.capabilities")} placeholder={t("model_editor.capabilities_placeholder")} value={model.capabilities ?? ""} disabled={disabled} onChange={event => edit({capabilities: event.target.value})} />
-      <TextField id="dl-model-id" label={t("model_editor.model_id")} value={model.model_id} disabled={disabled} onChange={event => edit({model_id: event.target.value, capabilities: event.target.value === model.model_id ? model.capabilities : "", name: !model.name || model.name === model.model_id ? event.target.value : model.name})} />
+      <TextField id="dl-model-id" label={t("model_editor.model_id")} value={model.model_id} disabled={disabled} onChange={event => edit({model_id: event.target.value, capabilities: event.target.value === model.model_id ? model.capabilities : "", name: !model.name || model.name === model.model_id ? event.target.value : model.name, native_web_search: event.target.value === model.model_id ? model.native_web_search : null})} />
       <CatalogField id="dl-model-context" label={t("model_editor.context_window")} numeric value={model.context_window_tokens} disabled={disabled} options={metadata?.context_window_tokens ? [{value: String(metadata.context_window_tokens),label: metadata.context_window_tokens.toLocaleString()}] : []} onChange={value => edit({context_window_tokens: value === null ? null : Number(value)})} />
       <CatalogField id="dl-model-output" label={t("model_editor.maximum_output")} numeric value={model.max_completion_tokens} disabled={disabled} options={metadata?.max_completion_tokens ? [{value: String(metadata.max_completion_tokens),label: metadata.max_completion_tokens.toLocaleString()}] : []} onChange={value => edit({max_completion_tokens: value === null ? null : Number(value)})} />
       <CatalogField id="dl-model-thinking" label={t("model_editor.reasoning")} value={model.thinking_budget} options={reasoningValues(metadata).map(value => ({value, label: reasoningLabel(value)}))} disabled={disabled} onChange={value => edit({thinking_budget: value})} />
       <Choices id="dl-model-vision" label={t("model_editor.vision")} value={model.supports_vision == null ? "auto" : model.supports_vision ? "yes" : "no"} disabled={disabled} options={[
         {value: "auto", label: t("model_editor.auto")}, {value: "yes", label: t("model_editor.supported")}, {value: "no", label: t("model_editor.unsupported")},
       ]} onChange={value => edit({supports_vision: value === "auto" ? null : value === "yes"})} />
+      <Choices id="dl-model-native-web-search" label={t("model_editor.native_web_search")} value={model.native_web_search == null ? "auto" : model.native_web_search ? "yes" : "no"} disabled={disabled} options={[
+        {value: "auto", label: t("model_editor.auto")}, {value: "yes", label: t("model_editor.enabled")}, {value: "no", label: t("model_editor.disabled")},
+      ]} onChange={value => edit({native_web_search: value === "auto" ? null : value === "yes"})} />
+      <p className="dl-settings-caption">{t("model_editor.native_web_search_hint")}</p>
     </FieldGroup>
     <div className="dl-settings-actions"><Button variant="outline" disabled={disabled} onClick={onChoose}>{t("model_editor.choose_another_model")}</Button></div>
     <div><Button variant="ghost" aria-expanded={advanced.open} aria-controls="dl-model-advanced" onClick={advanced.toggle}>{t("model_editor.advanced")}<ChevronDownIcon data-icon="inline-end" /></Button>

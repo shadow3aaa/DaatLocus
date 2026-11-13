@@ -5,13 +5,13 @@ import { seedCoreMotionPreview } from "./core-motion";
 import { seedWorkspacePreview } from "./workspace";
 import { resetInstructionLayers } from "./system-prompt";
 import { advanceActivityPreview, seedActivityPreview, seedGuidanceActivityPreview, seedOverflowActivityPreview, seedPaginatedActivityPreview, seedProseActivityPreview } from "./activity";
-import type { CoreStatus, Device } from "../src/lib/stage-api";
+import type { Device } from "../src/lib/stage-api";
 import { resetStore } from "./fixtures";
-import { addApproval, addMessage, addTool, configHolder, createActor, emitEvent, newId, nextActorName, now, requestOrigin, ROOT_ACTOR_ID, setActorStatus, STAGE_ID, store, touchMessage, type ActorStore } from "./state";
+import { addApproval, addMessage, addTool, configHolder, createActor, emitEvent, newId, now, requestOrigin, ROOT_ACTOR_ID, setActorStatus, store, touchMessage, type ActorStore } from "./state";
 
 export const scenarios = [
-  {id:"contacts", label:"Contacts · Name and message search", actor:ROOT_ACTOR_ID},
-  {id:"contacts-many", label:"Contacts · Infinite scrolling", actor:ROOT_ACTOR_ID},
+  {id:"sessions", label:"Sessions · Active, working and archived", actor:ROOT_ACTOR_ID},
+  {id:"sessions-many", label:"Sessions · Infinite scrolling", actor:ROOT_ACTOR_ID},
   {id:"imports", label:"Import · Local conversation selection", actor:ROOT_ACTOR_ID},
   {id:"imports-unsupported", label:"Import · Hidden on unsupported devices", actor:ROOT_ACTOR_ID},
   {id:"import-running", label:"Import · Core is preparing an Actor", actor:ROOT_ACTOR_ID},
@@ -28,7 +28,7 @@ export const scenarios = [
   {id:"long-core", label:"Main conversation · Long history and replies", actor:ROOT_ACTOR_ID},
   {id:"core-incoming", label:"Main conversation · New messages while working", actor:ROOT_ACTOR_ID},
   {id:"core-motion", label:"Main conversation · Bubble and status animations", actor:ROOT_ACTOR_ID},
-  {id:"empty", label:"Empty conversation", actor:ROOT_ACTOR_ID},
+  {id:"empty", label:"New session", actor:ROOT_ACTOR_ID},
   {id:"work", label:"Work conversation", actor:"research"},
   {id:"actor-messages", label:"Collaborators · Message bubbles", actor:"research"},
   ...toolScenes,
@@ -54,22 +54,15 @@ export const scenarios = [
   {id:"diff-overflow", label:"File diffs · Long lines, blank lines and infinite scrolling", actor:"research"},
   {id:"history", label:"History markers and hover previews", actor:"research"},
   {id:"many-approvals", label:"Scope request history pagination", actor:ROOT_ACTOR_ID},
-  {id:"connecting", label:"Connecting", actor:ROOT_ACTOR_ID},
   {id:"reconnecting", label:"Event stream reconnection", actor:ROOT_ACTOR_ID},
-  {id:"synchronizing", label:"Synchronizing", actor:ROOT_ACTOR_ID},
-  {id:"recovering", label:"Recovering", actor:ROOT_ACTOR_ID},
-  {id:"reconciling", label:"Merging", actor:ROOT_ACTOR_ID},
-  {id:"offline", label:"Offline", actor:ROOT_ACTOR_ID},
-  {id:"recovery_blocked", label:"Recovery blocked", actor:ROOT_ACTOR_ID},
   {id:"models-empty", label:"No models", actor:ROOT_ACTOR_ID},
   {id:"devices", label:"Device connection status", actor:ROOT_ACTOR_ID},
   {id:"login", label:"Account sign-in", actor:ROOT_ACTOR_ID},
   {id:"registration", label:"Account registration", actor:ROOT_ACTOR_ID},
 ] as const;
 export type ScenarioId = typeof scenarios[number]["id"];
-export const previewState: {id:ScenarioId; authenticated:boolean; registered:boolean; core:CoreStatus; devices:Device[]} = {
-  id:"conversation", authenticated:true, registered:true,
-  core:{worker_stage_id:STAGE_ID, epoch:1, synchronized:true, ready:true, model_ready:true, state:"replica", config_revision:"1"}, devices:[],
+export const previewState: {id:ScenarioId; authenticated:boolean; registered:boolean; modelReady:boolean; devices:Device[]} = {
+  id:"conversation", authenticated:true, registered:true, modelReady:true, devices:[],
 };
 
 function message(actor: ActorStore, content: string, running = false) {
@@ -90,32 +83,39 @@ export function activateScenario(id: string, exampleId?: string): boolean {
   resetApps(id === "apps-empty");
   if(id.startsWith("apps-pagination"))seedAppPages(id.endsWith("retry"));
   resetInstructionLayers();
-  Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],
-    core:{worker_stage_id:STAGE_ID,epoch:1,synchronized:true,ready:true,model_ready:true,state:"replica",config_revision:"1"}});
+  Object.assign(previewState,{id,authenticated:id!=="login"&&id!=="registration",registered:id!=="registration",devices:[],modelReady:true});
   const core=store.actors.get(ROOT_ACTOR_ID)!;
   const work=store.actors.get("research")!;
   if(id==="approval"||id==="long-content") {
   }
   const clear=(actor:ActorStore)=>{actor.messages=[];actor.events=[];actor.tools=[];actor.approvals=[];actor.messageSeq=0;actor.eventSeq=0;actor.toolSeq=0;};
-  if (examples.length || id === "actor-messages") createActor({id:"atlas",name:"Atlas",parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+  if (examples.length || id === "actor-messages") createActor({id:"atlas",name:"Markdown review",parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
   if (examples.length) { clear(work); seedToolExamples(work,exampleId ? examples.filter(example=>example.id===exampleId) : examples); }
-  if(id.startsWith("contacts")){
-    for(const [index,name] of ["Athena","Atlas","Iris","Hermes"].entries()){
-        const actor=createActor({id:name.toLowerCase(),name,parent_id:ROOT_ACTOR_ID,apps:[],model:["mock-large","mock-mini","mock-motion",null][index],workspace:"~",instructions:""});
-      const input=addMessage(actor,{source:{kind:"actor",actor_id:ROOT_ACTOR_ID},reply_to:{kind:"actor",actor_id:ROOT_ACTOR_ID,request_id:"contacts-task"},kind:"request",content:["Review Atlas's browser fix and confirm the downloads menu scrolls naturally.","Check scrolling and the narrow layout of the browser downloads menu.","Work with Atlas to review message bubbles on mobile.","Summarize the completed interface checks."][index],status:"completed"});
-      touchMessage(input,{reply:["Reviewed Atlas's changes. Downloads and history work correctly.","Atlas finished checking downloads. Scrolling loads more items on mobile too.","Sent the review results to Atlas.","Archived the conclusions of this layout review."][index],started_at_ms:now()-30000,finished_at_ms:now()-1000,final_generation:2});
-      if(name==="Hermes")setActorStatus(actor,"archived");
-      if(name==="Atlas")setActorStatus(actor,"running");
-      if(name==="Iris"){
-        const example=examplesForScene("tools-actors").find(item=>item.id==="actor-message")!;
-        const result={...toolExampleResult(example,actor.summary.id),message_id:input.id,payload:{message_id:"contacts-sent",sent_message:{conversation_url:"/actors/atlas",content:"Atlas, please recheck scrolling in downloads on mobile."}}};
-        addTool(actor,result);
-        const record=emitEvent(actor.summary.id,{type:"tool_finished",message_id:input.id,call_id:result.call_id,name:result.name,result_id:result.id,summary:"Message delivered",error:null,outcome:{sent_message:true}});
-        if(record)record.created_at_ms=input.started_at_ms!+100;
+  if(id.startsWith("sessions")){
+    const hour=3_600_000, clock=now();
+    const seeds=[
+      {id:"browser-review",title:"Review the browser downloads menu",user:"Check scrolling and the narrow layout of the browser downloads menu.",reply:null,hours:0.05,archived:false,workers:["Downloads scrolling","Narrow layout"]},
+      {id:"weekly-summary",title:null,user:"Summarize this week's interface checks.\nInclude the mobile results.",reply:"Downloads, history and message bubbles pass on desktop and mobile.",hours:5,archived:false,workers:["Mobile results"]},
+      {id:"long-title",title:"Compare the provider-native search results against the fallback search across every configured model and record the differences",user:"Compare native and fallback search.",reply:"Native search returned fresher sources on two of three models.",hours:30,archived:false,workers:[]},
+      {id:"bubble-theme",title:"Bubble theme audit",user:"Audit the bubble theme colors.",reply:"Archived the conclusions of this layout review.",hours:200,archived:true,workers:["Bubble colors"]},
+    ];
+    for(const seed of seeds){
+      const session=createActor({id:seed.id,name:"Daat Locus",parent_id:null,apps:[],model:null,workspace:"~",instructions:"",title:seed.title});
+      const input=addMessage(session,{kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:seed.user,status:seed.reply?"completed":"running"});
+      touchMessage(input,{started_at_ms:clock-seed.hours*hour,...(seed.reply?{reply:seed.reply,finished_at_ms:clock-seed.hours*hour+20000}:{})});
+      for(const name of seed.workers){
+        const worker=createActor({id:name.toLowerCase().replace(/\W+/g,"-"),name,parent_id:seed.id,apps:[],model:null,workspace:"~",instructions:""});
+        if(!seed.reply)setActorStatus(worker,"running");
+        if(seed.archived)setActorStatus(worker,"archived");
       }
+      if(!seed.reply)setActorStatus(session,"running");
+      if(seed.archived)setActorStatus(session,"archived");
+      Object.assign(store.sessions.get(seed.id)!,{archived:seed.archived,created_at_ms:clock-seed.hours*hour-60000,updated_at_ms:clock-seed.hours*hour,last_activity_at_ms:clock-seed.hours*hour});
     }
-    if(id==="contacts-many")for(let index=0;index<60;index++){
-      const name=nextActorName();createActor({id:name.toLowerCase(),name,parent_id:ROOT_ACTOR_ID,apps:[],model:null,workspace:"~",instructions:""});
+    if(id==="sessions-many")for(let index=0;index<60;index++){
+      const sessionId=`history-${index+1}`, at=clock-(index+3)*hour*7;
+      createActor({id:sessionId,name:"Daat Locus",parent_id:null,apps:[],model:null,workspace:"~",instructions:"",title:`Review record ${index+1}`});
+      Object.assign(store.sessions.get(sessionId)!,{created_at_ms:at,updated_at_ms:at,last_activity_at_ms:at});
     }
   }
   if (id === "actor-messages") {
@@ -205,15 +205,12 @@ export function activateScenario(id: string, exampleId?: string): boolean {
     const followUp = message(core, "Are those sections required by the template?");
     touchMessage(followUp, {reply: "I will check the source of those two sections and distinguish the instructor's requirements from structure I added."});
     const report = deliver("My notes from the guide support both types of content, but I designed the tables:\n\n- Requirements: ID, author, date and original description.\n- Revisions: changes after review and open questions.\n\nI still need to check the source to see whether the exact columns and styling are required.");
-    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__message", summary: "Check the source", error: null, arguments: {}, model_content: "Assigned to Metis", outcome: {actor_id: "research", name: "Metis"}, payload: null});
+    addTool(core, {id: newId(), actor_id: ROOT_ACTOR_ID, message_id: report.id, call_id: newId(), name: "actors__message", summary: "Check the source", error: null, arguments: {}, model_content: "Assigned to Layout check", outcome: {actor_id: "research", name: "Layout check"}, payload: null});
     deliver("I will check the source too, to identify what must stay and what can be simplified.");
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "Yes, check the source again.", status: "queued"});
     addMessage(core, {kind: "request", source: {kind: "user"}, reply_to: {kind: "user"}, content: "Keep the open questions.", status: "queued"});
   }
-  if (["connecting","synchronizing","recovering","reconciling","offline","recovery_blocked"].includes(id)) {
-    Object.assign(previewState.core,{state:id,ready:false,synchronized:false});
-  }
-  if (id==="models-empty") {configHolder.current={providers:[],models:[],main_model:null,approval_model:null};Object.assign(previewState.core,{state:"model_required",model_ready:false});}
+  if (id==="models-empty") {configHolder.current={providers:[],models:[],main_model:null,approval_model:null};previewState.modelReady=false;}
   if (["running","approval","failure","queue"].includes(id)) {
     const active=message(work,"Check conversation scrolling and preserve the composer draft.",id!=="failure");
     const call=newId();
@@ -260,7 +257,7 @@ Messages scroll naturally in the main area, beneath the floating header and comp
     // The task started outside the newest page. Opening its card should still
     // enter at the newest edge; only an explicit search should fetch that input.
     const task = core.tools.find(tool => tool.result.name === "actors__message");
-    if (task) task.result.outcome = {actor_id:"research",name:"Metis",message_id:work.messages[0].id};
+    if (task) task.result.outcome = {actor_id:"research",name:"Layout check",message_id:work.messages[0].id};
   }
   if(id==="long-content") {
     for(let i=0;i<44;i++) message(work,`Stage ${i+1}: The conversation, header and composer stay stable when resizing.`);

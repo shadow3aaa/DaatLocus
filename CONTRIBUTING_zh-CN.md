@@ -40,6 +40,16 @@ cargo run --locked -- --profile dev serve
 
 仅构建后端可用 `cargo build --locked --no-default-features --bin daat-locus`，它提供 API，不包含页面。
 
+本地维护 CLI 可列出会话，并向会话 Core 发送消息，无需浏览器 cookie：
+
+```sh
+daat-locus sessions list --json
+printf '%s' '状态检查' | daat-locus sessions send SESSION_ID --message-stdin
+daat-locus sessions messages SESSION_ID --limit 20
+```
+
+使用 `--archived` 改为列出已归档会话，`--after` 翻页，`--profile NAME` 选择 profile。消息从 stdin 读取，不会出现在进程参数中。`messages` 也接受 worker ID 用于观察；只有会话 Core 接受 `send`。
+
 检查时在当前 shell 设置 `DAAT_LOCUS_BUILD_WEBUI=0`，跳过页面嵌入：
 
 ```powershell
@@ -81,9 +91,9 @@ bun run dev:mock
 
 产物位于 `target/<triple>/<profile>/package`，可用 `--out-dir` 指定位置。签名与复用已有构建的参数见 `cargo xtask package <format> --help`。
 
-Windows GUI 打包需要已签名的虚拟显示驱动和匹配的辅助程序；macOS、Android 发布构建需要签名凭据。构建安装包前请阅读[客户端指南](clients/app/README.md)。
+Windows 版本保留 BrowserUse，不包含桌面 GUI 控制或虚拟显示。当前 Setup 可执行文件未签名；公开分发时可另行添加 Authenticode 签名。macOS、Android 发布构建仍需签名凭据。构建安装包前请阅读[客户端指南](clients/app/README.md)。
 
-清理时不要删除 `.dev/windows-signing`，其中保存本机开发签名身份。凭据、私钥、运行数据和构建产物不提交到仓库。分发时保留[归属说明](docs/license-attribution.md)要求的许可文件。
+构建清理时不要删除本机凭据、私钥或运行数据；不要将它们及构建产物提交到仓库。分发时保留[归属说明](docs/license-attribution.md)要求的许可文件。
 
 ## 提交修改
 

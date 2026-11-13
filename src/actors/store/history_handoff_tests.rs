@@ -10,8 +10,12 @@ fn memory_store() -> ActorStore {
         CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT,actor_id TEXT,created_at INTEGER,record TEXT);").unwrap();
     let tx = db.transaction().unwrap();
     crate::stage::journal::initialize(&tx).unwrap();
+    crate::stage::session::initialize(&tx).unwrap();
     tx.commit().unwrap();
     let actor = ActorRecord {
+        session_id: "session".into(),
+        role: ActorRole::Worker,
+        title: None,
         remote_read_only: false,
         id: "worker".into(),
         parent_id: None,

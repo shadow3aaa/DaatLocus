@@ -202,7 +202,7 @@ impl ActorApp {
 struct ImportConversationArgs {
     stage_id: Option<String>,
     resource_id: String,
-    /// Unique Actor name on the target device for this account, including archived Actors; compared ignoring case and surrounding whitespace.
+    /// Short task name, unique within this session including archived Actors; compared ignoring case and surrounding whitespace.
     name: String,
     /// Exact configured model name from the available models list.
     model: String,
@@ -232,7 +232,7 @@ impl From<InitialAuthorizationGroup> for crate::sandbox::SandboxScopeRequest {
 #[serde(deny_unknown_fields)]
 struct CreateActorArgs {
     stage_id: Option<String>,
-    /// Unique Actor name on the target device for this account, including archived Actors; compared ignoring case and surrounding whitespace.
+    /// Short task name, unique within this session including archived Actors; compared ignoring case and surrounding whitespace.
     name: String,
     workspace: Option<String>,
     /// Additional absolute read/write roots. The working directory is always included for recursive read/write access. Null adds no other roots.
@@ -470,8 +470,23 @@ impl App for ActorApp {
                 let _: EmptyAppArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
                 self.system.authorize_account_observation(caller)?;
-                let value = if let Some(core) = self.system.shared_core() {
-                    core.actor_devices().map_err(|error| miette!("{error}"))?
+                let value = if let Ok(runtime) = self.system.device_runtime() {
+                    let mut devices = vec![
+                        json!({"stage_id":runtime.host.local,"label":runtime.host.settings().label,"online":true,"current":true}),
+                    ];
+                    for peer in crate::stage::ledger::StageLedger::attach(
+                        self.system.store(),
+                        runtime.host.local,
+                    )
+                    .peers(chrono::Utc::now().timestamp_millis())
+                    .map_err(|e| miette!("{e}"))?
+                    {
+                        let id = peer.device.stage_id;
+                        devices.push(
+                            json!({"stage_id":id,"online":runtime.connected(id),"current":false}),
+                        );
+                    }
+                    json!({"devices":devices})
                 } else {
                     json!({"devices":[{"stage_id":self.system.store().public_stage_id().map_err(|error|miette!("{error}"))?,"label":null,"online":true,"current":true}]})
                 };
@@ -498,20 +513,19 @@ impl App for ActorApp {
                     .unwrap_or(local);
                 if stage != local {
                     self.system.authorize_account_observation(caller)?;
-                    let core = self
-                        .system
-                        .shared_core()
-                        .ok_or_else(|| miette!("Remote device is unavailable"))?;
-                    let value = core
-                        .read_actor_conversation(
-                            stage,
-                            args.actor_id,
-                            args.cursor,
-                            args.limit,
+                    let value = crate::stage::session::execute(
+                        &self.system,
+                        caller,
+                        args.stage_id.as_deref(),
+                        crate::stage::session::Operation::Conversation {
+                            actor: args.actor_id,
+                            cursor: args.cursor,
+                            limit: args.limit,
                             budget,
-                        )
-                        .await
-                        .map_err(|error| miette!("{error}"))?;
+                        },
+                    )
+                    .await
+                    .map_err(|error| miette!("{error}"))?;
                     self.system.authorize_account_observation(caller)?;
                     let page: crate::actors::store::ConversationPage =
                         serde_json::from_value(value).into_diagnostic()?;
@@ -793,6 +807,28 @@ impl App for ActorApp {
             "list" => {
                 let args: ListActorArgs =
                     serde_json::from_value(call.arguments.clone()).into_diagnostic()?;
+                let target = crate::stage::session::target(&self.system, args.stage_id.as_deref())
+                    .map_err(|e| miette!("{e}"))?;
+                if target
+                    != self
+                        .system
+                        .store()
+                        .public_stage_id()
+                        .map_err(|e| miette!("{e}"))?
+                {
+                    let value = crate::stage::session::execute(
+                        &self.system,
+                        caller,
+                        args.stage_id.as_deref(),
+                        crate::stage::session::Operation::List {
+                            offset: args.cursor.unwrap_or(0),
+                            limit: args.limit.unwrap_or(25),
+                        },
+                    )
+                    .await
+                    .map_err(|e| miette!("{e}"))?;
+                    return Ok(AppToolExecutionResult::new("Session Actors", value, None));
+                }
                 self.system.require_local_stage(args.stage_id.as_deref())?;
                 let limit = args.limit.unwrap_or(25);
                 if limit == 0 || limit > 100 {
@@ -867,6 +903,65 @@ impl App for ActorApp {
                     serde_json::from_value(call.arguments.clone())
                         .map_err(|_| miette!("invalid Actor creation arguments"))?
                 };
+                let target = crate::stage::session::target(&self.system, args.stage_id.as_deref())
+                    .map_err(|e| miette!("{e}"))?;
+                let local = self
+                    .system
+                    .store()
+                    .public_stage_id()
+                    .map_err(|e| miette!("{e}"))?;
+                let session = crate::stage::session::actor_session(&self.system, &self.actor_id)
+                    .map_err(|e| miette!("{e}"))?;
+                if imported.is_none() && (target != local || session.stage_id != local) {
+                    let request = if args.task.as_ref().is_some_and(|s| !s.trim().is_empty())
+                        || args.forward_input.unwrap_or(false)
+                    {
+                        Some(self.request_content(
+                            caller,
+                            args.task.as_deref().unwrap_or_default(),
+                            args.forward_input.unwrap_or(false),
+                        )?)
+                    } else {
+                        None
+                    };
+                    let config = ActorConfig {
+                        name: args.name,
+                        workspace: args.workspace.map(Into::into).unwrap_or_default(),
+                        apps: vec![],
+                        model: args.model,
+                        instructions: args.instructions.unwrap_or_default(),
+                    };
+                    let value = crate::stage::session::create(
+                        &self.system,
+                        caller,
+                        target,
+                        format!("{}:{}", caller.message_id, call.id),
+                        config,
+                        args.initial_authorization.unwrap_or_default().into(),
+                    )
+                    .await
+                    .map_err(|e| miette!("{e}"))?;
+                    let id = value["id"]
+                        .as_str()
+                        .ok_or_else(|| miette!("Invalid worker creation response"))?
+                        .to_owned();
+                    if let Some((content, attachments)) = request {
+                        let mut result = self.send_request(
+                            caller,
+                            context,
+                            &call.id,
+                            Some(&target.to_string()),
+                            id.clone(),
+                            None,
+                            content,
+                            &attachments,
+                            args.title,
+                        )?;
+                        result.payload["id"] = id.into();
+                        return Ok(result);
+                    }
+                    return Ok(AppToolExecutionResult::new("Actor created", value, None));
+                }
                 self.system.require_local_stage(args.stage_id.as_deref())?;
                 let parent = self.system.record_for_tool(&self.actor_id, caller)?;
                 let workspace = args
@@ -1029,7 +1124,7 @@ mod tests {
             crate::resources::publish(&system, "root", "output", "text/plain", original.as_bytes())
                 .unwrap();
         system
-            .send_user("root", "Read the output".into(), vec![], None)
+            .test_actor_input("root", "Read the output".into(), vec![], None)
             .unwrap();
         let input = system.store().claim_next("root").unwrap().unwrap();
         let actor = system.actor("root").unwrap();

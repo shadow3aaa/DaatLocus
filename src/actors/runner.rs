@@ -48,10 +48,6 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
         if control.stop.load(Ordering::Acquire) {
             break;
         }
-        if actor_id == crate::stage::shared::ACTOR_ID && !system.core_permitted() {
-            passivated = true;
-            break;
-        }
         let message = match system.store().claim_next(&actor_id) {
             Ok(Some(message)) => message,
             Ok(None) => {
@@ -82,23 +78,16 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
         let result = async {
             let actor = system.execution_actor(&message)?;
             system.store().set_status(&actor_id, ActorStatus::Running)?;
-            if actor_id == crate::stage::shared::ACTOR_ID
-                || installed_config
-                    .as_ref()
-                    .is_none_or(|installed| !installed.same_apps(&actor.config))
+            if installed_config
+                .as_ref()
+                .is_none_or(|installed| !installed.same_apps(&actor.config))
             {
                 shutdown_apps(&mut apps).await;
-                apps = Some(
-                    if actor_id == crate::stage::shared::ACTOR_ID && !system.local_core() {
-                        system
-                            .shared_core()
-                            .ok_or_else(|| miette!("Shared Actor worker is unavailable"))?
-                            .model_apps()
-                            .await?
-                    } else {
-                        builtin_apps::create_apps(&actor, system.clone(), &system.config())?
-                    },
-                );
+                apps = Some(builtin_apps::create_apps(
+                    &actor,
+                    system.clone(),
+                    &system.config(),
+                )?);
                 installed_config = Some(actor.config.clone());
             }
             execute_message(
@@ -114,11 +103,6 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
 
         // Check once more after the final provider/tool future resolves. A
         // cancellation racing the final chunk must not deliver success.
-        if actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted() {
-            shutdown_apps(&mut apps).await;
-            installed_config = None;
-            continue;
-        }
         let status = match finish_input(&system, &message, &control, result) {
             Ok(status) => status,
             Err(_) => {
@@ -126,11 +110,6 @@ pub async fn run_actor(system: ActorSystem, actor_id: String, control: Arc<Actor
                 break;
             }
         };
-        if actor_id == crate::stage::shared::ACTOR_ID
-            && let Some(core) = system.shared_core()
-        {
-            let _ = core.checkpoint().await;
-        }
         if status != MessageStatus::Completed {
             shutdown_apps(&mut apps).await;
             installed_config = None;
@@ -167,7 +146,6 @@ fn check_interruption(
 ) -> Result<()> {
     if interruption(control, message).is_some()
         || (system.store().cancellation_pending(&message.id)?)
-        || message.actor_id == crate::stage::shared::ACTOR_ID && !system.core_execution_permitted()
     {
         Err(miette!("Execution interrupted"))
     } else {
@@ -200,7 +178,7 @@ async fn refresh_apps(
     let replacements = registry
         .entries()
         .into_iter()
-        .filter(|entry| entry.enabled && actor.id != crate::stage::shared::ACTOR_ID)
+        .filter(|entry| entry.enabled && actor.role != super::ActorRole::Session)
         .map(|entry| {
             Box::new(crate::mcp::McpApp::new(
                 entry,
@@ -292,7 +270,7 @@ async fn execute_message(
     check_interruption(system, control, message)?;
     let mut context = system.execution_context(actor, message)?;
     apps.set_vision_support(builtin_apps::vision_support(actor, &system.config())?);
-    if actor.id != crate::stage::shared::ACTOR_ID {
+    if actor.role != super::ActorRole::Session {
         refresh_apps(system, actor, message, control, apps, &context, false).await?;
     }
     let tools = apps.model_tool_specs_for_context(&context)?;
@@ -326,8 +304,7 @@ async fn execute_message(
         let message = &active;
         check_interruption(system, control, message)?;
         context = system.execution_context(actor, message)?;
-        if actor.id != crate::stage::shared::ACTOR_ID
-            && system.app_registry().take_refresh(&actor.id)
+        if actor.role != super::ActorRole::Session && system.app_registry().take_refresh(&actor.id)
         {
             refresh_apps(system, actor, message, control, apps, &context, true).await?;
             let tools = apps.model_tool_specs_for_context(&context)?;
@@ -351,9 +328,6 @@ async fn execute_message(
         let baseline = ModelContext::baseline(system, &actor.id, &model.binding)?;
         window.reload(system, message, model.provider.as_ref(), &baseline)?;
         check_interruption(system, control, message)?;
-        if actor.id == crate::stage::shared::ACTOR_ID {
-            system.checkpoint_core().await?;
-        }
         let request = if !handoff_required {
             window.admitted(model.provider.as_ref(), &baseline)
         } else {
@@ -775,9 +749,6 @@ async fn execute_call(
         current_actor.remote_read_only,
         true,
     )?;
-    if actor.id == crate::stage::shared::ACTOR_ID {
-        system.checkpoint_core().await?;
-    }
     super::runtime_permissions::bind_access_broker(
         &mut context,
         system,

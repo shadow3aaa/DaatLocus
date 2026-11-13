@@ -5,6 +5,7 @@ import { isBuiltinTool, resultImages, toolContentKind, toolHasContent } from "@/
 import { StructuredObservation, outputSchema } from "./structured-observation";
 import { ToolDomainContent } from "./tool-domain-content";
 import { ResourceImage } from "./resource-image";
+import { GuiObservationImage } from "./gui-observation-image";
 
 type ToolDetailProps = {result:ToolResult;onActor?(id:string):void;live?:boolean};
 
@@ -17,6 +18,8 @@ export function ToolDetail({result,onActor,live}:ToolDetailProps) {
   return <section className="dl-tool-details">
     {result.error&&!(kind==="workspace"&&payload.error===result.error)&&<p className="dl-operation-error">{schema?.["x-dl-error"]==="generic"?t("tool_details.action_failed"):readableSummary(result.error)||t("tool_details.action_failed")}</p>}
     {isBuiltinTool(result)?<ToolDomainContent kind={kind} value={payload} live={live}/>:<StructuredObservation onActor={onActor} value={result.payload} schema={schema} fallback={!result.error&&!images.length?readableSummary(result.summary)||t("tool_details.action_completed"):undefined}/>}
-    {images.map(image=><ResourceImage key={image.uri} {...image}/>)}
+     {kind==="gui"&&payload.observation&&typeof payload.observation==="object"&&!Array.isArray(payload.observation)&&"screenshot_url" in payload.observation
+       ? <GuiObservationImage observation={payload.observation as {window_id?:string;width?:number;height?:number;cursor_x?:number;cursor_y?:number;screenshot_url?:string}}/>
+       : images.map(image=><ResourceImage key={image.uri} {...image}/>)}
   </section>;
 }

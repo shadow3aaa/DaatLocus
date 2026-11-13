@@ -45,7 +45,7 @@ async fn retained_actor_restart_and_refresh_never_promote_legacy_history_to_sche
     )]));
     let (directory, system) = runtime(provider).await;
     let input = system
-        .send_user("root", "Establish history".into(), vec![], None)
+        .test_actor_input("root", "Establish history".into(), vec![], None)
         .unwrap();
     wait_completed(&system, &input.id).await;
     let retained = system.actor("root").unwrap();
@@ -109,7 +109,7 @@ async fn retained_actor_restart_and_refresh_never_promote_legacy_history_to_sche
         .model_tool_specs()
         .unwrap();
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Refresh definitions without recreating this Actor".into(),
             vec![],
@@ -226,7 +226,7 @@ async fn refresh_next_provider_request_replaces_schema_additions_and_removals_wi
         MockReply::Answer("Refreshed"),
     ]);
     let input = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Refresh changed tool discovery".into(),
             vec![],

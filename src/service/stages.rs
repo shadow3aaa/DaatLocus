@@ -1,8 +1,6 @@
 //! Owner operations are confined to this service's account/Actor store.
 use super::{ApiError, ApiResult, ServiceState, manage, owner};
-use crate::stage::{
-    StageError, StageId, host::Settings, ledger::StageLedger, protocol::Body, runtime::Runtime,
-};
+use crate::stage::{StageError, StageId, host::Settings, ledger::StageLedger, runtime::Runtime};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -16,17 +14,33 @@ pub(super) fn routes() -> Router<ServiceState> {
     Router::new()
         .route("/v1/stage", get(info))
         .route("/v1/stage/status", get(status))
-        .route("/v1/stage/recovery/archives", get(recovery_archives))
-        .route(
-            "/v1/stage/recovery/archives/{archive}/messages",
-            get(recovery_messages),
-        )
         .route("/v1/stage/renew", post(renew))
         .route("/v1/stage/settings", get(settings).patch(save_settings))
         .route("/v1/stage/devices", get(devices))
         .route("/v1/stage/devices/{stage}", axum::routing::delete(revoke))
-        .route("/v1/stages/{stage}/actors", get(actors))
         .route("/v1/stages/{stage}/skills", get(skills))
+}
+async fn skills(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Path(stage): Path<StageId>,
+    Query(query): Query<crate::super_skills_app::ListSkillsArgs>,
+) -> ApiResult<Json<Value>> {
+    owner(&state, &headers).await?;
+    let runtime = runtime(&state)?;
+    if stage != runtime.host.local {
+        return Err(ApiError::unavailable());
+    }
+    let context = state
+        .system
+        .owner_app_context()
+        .map_err(ApiError::from_report)?;
+    let page = crate::super_skills_app::SuperSkillsApp::new(state.system.clone())
+        .list(&query, &context)
+        .map_err(ApiError::from_report)?;
+    Ok(Json(
+        serde_json::to_value(page).map_err(|_| ApiError::internal())?,
+    ))
 }
 pub(super) fn runtime(state: &ServiceState) -> ApiResult<Arc<Runtime>> {
     state.stage.clone().ok_or_else(ApiError::unavailable)
@@ -53,7 +67,11 @@ pub(super) fn failure(error: StageError) -> ApiError {
             code: "backlog_full",
             message: "Device resource budget reached",
         },
-        StageError::Unavailable(_) => ApiError::unavailable(),
+        StageError::Unavailable(_) => ApiError {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            code: "device_unreachable",
+            message: "Device is unreachable",
+        },
         _ => ApiError::internal(),
     }
 }
@@ -63,17 +81,18 @@ async fn info(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResul
     let host = &runtime.host;
     let public_login = runtime.public_login_status().await;
     Ok(Json(
-        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"primary_actor_id":crate::stage::shared::ACTOR_ID,"core":runtime.core_status(),"public_login":public_login}),
+        json!({"stage_id":host.local,"account_id":host.account_id(),"name":host.accounts.current().ok().flatten().map(|record|record.name.clone()),"profile":host.profile(),"settings":host.settings(),"model_ready":state.system.config().validate().is_ok(),"public_login":public_login}),
     ))
 }
 // A bounded volatile status query; no configuration or conversation snapshots.
 async fn status(State(state): State<ServiceState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     owner(&state, &headers).await?;
     let runtime = runtime(&state)?;
-    let core = runtime.core_status();
     let public_login = runtime.public_login_status().await;
-    Ok(Json(json!({"core": core,"public_login": public_login,
-        "work_generation": crate::stage::reset::generation(&runtime.host).map_err(failure)?})))
+    Ok(Json(
+        json!({"model_ready":state.system.config().validate().is_ok(),"public_login": public_login,
+        "work_generation": crate::stage::reset::generation(&runtime.host).map_err(failure)?}),
+    ))
 }
 async fn settings(
     State(state): State<ServiceState>,
@@ -81,39 +100,6 @@ async fn settings(
 ) -> ApiResult<Json<Settings>> {
     owner(&state, &headers).await?;
     Ok(Json(runtime(&state)?.host.settings()))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoveryPage {
-    after: Option<i64>,
-    limit: Option<usize>,
-}
-async fn recovery_archives(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Query(query): Query<RecoveryPage>,
-) -> ApiResult<Json<Value>> {
-    owner(&state, &headers).await?;
-    let limit = super::bounded(query.limit, 100)?;
-    let page = crate::stage::recovery::archives(state.system.store(), query.after, limit)
-        .map_err(failure)?;
-    Ok(Json(
-        serde_json::to_value(page).map_err(|_| ApiError::internal())?,
-    ))
-}
-async fn recovery_messages(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path(archive): Path<String>,
-    Query(query): Query<RecoveryPage>,
-) -> ApiResult<Json<Value>> {
-    owner(&state, &headers).await?;
-    let limit = super::bounded(query.limit, 100)?;
-    let page = crate::stage::recovery::messages(state.system.store(), &archive, query.after, limit)
-        .map_err(failure)?;
-    let mut value = serde_json::to_value(page).map_err(|_| ApiError::internal())?;
-    super::redact(&mut value, &state.system);
-    Ok(Json(value))
 }
 async fn save_settings(
     State(state): State<ServiceState>,
@@ -190,64 +176,4 @@ async fn revoke(
         let _ = signal.try_send(crate::stage::relay::Command::Revoke(change));
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
-}
-async fn actors(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path(stage): Path<StageId>,
-) -> ApiResult<Json<Value>> {
-    owner(&state, &headers).await?;
-    let runtime = runtime(&state)?;
-    if stage == runtime.host.local {
-        return Ok(Json(
-            json!({"items":state.system.list_visible().map_err(ApiError::from_report)?}),
-        ));
-    }
-    let handle = runtime.handle(stage).map_err(failure)?;
-    let result = handle
-        .rpc(Body::DirectoryQuery {
-            after: None,
-            limit: 32,
-        })
-        .await
-        .map_err(failure)?;
-    let Body::Directory { actors, next } = result else {
-        return Err(ApiError::internal());
-    };
-    Ok(Json(json!({"items":actors,"next_cursor":next})))
-}
-
-async fn skills(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Path(stage): Path<StageId>,
-    Query(query): Query<crate::super_skills_app::ListSkillsArgs>,
-) -> ApiResult<Json<Value>> {
-    owner(&state, &headers).await?;
-    let runtime = runtime(&state)?;
-    let page = if stage == runtime.host.local {
-        let context = state
-            .system
-            .owner_app_context()
-            .map_err(ApiError::from_report)?;
-        crate::super_skills_app::SuperSkillsApp::new(state.system.clone())
-            .list(&query, &context)
-            .map_err(ApiError::from_report)?
-    } else {
-        let core = state
-            .system
-            .shared_core()
-            .ok_or_else(ApiError::unavailable)?;
-        let crate::stage::core_wire::Response::Skills { page } = core
-            .request(stage, crate::stage::core_wire::Request::Skills { query })
-            .await
-            .map_err(failure)?
-        else {
-            return Err(ApiError::unavailable());
-        };
-        page
-    };
-    Ok(Json(
-        serde_json::to_value(page).map_err(|_| ApiError::internal())?,
-    ))
 }

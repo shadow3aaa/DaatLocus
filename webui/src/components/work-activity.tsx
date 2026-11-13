@@ -1,4 +1,3 @@
-import type { ContactFocus } from "@/lib/contacts";
 import { t } from "@/lib/i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EventRecord, MessageRecord } from "@/lib/actor-api";
@@ -14,7 +13,7 @@ import { LazyPage } from "@/components/lazy-page";
 import { MessageBubbleRow } from "@/components/message-bubble-row";
 import { actorAvatarSeed } from "@/lib/conversation-avatars";
 
-function useActivityHistory(message: MessageRecord, events: EventRecord[], focus?: ContactFocus | null) {
+function useActivityHistory(message: MessageRecord, events: EventRecord[]) {
   const [history, setHistory] = useState<EventRecord[]>([]);
   const [cursor, setCursor] = useState<number | null | undefined>(undefined);
   const through = useRef(0);
@@ -63,22 +62,14 @@ function useActivityHistory(message: MessageRecord, events: EventRecord[], focus
       throw error;
     } finally {paging.current=false;}
   }, [loading, cursor, message.actor_id, message.id]);
-  useEffect(()=>{
-    if(!focus||loading||cursor==null||error)return;
-    const resultFound=focus.result_id&&history.some(record=>record.event.type==="tool_finished"&&record.event.result_id===focus.result_id);
-    const generationFound=focus.generation!=null&&history.flatMap(record=>record.event.type==="generation_delta"&&record.event.channel==="assistant"&&record.event.generation===focus.generation?[record.event.text]:[]).join("").length>=focus.content.length;
-    if(resultFound||generationFound||!focus.result_id&&focus.generation==null)return;
-    const controller=new AbortController();void more(controller.signal).catch(()=>{if(!controller.signal.aborted)setError(t("work_activity.could_not_load_activity"));});
-    return()=>controller.abort();
-  },[focus,loading,cursor,history,error,more]);
   const reload = useCallback(() => { setError(""); setCursor(undefined); setRetry(value => value + 1); }, []);
   return useMemo(() => ({history,cursor,loading,error,more,reload}), [history,cursor,loading,error,more,reload]);
 }
 
 export type ActivityHistory = ReturnType<typeof useActivityHistory>;
 
-export function WorkActivityHistory({message,events,focus,onChange}: {message:MessageRecord;events:EventRecord[];focus?:ContactFocus|null;onChange(id:string,history:ActivityHistory):void}) {
-  const history = useActivityHistory(message,events,focus);
+export function WorkActivityHistory({message,events,onChange}: {message:MessageRecord;events:EventRecord[];onChange(id:string,history:ActivityHistory):void}) {
+  const history = useActivityHistory(message,events);
   useEffect(() => onChange(message.id,history), [message.id,history,onChange]);
   return null;
 }

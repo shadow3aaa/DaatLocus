@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { getMessage, type EventRecord, type MessageStatus, type ToolSummary } from "./actor-api";
+import { getMessage, listMessages, subscribeActorEvents, type EventRecord, type MessageStatus, type ToolSummary } from "./actor-api";
 import { actorIdFromUrl, localActorId } from "./conversation-links";
 import { asObject, asText, operationToolName } from "./tool-presentation";
 
@@ -34,6 +34,21 @@ export function delegationState(status?: MessageStatus): DelegationState {
 const rank: Record<MessageStatus, number> = { queued: 0, running: 1, completed: 2, failed: 2, cancelled: 2, interrupted: 2 };
 const finished = (status?: MessageStatus) => status !== undefined && rank[status] === 2;
 const keyOf = (actorId: string, messageId: string) => `${actorId}\u0000${messageId}`;
+type RemoteRequestStream = (actorId: string, signal: AbortSignal, onEvent: (record: EventRecord) => void) => Promise<void>;
+const remoteRequestStream: RemoteRequestStream = async (actorId, signal, onEvent) => {
+  while (!signal.aborted) {
+    // Capture a bounded cursor before subscribing. The stream replays any event
+    // committed after that query, avoiding a gap without replaying old history.
+    const page = await listMessages(actorId, {limit: 1, signal});
+    let resync = false, revoked = false;
+    await subscribeActorEvents(actorId, {
+      after: page.event_cursor ?? 0, signal, onEvent,
+      onResync: () => { resync = true; },
+      onAccessRevoked: () => { revoked = true; },
+    });
+    if (!resync || revoked) return;
+  }
+};
 
 /**
  * Delegated request statuses for mounted task cards. Local updates arrive from
@@ -47,7 +62,12 @@ export class DelegationStatuses {
   private loading = new Set<string>();
   private active = 0;
   private epoch = 0;
-  constructor(private readonly read = (actorId: string, messageId: string) => getMessage(actorId, messageId).then(message => message.status), private readonly concurrency = 4) {}
+  private remoteStreams = new Map<string, {controller: AbortController; count: number}>();
+  constructor(
+    private readonly read = (actorId: string, messageId: string) => getMessage(actorId, messageId).then(message => message.status),
+    private readonly concurrency = 4,
+    private readonly stream: RemoteRequestStream = remoteRequestStream,
+  ) {}
 
   status(actorId: string, messageId: string) { return this.states.get(keyOf(actorId, messageId)); }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -57,10 +77,14 @@ export class DelegationStatuses {
     const entry = this.tracked.get(key);
     if (entry) entry.count++;
     else this.tracked.set(key, { actorId, messageId, count: 1 });
+    if (actorId.includes("~")) this.trackRemote(actorId);
     if (!this.states.has(key)) this.load(key, actorId, messageId);
     return () => {
       const current = this.tracked.get(key);
-      if (current && --current.count <= 0) this.tracked.delete(key);
+      if (current && --current.count <= 0) {
+        this.tracked.delete(key);
+        if (actorId.includes("~")) this.untrackRemote(actorId);
+      }
     };
   }
 
@@ -83,6 +107,8 @@ export class DelegationStatuses {
 
   reset() {
     this.epoch++;
+    for (const stream of this.remoteStreams.values()) stream.controller.abort();
+    this.remoteStreams.clear();
     this.states.clear();
     this.queue = [];
     this.loading.clear();
@@ -94,6 +120,25 @@ export class DelegationStatuses {
     this.loading.add(key);
     this.queue.push({ key, actorId, messageId });
     this.drain();
+  }
+
+  private trackRemote(actorId: string) {
+    const current = this.remoteStreams.get(actorId);
+    if (current) { current.count++; return; }
+    const controller = new AbortController();
+    this.remoteStreams.set(actorId, {controller, count: 1});
+    void this.stream(actorId, controller.signal, record => {
+      const event = record.event;
+      if (event.type === "message_updated" && record.actor_id === actorId && this.tracked.has(keyOf(actorId, event.message_id)))
+        this.update(actorId, event.message_id, event.status);
+    }).catch(() => {});
+  }
+
+  private untrackRemote(actorId: string) {
+    const current = this.remoteStreams.get(actorId);
+    if (!current || --current.count > 0) return;
+    this.remoteStreams.delete(actorId);
+    current.controller.abort();
   }
 
   private drain() {

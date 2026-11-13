@@ -185,7 +185,8 @@ async fn owner_stream_rechecks_rotated_credentials_and_unconfigured_service_stay
     );
     assert_eq!(
         unconfigured
-            .owner(reqwest::Method::POST, "/v1/core/messages")
+            .owner(reqwest::Method::POST, "/v1/sessions/core/messages")
+            .header("idempotency-key", "unconfigured-input")
             .json(&json!({"content": "hello", "attachments": []}))
             .send()
             .await
@@ -227,10 +228,7 @@ async fn shutdown_closes_actor_and_owner_streams_without_waiting_for_heartbeat()
 async fn explicit_report_streams_and_can_be_fetched_before_task_completion() {
     let fixture = Fixture::new().await;
     let actor = fixture.child("reporting").await;
-    let input = fixture
-        .system
-        .send_user(&actor, "Investigate".into(), vec![], None)
-        .unwrap();
+    let input = fixture.delegate(&actor, "Investigate");
     fixture.system.store().claim_next(&actor).unwrap().unwrap();
     let cursor = fixture.system.store().event_cursor().unwrap();
     let delivery = fixture
@@ -244,6 +242,7 @@ async fn explicit_report_streams_and_can_be_fetched_before_task_completion() {
             Vec::new(),
         )
         .unwrap();
+    assert_eq!(delivery.actor_id, "core");
     assert_eq!(
         fixture.system.store().message(&input.id).unwrap().status,
         daat_locus::actors::MessageStatus::Running
@@ -251,38 +250,40 @@ async fn explicit_report_streams_and_can_be_fetched_before_task_completion() {
     let mut response = fixture
         .owner(
             reqwest::Method::GET,
-            &format!("/v1/actors/{actor}/event-stream?after={cursor}&limit=10"),
+            &format!("/v1/actors/core/event-stream?after={cursor}&limit=10"),
         )
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let text = String::from_utf8_lossy(&chunk);
-    assert!(
-        text.contains("message_added") && text.contains(&delivery.id),
-        "{text}"
-    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for _ in 0..20 {
+            let chunk = response.chunk().await.unwrap().unwrap();
+            let text = String::from_utf8_lossy(&chunk);
+            if text.contains("message_added") && text.contains(&delivery.id) {
+                return;
+            }
+        }
+        panic!("Explicit delivery was not streamed to its session Core");
+    })
+    .await
+    .expect("Delivery stream timed out");
     let response = fixture
         .owner(
             reqwest::Method::GET,
-            &format!("/v1/actors/{actor}/messages/{}", delivery.id),
+            &format!("/v1/actors/core/messages/{}", delivery.id),
         )
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let data: Value = response.json().await.unwrap();
-    assert_eq!(data["kind"], "delivery");
-    assert_eq!(data["reply"], "Investigation is underway.");
+    assert_eq!(data["kind"], "progress");
+    assert_eq!(data["content"], "Investigation is underway.");
     let denied = fixture
         .client
         .get(format!(
-            "{}/v1/actors/{actor}/messages/{}",
+            "{}/v1/actors/core/messages/{}",
             fixture.url, delivery.id
         ))
         .send()

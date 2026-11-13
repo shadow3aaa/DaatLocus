@@ -380,10 +380,13 @@ impl WorkspaceApp {
             .actor_call
             .as_ref()
             .ok_or_else(|| miette!("Workspace requires an active Actor request"))?;
-        if caller.actor_id != self.actor_id || self.actor_id == crate::stage::shared::ACTOR_ID {
+        if caller.actor_id != self.actor_id {
             return Err(miette!("Workspace Actor identity mismatch"));
         }
         let actor = self.system.record_for_tool(&self.actor_id, caller)?;
+        if actor.role == crate::actors::ActorRole::Session {
+            return Err(miette!("Session Core does not execute workspace work"));
+        }
         if actor.config.workspace != context.execution_cwd {
             return Err(miette!(
                 "Workspace selection changed; obtain a fresh execution context"

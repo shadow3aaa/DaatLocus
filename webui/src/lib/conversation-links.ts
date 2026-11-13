@@ -1,6 +1,7 @@
 /** Only application conversation routes can open an Actor. A link never carries authority. */
 let localDeviceId: string | null = null;
 export function configureConversationDevice(id: string | null): void { localDeviceId = id; }
+export const conversationDevice = (): string | null => localDeviceId;
 /** A device-qualified link can point back to the service serving this WebUI. */
 export function localActorId(id: string, device = localDeviceId): string {
   const actor = device && id.startsWith(`${device}~`) ? id.slice(device.length + 1) : null;

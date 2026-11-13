@@ -18,27 +18,23 @@
   <String Id="AppDetail" Value="Installs for your account, along with Microsoft Edge WebView2 if it’s missing."/>
   <String Id="WorkspaceItem" Value="Workspace branches"/>
   <String Id="WorkspaceDetail" Value="Lets Actors try changes in isolated copies of your projects. Installs the signed WinFsp 2.2 Beta 5 driver (© Bill Zissimopoulos) and lets cmd start in network folders on this computer."/>
-  <String Id="DisplayItem" Value="Virtual displays"/>
-  <String Id="DisplayDetail" Value="Lets Actors use apps on screens you don’t need to watch. Adds Daat Locus’s self-signed certificate to this computer’s Trusted Root and Trusted Publishers stores."/>
   <String Id="ItemReady" Value="Already installed"/>
   <String Id="ItemApproval" Value="Needs administrator approval"/>
-  <String Id="ApprovalNotice" Value="Windows will ask you once to approve the driver changes. Setup asks before restarting."/>
-  <String Id="NoApprovalNotice" Value="Everything else is already in place, so no administrator approval is needed."/>
+  <String Id="ApprovalNotice" Value="Workspace support needs administrator approval if WinFsp is not already installed."/>
   <String Id="InstallButton" Value="Approve and install"/>
-  <String Id="InstallOnlyButton" Value="Install"/>
   <String Id="ProgressHeading" Value="Setting up Daat Locus"/>
-  <String Id="ProgressNotice" Value="If Windows asks for permission, choose Yes so Setup can install the drivers. Keep this window open until it finishes."/>
+  <String Id="ProgressNotice" Value="If Windows asks for permission, approve the setup of WinFsp. Keep this window open until it finishes."/>
   <String Id="ModifyHeading" Value="Daat Locus is installed"/>
-  <String Id="ModifyNotice" Value="Repair reinstalls the app and its drivers if something isn’t working. Driver changes need administrator approval.&#10;&#10;Uninstall removes the app and keeps your data and the shared drivers."/>
+  <String Id="ModifyNotice" Value="Repair reinstalls the app and workspace support if something isn’t working. Changing WinFsp may need administrator approval.&#10;&#10;Uninstall removes the app and keeps your data and shared WinFsp installation."/>
   <String Id="Repair" Value="Repair Daat Locus"/>
   <String Id="Uninstall" Value="Uninstall Daat Locus"/>
   <String Id="SuccessHeading" Value="Daat Locus is ready"/>
   <String Id="RepairSuccess" Value="Repair complete"/>
   <String Id="LayoutSuccess" Value="Installation files are ready"/>
   <String Id="UninstallSuccess" Value="Daat Locus was uninstalled"/>
-  <String Id="SuccessNotice" Value="Open Daat Locus to get started. You can also find it in the Start menu."/>
-  <String Id="UninstallNotice" Value="Your data and the shared drivers stay on this computer."/>
-  <String Id="RestartNotice" Value="Restart Windows to finish the driver changes. Save your work first, then restart now or later."/>
+  <String Id="SuccessNotice" Value="Sign out of Windows and back in before using GUI tools. You can open Daat Locus now or from the Start menu."/>
+  <String Id="UninstallNotice" Value="Your data and the shared WinFsp installation stay on this computer."/>
+  <String Id="RestartNotice" Value="Restart Windows to finish setup changes. Save your work first, then restart now or later."/>
   <String Id="Launch" Value="&amp;Open Daat Locus"/>
   <String Id="Restart" Value="&amp;Restart now"/>
   <String Id="FailureHeading" Value="Setup couldn’t finish"/>

@@ -54,7 +54,7 @@ pub(crate) fn reset_resources() -> Result<()> {
     Ok(())
 }
 pub(super) fn specifications() -> Vec<AppToolSpec> {
-    let mut tools = ComputerUseApp::windows_specifications();
+    let mut tools = ComputerUseApp::base_specifications();
     tools.retain(|tool| {
         !matches!(
             tool.name.as_str(),

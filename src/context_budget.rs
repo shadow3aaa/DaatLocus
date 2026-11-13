@@ -78,11 +78,6 @@ impl TokenEstimateBaseline {
         let underestimated_tokens = observed.saturating_sub(self.estimated_input_tokens);
         current_estimated_input_tokens.saturating_add(underestimated_tokens)
     }
-
-    pub fn conservative_total_input_tokens(&self, current_estimated_input_tokens: usize) -> usize {
-        current_estimated_input_tokens
-            .max(self.calibrated_total_input_tokens(current_estimated_input_tokens))
-    }
 }
 
 impl RequestBudgetBreakdown {
@@ -106,7 +101,7 @@ impl RequestBudgetBreakdown {
         mut self,
         baseline: &TokenEstimateBaseline,
     ) -> Self {
-        let conservative = baseline.conservative_total_input_tokens(self.total_input_tokens);
+        let conservative = baseline.calibrated_total_input_tokens(self.total_input_tokens);
         self.total_with_reserve_tokens = conservative.saturating_add(self.reserved_output_tokens);
         self.total_input_tokens = conservative;
         self
@@ -199,32 +194,19 @@ pub const fn approx_token_count(text: &str) -> usize {
 }
 
 pub fn truncate_text_to_token_budget(text: &str, max_tokens: usize) -> String {
-    truncate_text_to_token_budget_with_notice(text, max_tokens, "... [truncated for model context]")
-}
-
-pub fn truncate_text_to_token_budget_with_notice(
-    text: &str,
-    max_tokens: usize,
-    notice: &str,
-) -> String {
+    let notice = "... [truncated for model context]";
     let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
     if text.len() <= max_bytes {
         return text.to_owned();
     }
     let total = text.chars().count();
     let marker = format!("{notice} ({total} chars omitted)");
-    let mut end = max_bytes.saturating_sub(marker.len() + 1).min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let marker = format!(
-        "{notice} ({} chars omitted)",
-        total - text[..end].chars().count()
-    );
+    let head = utf8_prefix(text, max_bytes.saturating_sub(marker.len() + 1));
+    let marker = format!("{notice} ({} chars omitted)", total - head.chars().count());
     if marker.len() + 1 > max_bytes {
         return utf8_prefix(&marker, max_bytes).to_owned();
     }
-    let result = format!("{}\n{marker}", &text[..end]);
+    let result = format!("{head}\n{marker}");
     utf8_prefix(&result, max_bytes).to_owned()
 }
 
@@ -343,36 +325,6 @@ pub fn estimate_agent_turn_request<'a>(
         BudgetSection {
             name: "tool_messages",
             tokens: tool_messages,
-        },
-        BudgetSection {
-            name: "tool_specs",
-            tokens: tools.iter().map(estimate_tool_spec_tokens).sum(),
-        },
-    ];
-    RequestBudgetBreakdown::new(sections, limits)
-}
-
-pub fn estimate_runtime_request_envelope(
-    system_messages: &[String],
-    user_message: &str,
-    tools: &[AgentToolSpec],
-    limits: RequestBudgetLimits,
-) -> RequestBudgetBreakdown {
-    let sections = vec![
-        BudgetSection {
-            name: "system_messages",
-            tokens: system_messages
-                .iter()
-                .map(|message| {
-                    estimate_history_message_tokens(&HistoryMessage::system(message.as_str()))
-                })
-                .sum(),
-        },
-        BudgetSection {
-            name: "current_user_message",
-            tokens: estimate_history_message_tokens(&HistoryMessage::user(
-                user_message.to_string(),
-            )),
         },
         BudgetSection {
             name: "tool_specs",
@@ -580,7 +532,6 @@ mod tests {
         };
 
         assert_eq!(baseline.calibrated_total_input_tokens(200), 200);
-        assert_eq!(baseline.conservative_total_input_tokens(200), 200);
     }
 
     #[test]
@@ -590,7 +541,7 @@ mod tests {
             observed_input_tokens: Some(150),
         };
 
-        assert_eq!(baseline.conservative_total_input_tokens(200), 250);
+        assert_eq!(baseline.calibrated_total_input_tokens(200), 250);
     }
 
     #[test]
@@ -617,15 +568,6 @@ mod tests {
     fn token_estimate_baseline_returns_estimated_when_no_observed() {
         let baseline = TokenEstimateBaseline::default();
         assert_eq!(baseline.calibrated_total_input_tokens(500_000), 500_000);
-    }
-
-    #[test]
-    fn token_estimate_baseline_returns_calibrated_when_observed() {
-        let baseline = TokenEstimateBaseline {
-            estimated_input_tokens: 545_000,
-            observed_input_tokens: Some(810_000),
-        };
-        assert_eq!(baseline.calibrated_total_input_tokens(600_000), 865_000);
     }
 
     #[test]

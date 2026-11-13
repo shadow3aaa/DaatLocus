@@ -22,14 +22,25 @@ macro_rules! output {
     };
 }
 output!(GuiEntry {
+    app_id: String,
+    window_id: String,
     name: String,
     title: String,
     url: String,
     status: String,
-    taken: bool
+    taken: bool,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
 });
 output!(GuiView {
     title: String,
+    window_id: String,
+    width: u32,
+    height: u32,
+    cursor_x: i32,
+    cursor_y: i32,
     #[schemars(extend("format"="uri"))]
     url: String
 });

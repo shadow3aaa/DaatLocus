@@ -33,13 +33,8 @@
         <Label X="212" Y="224" Width="-32" Height="20" FontId="ready" DisablePrefix="yes" VisibleCondition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1">#(loc.ItemReady)</Label>
         <Label X="212" Y="224" Width="-32" Height="20" FontId="approval" DisablePrefix="yes" VisibleCondition="NOT (WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1)">#(loc.ItemApproval)</Label>
         <Label X="32" Y="246" Width="-32" Height="60" FontId="muted" DisablePrefix="yes">#(loc.WorkspaceDetail)</Label>
-        <Label X="32" Y="322" Width="172" Height="22" FontId="item" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay">#(loc.DisplayItem)</Label>
-        <Label X="212" Y="324" Width="-32" Height="20" FontId="ready" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay AND VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher">#(loc.ItemReady)</Label>
-        <Label X="212" Y="324" Width="-32" Height="20" FontId="approval" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay AND NOT (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher)">#(loc.ItemApproval)</Label>
-        <Label X="32" Y="346" Width="-32" Height="60" FontId="muted" DisablePrefix="yes" VisibleCondition="HasVirtualDisplay">#(loc.DisplayDetail)</Label>
         <Label X="32" Y="424" Width="-32" Height="44" FontId="body" DisablePrefix="yes">
           <Text>#(loc.ApprovalNotice)</Text>
-          <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1 AND (NOT HasVirtualDisplay OR (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher))">#(loc.NoApprovalNotice)</Text>
         </Label>
       </Panel>
       <Button X="32" Y="-24" Width="100" Height="36" TabStop="yes" FontId="body">
@@ -58,7 +53,6 @@
            keyboard accelerator must never reach it before the terms are accepted. -->
       <Button Name="InstallButton" X="-32" Y="-24" Width="220" Height="36" HexStyle="00000001" TabStop="yes" FontId="body" VisibleCondition="LicenseAccepted" EnableCondition="LicenseAccepted">
         <Text>#(loc.InstallButton)</Text>
-        <Text Condition="WinFspVersion &gt;= v2.2.26286 AND WorkspaceUnc64 = 1 AND WorkspaceUnc32 = 1 AND (NOT HasVirtualDisplay OR (VirtualDisplayPackage = BundledDisplayPackage AND VirtualDisplayRoot AND VirtualDisplayPublisher))">#(loc.InstallOnlyButton)</Text>
       </Button>
     </Page>
     <!-- The Back target from the terms, independent of whether they were accepted. -->

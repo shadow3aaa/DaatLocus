@@ -154,8 +154,5 @@ export function workTranscriptParts(messages: MessageRecord[], allMessages: Mess
   for (const {message,range} of ranges) if (visible.has(message.id)) parts.push({at:range.live ? Infinity : range.start,order:range.end===range.start ? 1 : 3,part:{kind:"activity",message,range}});
   return parts.sort((a,b) => a.at-b.at || a.order-b.order || a.part.message.seq-b.part.message.seq).map(item => item.part);
 }
-let primaryActor = "core";
-export function configurePrimaryActor(actorId: string): void { primaryActor = actorId; }
-export const isPrimaryActor = (actorId: string) => actorId === primaryActor || (primaryActor === "core" && actorId.endsWith("~core"));
 export const isUserSource = (message: MessageRecord) => message.source.kind === "user" || message.source.kind === "remote_user";
 export function isUserDelivery(message: MessageRecord) { return (message.reply_to.kind === "user" || message.reply_to.kind === "remote" && message.reply_to.user) && message.status === "completed" && Boolean(message.reply); }

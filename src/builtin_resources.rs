@@ -18,11 +18,6 @@ const FILES: &[(&str, &[u8])] = &[
         "skills/browser-use/SKILL.md",
         include_bytes!("builtin_skills/browser-use/SKILL.md"),
     ),
-    #[cfg(target_os = "windows")]
-    (
-        "skills/windows-gui-use/SKILL.md",
-        include_bytes!("builtin_skills/windows-gui-use/SKILL.md"),
-    ),
     #[cfg(target_os = "macos")]
     (
         "skills/macos-gui-use/SKILL.md",

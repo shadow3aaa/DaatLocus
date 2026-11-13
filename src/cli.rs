@@ -48,22 +48,6 @@ pub enum Command {
         #[command(subcommand)]
         action: InstallerAction,
     },
-    /// Internal credential-free application launcher.
-    #[cfg(windows)]
-    #[command(hide = true)]
-    ComputerUseLaunch {
-        app: String,
-        #[arg(long)]
-        display: String,
-        #[arg(long, allow_hyphen_values = true)]
-        left: i32,
-        #[arg(long, allow_hyphen_values = true)]
-        top: i32,
-        #[arg(long, allow_hyphen_values = true)]
-        right: i32,
-        #[arg(long, allow_hyphen_values = true)]
-        bottom: i32,
-    },
     /// Internal desktop bootstrap protocol; reads a bounded OPAQUE message from stdin.
     #[command(hide = true)]
     ClientBootstrap,
@@ -89,10 +73,55 @@ pub enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// Inspect or message sessions on the running local service.
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsCommand,
+    },
     /// Create an account using the local profile's OS permissions.
     Account {
         #[command(subcommand)]
         action: AccountCommand,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommand {
+    /// Create a new session on this device.
+    Create {
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// List sessions in this profile.
+    List {
+        /// List archived sessions instead of active sessions.
+        #[arg(long)]
+        archived: bool,
+        /// Maximum number of sessions to return (1–100).
+        #[arg(long, default_value_t = 50, value_parser = parse_page_limit)]
+        limit: usize,
+        /// Continue from the previous page's next_cursor.
+        #[arg(long)]
+        after: Option<String>,
+        /// Print the bounded API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read recent conversation messages from a session or one of its workers.
+    Messages {
+        actor: String,
+        #[arg(long, default_value_t = 20, value_parser = parse_page_limit)]
+        limit: usize,
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Send a message to a session Core. Read the message from stdin.
+    Send {
+        session: String,
+        /// Require message content on stdin, keeping it out of process arguments.
+        #[arg(long, required = true)]
+        message_stdin: bool,
     },
 }
 #[cfg(windows)]
@@ -149,6 +178,14 @@ fn parse_profile(value: &str) -> Result<String, String> {
         return Err("profile must contain 1–64 ASCII letters, digits, '-' or '_'".into());
     }
     Ok(value.to_owned())
+}
+
+fn parse_page_limit(value: &str) -> Result<usize, String> {
+    value
+        .parse()
+        .ok()
+        .filter(|limit| (1..=100).contains(limit))
+        .ok_or_else(|| "limit must be 1–100".into())
 }
 
 fn absolute_workspace(path: PathBuf) -> Result<PathBuf, String> {
@@ -312,6 +349,42 @@ mod tests {
                 .command,
             Some(Command::Restart { open: false })
         ));
+    }
+
+    #[test]
+    fn session_commands_require_explicit_bounded_and_stdin_inputs() {
+        for limit in ["0", "101", "-1", "invalid"] {
+            assert!(
+                Cli::try_parse_from(["daat-locus", "sessions", "list", "--limit", limit]).is_err()
+            );
+        }
+        assert!(matches!(
+            Cli::try_parse_from([
+                "daat-locus",
+                "sessions",
+                "list",
+                "--archived",
+                "--limit",
+                "12",
+                "--json"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Sessions {
+                action: SessionsCommand::List {
+                    archived: true,
+                    limit: 12,
+                    json: true,
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["daat-locus", "sessions", "send", "session-id", "--message-stdin"])
+                .unwrap().command,
+            Some(Command::Sessions { action: SessionsCommand::Send { session, message_stdin: true } }) if session == "session-id"
+        ));
+        assert!(Cli::try_parse_from(["daat-locus", "sessions", "send", "session-id"]).is_err());
     }
 
     #[test]

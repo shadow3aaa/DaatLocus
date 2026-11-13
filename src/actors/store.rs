@@ -13,11 +13,13 @@ use uuid::Uuid;
 mod approval_appeals;
 pub(crate) use approval_appeals::is_appeal_notice;
 mod completion;
-mod contacts;
+mod conversation;
 use completion::finish_message_tx;
 mod inbox;
-pub(crate) use contacts::ConversationPage;
-pub use contacts::{ActorContact, ContactMessage, ContactPage, ContactSort};
+#[cfg(test)]
+mod session_tests;
+mod sessions;
+pub(crate) use conversation::ConversationPage;
 #[cfg(test)]
 #[path = "store/history_handoff_tests.rs"]
 mod history_handoff_tests;
@@ -45,24 +47,6 @@ fn delivery_id(actor: &str, input: &str, call: &str) -> String {
     let hash = crate::stage::digest(format!("actor-delivery:{actor}:{input}:{call}").as_bytes());
     let bytes = hex::decode(hash).expect("SHA256 hex");
     Uuid::from_bytes(bytes[..16].try_into().expect("SHA256 prefix")).to_string()
-}
-fn core_requires_commit(db: &Connection) -> Result<bool> {
-    let exists: bool = sql(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_rows')",
-        [],
-        |row| row.get(0),
-    ))?;
-    if !exists {
-        return Ok(false);
-    }
-    // Missing mode metadata must retain the conservative shared-store contract.
-    // Only installing a local Core explicitly opts out of distributed commits.
-    let local: bool = sql(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM core_meta WHERE key='local_mode' AND value='1')",
-        [],
-        |row| row.get(0),
-    ))?;
-    Ok(!local)
 }
 fn tool_domain_name(name: &str) -> &str {
     name.strip_prefix("d_")
@@ -302,6 +286,12 @@ fn event(tx: &Transaction<'_>, actor_id: &str, value: ActorEvent) -> Result<i64>
     let id = tx.last_insert_rowid();
     crate::stage::journal::record(tx, id, actor_id, &value)
         .map_err(|error| miette::miette!("{error}"))?;
+    if matches!(
+        value,
+        ActorEvent::ActorChanged { .. } | ActorEvent::MessageUpdated { .. }
+    ) {
+        crate::stage::session::record_fact(tx, actor_id).map_err(|e| miette::miette!("{e}"))?;
+    }
     Ok(id)
 }
 pub(crate) fn actor_tx(tx: &Transaction<'_>, id: &str) -> Result<ActorRecord> {
@@ -323,23 +313,63 @@ fn account_actor_ids_db(
         [],
         |row| row.get(0),
     ))?;
-    let query = if bound {
+    let has_any_binding: bool = bound
+        && sql(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM stage_account_actors)",
+            [],
+            |row| row.get(0),
+        ))?;
+    let query = if has_any_binding {
         "WITH RECURSIVE ownership(actor,account) AS (
             SELECT actor,account FROM stage_account_actors
             UNION ALL SELECT a.id,o.account FROM actors a JOIN ownership o ON a.parent_id=o.actor
             WHERE NOT EXISTS(SELECT 1 FROM stage_account_actors explicit WHERE explicit.actor=a.id)
         ) SELECT a.id FROM actors a LEFT JOIN ownership o ON o.actor=a.id
-        WHERE o.account IS (SELECT account FROM ownership WHERE actor=?1)"
+          WHERE o.account = (SELECT account FROM ownership WHERE actor=?1)
+         AND json_extract(a.record,'$.session_id')=(SELECT json_extract(record,'$.session_id') FROM actors WHERE id=?1)"
     } else {
-        "SELECT id FROM actors WHERE ?1 IS NOT NULL"
+        "SELECT id FROM actors WHERE json_extract(record,'$.session_id')=(SELECT json_extract(record,'$.session_id') FROM actors WHERE id=?1)"
     };
     let mut statement = sql(db.prepare(query))?;
-    sql(sql(statement.query_map([sender], |row| row.get::<_, String>(0)))?.collect())
+    let ids = sql(
+        sql(statement.query_map([sender], |row| row.get::<_, String>(0)))?
+            .collect::<rusqlite::Result<Vec<_>>>(),
+    )?;
+    let stage: String = sql(db.query_row(
+        "SELECT value FROM stage_public_meta WHERE key='stage'",
+        [],
+        |r| r.get(0),
+    ))?;
+    let local = serde_json::from_value(Value::String(stage)).into_diagnostic()?;
+    let session = crate::stage::session::address(db, &read_actor(db, sender)?, local)
+        .map_err(|e| miette::miette!("{e}"))?;
+    ids.into_iter()
+        .filter_map(|id| {
+            let result = read_actor(db, &id).and_then(|actor| {
+                crate::stage::session::address(db, &actor, local)
+                    .map_err(|e| miette::miette!("{e}"))
+            });
+            match result {
+                Ok(address) if address == session => Some(Ok(id)),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .collect()
 }
 fn validate_new_actor_name_db(db: &Connection, parent: &str, name: &str) -> Result<()> {
     let name = name.trim().to_lowercase();
     if name.is_empty() {
         return Err(ActorError::Invalid("Actor name must not be empty".into()).into());
+    }
+    let record = read_actor(db, parent)?;
+    let reserved: bool = sql(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_members WHERE session=?1 AND name=?2)",
+        params![record.session_id, name],
+        |r| r.get(0),
+    ))?;
+    if reserved {
+        return Err(ActorError::Conflict("Actor name is already in use".into()).into());
     }
     let mut names =
         sql(db.prepare("SELECT json_extract(record, '$.config.name') FROM actors WHERE id=?1"))?;
@@ -369,6 +399,7 @@ fn save_actor(tx: &Transaction<'_>, actor: &ActorRecord) -> Result<()> {
             actor: actor.summary(),
         },
     )?;
+    sessions::changed(tx, &actor.session_id)?;
     Ok(())
 }
 fn save_resource(
@@ -417,13 +448,31 @@ fn save_message(tx: &Transaction<'_>, message: &MessageRecord) -> Result<()> {
             status: message.status,
         },
     )?;
+    sessions::changed(tx, &actor_tx(tx, &message.actor_id)?.session_id)?;
     Ok(())
 }
 pub(crate) fn insert_message(
     tx: &Transaction<'_>,
     mut message: MessageRecord,
 ) -> Result<MessageRecord> {
-    if actor_tx(tx, &message.actor_id)?.status == ActorStatus::Archived {
+    let mut actor = actor_tx(tx, &message.actor_id)?;
+    sessions::ensure_admission(tx, &actor)?;
+    if matches!(
+        message.source,
+        MessageSource::User | MessageSource::RemoteUser { .. }
+    ) && actor.role != ActorRole::Session
+    {
+        return Err(
+            ActorError::Forbidden("Owner input is accepted only by session Cores".into()).into(),
+        );
+    }
+    if let MessageSource::Actor { actor_id } = &message.source {
+        let sender = actor_tx(tx, actor_id)?;
+        if sender.session_id != actor.session_id {
+            return Err(ActorError::Forbidden("Actors belong to different sessions".into()).into());
+        }
+    }
+    if actor.status == ActorStatus::Archived {
         return Err(ActorError::Conflict(
             "Actor is archived; unarchive it before sending messages".into(),
         )
@@ -438,7 +487,29 @@ pub(crate) fn insert_message(
         "UPDATE messages SET record=?1 WHERE id=?2",
         params![encode_message(&message)?, message.id],
     ))?;
-    if message.actor_id != crate::stage::shared::ACTOR_ID || message.kind != MessageKind::Delivery {
+    if actor.role == ActorRole::Session
+        && actor.title.is_none()
+        && matches!(
+            message.source,
+            MessageSource::User | MessageSource::RemoteUser { .. }
+        )
+    {
+        actor.title = sessions::normalize_title(Some(
+            message
+                .content
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect(),
+        ));
+        actor.updated_at_ms = now();
+        save_actor(tx, &actor)?;
+    } else {
+        sessions::changed(tx, &actor.session_id)?;
+    }
+    if actor.role != ActorRole::Session || message.kind != MessageKind::Delivery {
         event(
             tx,
             &message.actor_id,
@@ -488,15 +559,6 @@ impl ActorStore {
     ) -> crate::stage::Result<T> {
         self.stage_transaction_with_notify(apply, true)
     }
-    /// Consensus heartbeats are infrastructure writes, not Actor changes.
-    /// Publishing them to Actor wakes creates a heartbeat/write feedback loop.
-    #[track_caller]
-    pub(crate) fn coordination_transaction<T>(
-        &self,
-        apply: impl FnOnce(&Transaction<'_>) -> crate::stage::Result<T>,
-    ) -> crate::stage::Result<T> {
-        self.stage_transaction_with_notify(apply, false)
-    }
     #[track_caller]
     fn stage_transaction_with_notify<T>(
         &self,
@@ -544,16 +606,22 @@ impl ActorStore {
             let tx = sql(db.transaction())?;
             super::migrations::retire_guest_execution(&tx, now()).into_diagnostic()?;
             super::migrations::remove_actor_capability_lists(&tx).into_diagnostic()?;
+            super::migrations::session_ownership(&tx).into_diagnostic()?;
             crate::sandbox::scopes::initialize(&tx)?;
             crate::stage::blob::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             crate::stage::journal::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             crate::stage::sync::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             crate::stage::delivery::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
+            crate::stage::session::initialize(&tx).map_err(|error| miette::miette!("{error}"))?;
             sql(tx.commit())?;
-            Ok(Self {
+            let store = Self {
                 db: Mutex::new(db),
                 changed: Arc::new(Notify::new()),
-            })
+            };
+            store
+                .public_stage_id()
+                .map_err(|e| miette::miette!("{e}"))?;
+            Ok(store)
         })
     }
     pub fn changed(&self) -> Arc<Notify> {
@@ -590,15 +658,16 @@ impl ActorStore {
     }
     pub(crate) fn actor_page(
         &self,
+        session: Option<&str>,
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ActorSummary>> {
         database_io(|| {
             let db = self.db.lock();
             let mut stmt =
-                sql(db.prepare("SELECT record FROM actors WHERE id>?1 ORDER BY id LIMIT ?2"))?;
+                sql(db.prepare("SELECT record FROM actors WHERE id>?1 AND (?3 IS NULL OR json_extract(record,'$.session_id')=?3) ORDER BY id LIMIT ?2"))?;
             let rows = sql(stmt.query_map(
-                params![after.unwrap_or(""), limit.clamp(1, 101) as i64],
+                params![after.unwrap_or(""), limit.clamp(1, 101) as i64, session],
                 |r| r.get::<_, String>(0),
             ))?;
             rows.map(|r| Ok(decode::<ActorRecord>(sql(r)?)?.summary()))
@@ -698,6 +767,38 @@ impl ActorStore {
             self.commit(tx)
         })
     }
+    pub(crate) fn save_session_worker(
+        &self,
+        actor: &ActorRecord,
+        host: crate::stage::StageId,
+        scopes: &[SandboxScope],
+    ) -> Result<()> {
+        database_io(|| {
+            let mut db = self.db.lock();
+            let tx = sql(db.transaction())?;
+            save_actor(&tx, actor)?;
+            sql(tx.execute(
+                "INSERT INTO actor_session_hosts VALUES(?1,?2)",
+                params![actor.id, host.to_string()],
+            ))?;
+            crate::stage::session::record_fact(&tx, &actor.id)
+                .map_err(|e| miette::miette!("{e}"))?;
+            crate::sandbox::scopes::remember(&tx, scopes)?;
+            let account: Option<String> = sql(tx
+                .query_row("SELECT value FROM stage_meta WHERE key='root'", [], |r| {
+                    r.get(0)
+                })
+                .optional())?;
+            if let Some(account) = account {
+                let root: crate::stage::identity::TrustRoot = decode(account)?;
+                sql(tx.execute(
+                    "INSERT INTO stage_account_actors(actor,account) VALUES(?1,?2)",
+                    params![actor.id, root.group_id],
+                ))?;
+            }
+            self.commit(tx)
+        })
+    }
     pub(crate) fn restore_actor_workspace(
         &self,
         actor_id: &str,
@@ -733,7 +834,7 @@ impl ActorStore {
             let tx = sql(db.transaction())?;
             let message = message_tx(&tx, message_id)?;
             let mut actor = actor_tx(&tx, actor_id)?;
-            if actor_id == crate::stage::shared::ACTOR_ID
+            if actor.role == ActorRole::Session
                 || actor.remote_read_only
                 || message.actor_id != actor_id
                 || message.status != MessageStatus::Running
@@ -760,6 +861,16 @@ impl ActorStore {
         sender: &str,
     ) -> Result<std::collections::HashSet<String>> {
         database_io(|| account_actor_ids_db(&self.db.lock(), sender))
+    }
+    pub(crate) fn session_member(
+        &self,
+        session: &str,
+        actor: &str,
+        stage: crate::stage::StageId,
+    ) -> Result<bool> {
+        database_io(|| {
+            sql(self.db.lock().query_row("SELECT EXISTS(SELECT 1 FROM session_members WHERE session=?1 AND actor=?2 AND stage=?3)",params![session,actor,stage.to_string()],|r|r.get(0)))
+        })
     }
     pub(crate) fn validate_new_actor_name(&self, parent: &str, name: &str) -> Result<()> {
         database_io(|| validate_new_actor_name_db(&self.db.lock(), parent, name))
@@ -798,8 +909,17 @@ impl ActorStore {
                 .parent_id
                 .as_deref()
                 .ok_or_else(|| ActorError::Invalid("Created Actor requires a parent".into()))?;
+            let parent_record = actor_tx(&tx, parent)?;
+            sessions::ensure_admission(&tx, &parent_record)?;
+            if parent_record.session_id != actor.session_id || actor.role != ActorRole::Worker {
+                return Err(ActorError::Forbidden(
+                    "Actor creation changed session ownership".into(),
+                )
+                .into());
+            }
             validate_new_actor_name_db(&tx, parent, &actor.config.name)?;
             save_actor(&tx, actor)?;
+            sql(tx.execute("INSERT INTO actor_session_hosts SELECT ?1,host FROM actor_session_hosts WHERE actor=?2",params![actor.id,parent]))?;
             if let Some(resource) = resource {
                 save_resource(&tx, resource, None)?;
             }
@@ -833,7 +953,7 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut actor = actor_tx(&tx, id)?;
-            if id == crate::stage::shared::ACTOR_ID {
+            if actor.role == ActorRole::Session {
                 return Err(ActorError::Conflict("Core cannot be archived".into()).into());
             }
             if archived {
@@ -980,9 +1100,6 @@ impl ActorStore {
                 |row| row.get::<_, Option<i64>>(0),
             ))?
             .ok_or_else(|| miette::miette!("Working context anchor is unavailable"))?;
-            if id == crate::stage::shared::ACTOR_ID && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')",[],|row|row.get::<_,bool>(0)))? {
-            return sql(db.query_row("SELECT COALESCE((SELECT o.ordinal FROM core_rows r JOIN core_order o ON o.entity=r.entity AND o.remote_key=r.remote_key WHERE r.entity='history' AND r.local_key=CAST(?1 AS TEXT)),4503599627370496+?1)",[local],|row|row.get(0)));
-        }
             Ok(local)
         })
     }
@@ -1022,13 +1139,7 @@ impl ActorStore {
         message: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(i64, String, AgentMessage)>> {
-        Ok(self
-            .history_page(actor, after, message, limit)?
-            .into_iter()
-            .take_while(|(seq, _, _)| {
-                actor != crate::stage::shared::ACTOR_ID || *seq < 4503599627370496
-            })
-            .collect())
+        self.history_page(actor, after, message, limit)
     }
     pub(crate) fn history_page(
         &self,
@@ -1039,13 +1150,7 @@ impl ActorStore {
     ) -> Result<Vec<(i64, String, AgentMessage)>> {
         database_io(|| {
             let db = self.db.lock();
-            let shared=actor == crate::stage::shared::ACTOR_ID && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')",[],|row|row.get::<_,bool>(0)))?;
-            let query = if shared {
-                "SELECT ordinal,message_id,record FROM (SELECT COALESCE((SELECT o.ordinal FROM core_rows r JOIN core_order o ON o.entity=r.entity AND o.remote_key=r.remote_key WHERE r.entity='history' AND r.local_key=CAST(h.seq AS TEXT)),4503599627370496+h.seq) AS ordinal,h.message_id,h.record FROM history h WHERE h.actor_id=?1) WHERE ordinal>?2 AND (?3 IS NULL OR message_id=?3) ORDER BY ordinal LIMIT ?4"
-            } else {
-                "SELECT seq,message_id,record FROM history WHERE actor_id=?1 AND seq>?2 AND (?3 IS NULL OR message_id=?3) ORDER BY seq LIMIT ?4"
-            };
-            let mut stmt = sql(db.prepare(query))?;
+            let mut stmt = sql(db.prepare("SELECT seq,message_id,record FROM history WHERE actor_id=?1 AND seq>?2 AND (?3 IS NULL OR message_id=?3) ORDER BY seq LIMIT ?4"))?;
             let rows = sql(stmt.query_map(
                 params![actor, after, message, limit.clamp(1, 128) as i64],
                 |row| {
@@ -1098,7 +1203,7 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let mut actor = actor_tx(&tx, actor_id)?;
-            if actor.status == ActorStatus::Archived {
+            if sessions::ensure_admission(&tx, &actor).is_err() {
                 return Ok(None);
             }
             if actor.status != ActorStatus::Idle {
@@ -1114,15 +1219,8 @@ impl ActorStore {
             ))? {
                 return Ok(None);
             }
-            let shared = actor_id == crate::stage::shared::ACTOR_ID
-            && sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')", [], |r| r.get::<_,bool>(0)))?;
-            let query = if shared {
-                "SELECT m.id FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' ORDER BY o.ordinal IS NULL,o.ordinal,m.seq LIMIT 1"
-            } else {
-                "SELECT id FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 1"
-            };
             let id = sql(tx
-                .query_row(query, [actor_id], |r| r.get::<_, String>(0))
+                .query_row("SELECT id FROM messages WHERE actor_id=?1 AND status='\"queued\"' ORDER BY seq LIMIT 1", [actor_id], |r| r.get::<_, String>(0))
                 .optional())?;
             let Some(id) = id else { return Ok(None) };
             let mut message = message_tx(&tx, &id)?;
@@ -1140,7 +1238,7 @@ impl ActorStore {
     pub fn message(&self, id: &str) -> Result<MessageRecord> {
         database_io(|| {
             let db = self.db.lock();
-            let mut message: MessageRecord = decode(
+            let message: MessageRecord = decode(
                 sql(db
                     .query_row("SELECT record FROM messages WHERE id=?1", [id], |r| {
                         r.get(0)
@@ -1148,12 +1246,6 @@ impl ActorStore {
                     .optional())?
                 .ok_or_else(|| missing("Message"))?,
             )?;
-            if message.actor_id == crate::stage::shared::ACTOR_ID
-            && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')", [], |r| r.get::<_,bool>(0)))?
-        {
-            if message.kind == MessageKind::Delivery && !sql(db.query_row("SELECT EXISTS(SELECT 1 FROM core_rows WHERE entity='messages' AND remote_key=?1)",[id],|r|r.get::<_,bool>(0)))? { return Err(missing("Committed message")); }
-            message.seq = sql(db.query_row("SELECT COALESCE((SELECT ordinal FROM core_order WHERE entity='messages' AND remote_key=?1),4503599627370496+(SELECT seq FROM messages WHERE id=?1))", [id], |r| r.get(0)))?;
-        }
             Ok(message)
         })
     }
@@ -1245,13 +1337,7 @@ impl ActorStore {
         database_io(|| {
             let db = self.db.lock();
             let limit = limit.clamp(1, 100);
-            let shared = actor == crate::stage::shared::ACTOR_ID && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')",[],|r|r.get::<_,bool>(0)))?;
-            let query = if shared {
-                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND m.status='\"queued\"' AND json_extract(m.record,'$.kind')!='delivery' AND position>?2 ORDER BY position LIMIT ?3"
-            } else {
-                "SELECT record,seq FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')!='delivery' AND seq>?2 ORDER BY seq LIMIT ?3"
-            };
-            let mut statement = sql(db.prepare(query))?;
+            let mut statement = sql(db.prepare("SELECT record,seq FROM messages WHERE actor_id=?1 AND status='\"queued\"' AND json_extract(record,'$.kind')!='delivery' AND seq>?2 ORDER BY seq LIMIT ?3"))?;
             let rows = sql(statement.query_map(
                 params![actor, after.unwrap_or(0), (limit + 1) as i64],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
@@ -1350,14 +1436,7 @@ impl ActorStore {
         database_io(|| {
             let limit = limit.clamp(1, 100);
             let db = self.db.lock();
-            let shared = id == crate::stage::shared::ACTOR_ID
-            && sql(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_order')", [], |r| r.get::<_,bool>(0)))?;
-            let query = if shared {
-                "SELECT m.record,COALESCE(o.ordinal,4503599627370496+m.seq) AS position FROM messages m LEFT JOIN core_order o ON o.entity='messages' AND o.remote_key=m.id WHERE m.actor_id=?1 AND (json_extract(m.record,'$.kind')!='delivery' OR EXISTS(SELECT 1 FROM core_meta WHERE key='local_mode' AND value='1') OR EXISTS(SELECT 1 FROM core_rows r WHERE r.entity='messages' AND r.remote_key=m.id)) AND position<?2 ORDER BY position DESC LIMIT ?3"
-            } else {
-                "SELECT record,seq FROM messages WHERE actor_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"
-            };
-            let mut stmt = sql(db.prepare(query))?;
+            let mut stmt = sql(db.prepare("SELECT record,seq FROM messages WHERE actor_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3"))?;
             let rows = sql(stmt.query_map(
                 params![id, before.unwrap_or(i64::MAX), (limit + 1) as i64],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
@@ -1446,16 +1525,6 @@ impl ActorStore {
         record: &EventRecord,
     ) -> Result<()> {
         database_io(|| {
-            // Also reject duplicate Core message notices from older peers. Core is
-            // one account conversation, never a separately hosted remote inbox.
-            if record.actor_id == crate::stage::shared::ACTOR_ID
-                && matches!(
-                    record.event,
-                    ActorEvent::MessageAdded { .. } | ActorEvent::MessageUpdated { .. }
-                )
-            {
-                return Ok(());
-            }
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             sql(tx.execute_batch("CREATE TABLE IF NOT EXISTS stage_notice_seen(stage TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(stage,seq));"))?;
@@ -1558,7 +1627,7 @@ impl ActorStore {
     ) -> Result<Vec<EventRecord>> {
         database_io(|| {
             let db = self.db.lock();
-            let mut stmt=sql(db.prepare("SELECT seq,actor_id,created_at,record FROM events WHERE seq>?1 AND (?2 IS NULL OR actor_id=?2) AND (?3=0 OR json_extract(record,'$.type') IN ('actor_changed','actor_deleted','approval_requested','approval_resolved','message_added','message_updated')) ORDER BY seq LIMIT ?4"))?;
+            let mut stmt=sql(db.prepare("SELECT seq,actor_id,created_at,record FROM events WHERE seq>?1 AND (?2 IS NULL OR actor_id=?2) AND (?3=0 OR json_extract(record,'$.type') IN ('session_changed','session_deleted','actor_changed','actor_deleted','approval_requested','approval_resolved','message_added','message_updated')) ORDER BY seq LIMIT ?4"))?;
             let rows = sql(stmt.query_map(
                 params![after, actor, catalog, limit.clamp(1, 100) as i64],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?)),
@@ -1571,6 +1640,8 @@ impl ActorStore {
                     && !matches!(
                         &value,
                         ActorEvent::ActorChanged { .. }
+                            | ActorEvent::SessionChanged { .. }
+                            | ActorEvent::SessionDeleted { .. }
                             | ActorEvent::ActorDeleted { .. }
                             | ActorEvent::MessageUpdated { .. }
                             | ActorEvent::MessageAdded { .. }
@@ -1843,7 +1914,7 @@ impl ActorStore {
             };
             sql(tx.execute("INSERT INTO tools(id,actor_id,message_id,call_id,record,done) VALUES(?1,?2,?3,?4,?5,0)",params![result.id,actor_id,message_id,call.id,encode(&result)?]))?;
             if native {
-                tool_provenance::insert(&tx, &result, read_only, None)?;
+                tool_provenance::insert(&tx, &result, read_only)?;
             }
             event(
                 &tx,
@@ -2128,18 +2199,13 @@ impl ActorStore {
     ) -> Result<Option<MessageRecord>> {
         database_io(|| {
             let db = self.db.lock();
-            let shared = core_requires_commit(&db)?;
-            let data: Option<String> = if actor == crate::stage::shared::ACTOR_ID && shared {
-                sql(db.query_row("SELECT CAST(record AS TEXT) FROM core_rows WHERE entity='messages' AND remote_key=?1",[delivery_id(actor,input,call)],|r|r.get(0)).optional())?
-            } else {
-                sql(db
-                    .query_row(
-                        "SELECT record FROM messages WHERE id=?1",
-                        [delivery_id(actor, input, call)],
-                        |r| r.get(0),
-                    )
-                    .optional())?
-            };
+            let data: Option<String> = sql(db
+                .query_row(
+                    "SELECT record FROM messages WHERE id=?1",
+                    [delivery_id(actor, input, call)],
+                    |r| r.get(0),
+                )
+                .optional())?;
             data.map(decode).transpose()
         })
     }
@@ -2150,19 +2216,12 @@ impl ActorStore {
             let mut db = self.db.lock();
             let tx = sql(db.transaction())?;
             let message = message_tx(&tx, id)?;
-            if message.actor_id != crate::stage::shared::ACTOR_ID
+            if actor_tx(&tx, &message.actor_id)?.role != ActorRole::Session
                 || message.kind != MessageKind::Delivery
             {
                 return Ok(());
             }
-            let shared = core_requires_commit(&tx)?;
-            if shared {
-                let committed:bool=sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM core_rows WHERE entity='messages' AND remote_key=?1)",[id],|r|r.get(0)))?;
-                if !committed {
-                    return Err(ActorError::Unavailable("Delivery has not committed".into()).into());
-                }
-            }
-            let published:bool=sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE actor_id='core' AND json_extract(record,'$.type')='message_added' AND json_extract(record,'$.message_id')=?1)",[id],|r|r.get(0)))?;
+            let published:bool=sql(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE actor_id=?2 AND json_extract(record,'$.type')='message_added' AND json_extract(record,'$.message_id')=?1)",params![id,message.actor_id],|r|r.get(0)))?;
             if !published {
                 event(
                     &tx,
@@ -2266,7 +2325,7 @@ impl ActorStore {
                 return Ok(existing);
             }
             let delivery = insert_message(&tx, delivery)?;
-            if delivery.actor_id != crate::stage::shared::ACTOR_ID
+            if actor_tx(&tx, &delivery.actor_id)?.role != ActorRole::Session
                 || delivery.kind != MessageKind::Delivery
             {
                 crate::stage::delivery::finished(&tx, &delivery)

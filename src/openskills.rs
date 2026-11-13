@@ -1167,7 +1167,7 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect();
         let expected: &[&str] = if cfg!(target_os = "windows") {
-            &["browser-use", "mcp-server-install", "windows-gui-use"]
+            &["browser-use", "mcp-server-install"]
         } else if cfg!(target_os = "macos") {
             &["browser-use", "macos-gui-use", "mcp-server-install"]
         } else if cfg!(target_os = "android") {

@@ -2,7 +2,7 @@ import { addMessage, emitEvent, now, ROOT_ACTOR_ID, setActorStatus, store, touch
 import type { MessageRecord } from "../src/lib/actor-api";
 
 let phase = 0;
-const total = 6;
+const total = 5;
 export function seedCoreMotionPreview(core: ActorStore) {
   phase = 0;
   const input = addMessage(core,{kind:"request",source:{kind:"user"},reply_to:{kind:"user"},content:"Please review the page layout.",status:"completed"});
@@ -20,15 +20,11 @@ export function advanceCoreMotionPreview() {
     touchMessage(input,{status:"running",started_at_ms:now()});
     emitEvent(core.summary.id,{type:"message_updated",message_id:input.id,status:"running"});
     setActorStatus(core,"running");
-  } else if (phase === 4 || phase === 5) {
+  } else {
     const input = core.messages[phase===4?1:2];
     touchMessage(input,{status:"completed",finished_at_ms:now(),reply:phase===4?"Added transitions for new messages and position changes. Old delivery receipts fade away.":"Understood. New messages appear immediately, with the thinking indicator at the end."});
     emitEvent(core.summary.id,{type:"message_updated",message_id:input.id,status:"completed"});
     if (phase === 5) setActorStatus(core,"idle");
-  } else {
-    // Disposable mock history demonstrates removal and receipt reappearance.
-    core.messages.pop();
-    emitEvent(core.summary.id,{type:"conversation_restored",archive_id:"mock-motion"});
   }
   return {phase,total,done:phase===total,input:null};
 }

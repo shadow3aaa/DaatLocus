@@ -141,7 +141,7 @@ impl SystemPrompt {
         context: &AppToolExecutionContext,
     ) -> Result<Self> {
         let mut prompt = Self::default();
-        let core = actor.id == crate::stage::shared::ACTOR_ID;
+        let core = actor.role == super::ActorRole::Session;
         // Core executes nothing itself; its directory only seeds new Actors.
         prompt.push("actor.md", if core {
             format!(
@@ -243,11 +243,6 @@ mod tests {
                 .map(|file| file.name.as_str())
                 .collect::<Vec<_>>(),
             ["core.md", "actors.md"],
-        );
-        assert!(
-            prompt
-                .render()
-                .starts_with("You are DaatLocus, Alice's assistant.")
         );
         assert!(!prompt.render().contains("{{account_name}}"));
         assert_eq!(

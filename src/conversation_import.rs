@@ -353,7 +353,7 @@ mod tests {
             uri: format!("/v1/actors/root/resources/{}", resource.id),
         };
         system
-            .send_user("root", "Import conversation".into(), vec![attachment], None)
+            .test_actor_input("root", "Import conversation".into(), vec![attachment], None)
             .unwrap();
         let input = system.store().claim_next("root").unwrap().unwrap();
         let context = system.execution_context(&parent, &input).unwrap();

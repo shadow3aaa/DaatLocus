@@ -23,7 +23,7 @@ async fn capabilities(
 ) -> ApiResult<Json<serde_json::Value>> {
     owner(&state, &headers).await?;
     Ok(Json(
-        serde_json::json!({"supported":cfg!(any(windows, target_os="android", target_os="macos"))}),
+        serde_json::json!({"supported":cfg!(any(target_os="android", target_os="macos"))}),
     ))
 }
 async fn catalog(

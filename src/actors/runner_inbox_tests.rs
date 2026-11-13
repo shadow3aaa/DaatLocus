@@ -43,7 +43,7 @@ async fn messages_during_inference_wait_for_tools_then_settle_without_unwinding_
         let mut updates = Vec::new();
         for index in 0..2 {
             let parent = system
-                .send_user("root", format!("Parent input {index}"), vec![], None)
+                .test_actor_input("root", format!("Parent input {index}"), vec![], None)
                 .unwrap();
             let mut update = original.clone();
             update.id = uuid::Uuid::new_v4().to_string();
@@ -224,7 +224,7 @@ async fn queued_owner_messages_are_combined_without_losing_images_or_history() {
         uri: resource.uri("root"),
     };
     let first = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Inspect the first item".into(),
             vec![image.clone()],
@@ -232,7 +232,7 @@ async fn queued_owner_messages_are_combined_without_losing_images_or_history() {
         )
         .unwrap();
     let second = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Also inspect the second item".into(),
             vec![image],
@@ -240,7 +240,7 @@ async fn queued_owner_messages_are_combined_without_losing_images_or_history() {
         )
         .unwrap();
     let third = system
-        .send_user("root", "Give one combined answer".into(), vec![], None)
+        .test_actor_input("root", "Give one combined answer".into(), vec![], None)
         .unwrap();
     provider
         .replies
@@ -299,10 +299,10 @@ async fn queued_owner_messages_are_combined_without_losing_images_or_history() {
 async fn cancelling_one_received_input_preserves_other_inputs_and_completed_effects() {
     let (_directory, system, provider) = paused_runtime().await;
     let first = system
-        .send_user("root", "Write the first result".into(), vec![], None)
+        .test_actor_input("root", "Write the first result".into(), vec![], None)
         .unwrap();
     let second = system
-        .send_user(
+        .test_actor_input(
             "root",
             "Then inspect the remaining result".into(),
             vec![],
@@ -379,10 +379,10 @@ async fn cancelling_one_received_input_preserves_other_inputs_and_completed_effe
 async fn context_handoff_keeps_every_unfinished_input_locator() {
     let (_directory, system, provider) = paused_runtime().await;
     let first = system
-        .send_user("root", "First unfinished task".into(), vec![], None)
+        .test_actor_input("root", "First unfinished task".into(), vec![], None)
         .unwrap();
     let second = system
-        .send_user("root", "Second unfinished task".into(), vec![], None)
+        .test_actor_input("root", "Second unfinished task".into(), vec![], None)
         .unwrap();
     let input = system.store().claim_next("root").unwrap().unwrap();
     system.store().receive_inputs(&input.id).unwrap();
@@ -433,20 +433,39 @@ async fn buffered_inputs_keep_hard_authorities_separate_without_using_reply_targ
     });
     let remote = system.store().enqueue(remote, None).unwrap();
     let local = enqueue_root(&system, "Local authority after remote input");
-    for input in [&owner, &collaboration, &remote, &local] {
-        assert_eq!(system.store().active_input(&input.id).unwrap().id, input.id);
-        let received = system.store().receive_inputs(&input.id).unwrap();
-        assert_eq!(
-            received.iter().map(|m| &m.id).collect::<Vec<_>>(),
-            [&input.id]
-        );
+    assert_eq!(system.store().active_input(&owner.id).unwrap().id, owner.id);
+    let received = system.store().receive_inputs(&owner.id).unwrap();
+    assert_eq!(
+        received.iter().map(|m| &m.id).collect::<Vec<_>>(),
+        [&owner.id, &collaboration.id]
+    );
+    system
+        .store()
+        .finish_execution(&owner.id, MessageStatus::Completed, None, None)
+        .unwrap();
+
+    let remote_active = system.store().claim_next("root").unwrap().unwrap();
+    assert_eq!(remote_active.id, remote.id);
+    assert_eq!(
         system
             .store()
-            .finish_execution(&input.id, MessageStatus::Completed, None, None)
-            .unwrap();
-        if input.id != local.id {
-            system.store().claim_next("root").unwrap().unwrap();
-        }
-    }
+            .receive_inputs(&remote.id)
+            .unwrap()
+            .iter()
+            .map(|m| &m.id)
+            .collect::<Vec<_>>(),
+        [&remote.id]
+    );
+    system
+        .store()
+        .finish_execution(&remote.id, MessageStatus::Completed, None, None)
+        .unwrap();
+
+    let local_active = system.store().claim_next("root").unwrap().unwrap();
+    assert_eq!(local_active.id, local.id);
+    system
+        .store()
+        .finish_execution(&local.id, MessageStatus::Completed, None, None)
+        .unwrap();
     system.shutdown().await;
 }

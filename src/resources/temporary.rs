@@ -109,7 +109,7 @@ pub(super) fn publish_output(
 /// directory broker rejects symlinks and reparse ancestors during deletion.
 pub(crate) fn cleanup_expired(system: &ActorSystem, now: i64) -> Result<usize> {
     let _installation = INSTALLATION.lock();
-    let expired: Vec<StoredResource> = system.store().coordination_transaction(|tx| {
+    let expired: Vec<StoredResource> = system.store().stage_transaction(|tx| {
         let records = tx
             .prepare(
                 "SELECT record FROM resources WHERE json_extract(record,'$.expires_at_ms')<=?1",
@@ -147,11 +147,6 @@ pub(crate) fn cleanup_expired(system: &ActorSystem, now: i64) -> Result<usize> {
                     params![resource.actor_id, resource.id, now])?;
                 tx.execute("DELETE FROM stage_resources WHERE actor=?1 AND id=?2", params![resource.actor_id, resource.id])?;
                 tx.execute("DELETE FROM stage_resource_files WHERE actor=?1 AND id=?2", params![resource.actor_id, resource.id])?;
-                if resource.actor_id == crate::stage::shared::ACTOR_ID
-                    && tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='core_dirty')", [], |row| row.get::<_, bool>(0))?
-                {
-                    tx.execute("DELETE FROM core_dirty WHERE entity='resources' AND local_key=?1", [&resource.id])?;
-                }
                 Ok(())
             })?;
             Ok(())
@@ -224,7 +219,6 @@ mod tests {
         system.seed_test_actor("other");
         (directory, system)
     }
-
     #[tokio::test]
     async fn storage_beyond_the_former_quota_accepts_durable_resources_and_complete_temporary_output()
      {
@@ -367,35 +361,6 @@ mod tests {
         );
         source.shutdown().await;
         target.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn expiration_before_checkpoint_capture_does_not_leave_a_missing_dirty_record() {
-        let (_directory, system) = fixture().await;
-        system.ensure_core_actor().unwrap();
-        crate::stage::shared_store::initialize(system.store(), "expiry-account").unwrap();
-        let created = chrono::Utc::now().timestamp_millis();
-        let resource = publish_output(
-            &system,
-            "core",
-            "pending-checkpoint",
-            "complete output",
-            created,
-        )
-        .unwrap();
-        assert_eq!(cleanup_expired(&system, created + 86_400_000).unwrap(), 1);
-        let pending = crate::stage::shared_store::capture(
-            system.store(),
-            "expiry-account",
-            crate::stage::StageId::new(),
-            1,
-        )
-        .unwrap();
-        assert!(
-            pending
-                .is_none_or(|batch| batch.changes.iter().all(|change| change.key != resource.id))
-        );
-        system.shutdown().await;
     }
 
     #[tokio::test]

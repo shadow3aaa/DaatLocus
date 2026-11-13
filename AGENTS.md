@@ -9,23 +9,24 @@ The shared WebUI runs in the Windows/macOS Tauri client and optional browser ent
 The Actor/App backend, durable routing, incremental HTTP API and conversation
 client are connected.
 
-- Core has the fixed IM presentation; every other Actor has the work presentation,
-  including when opened in the main window. Reuse data/control hooks, not a
-  container-dependent rendering mode. A narrow app navigation rail contains Home,
-  Apps, Contacts, the native shared Browser workspace, device-local Virtual Displays on Windows/Android, and the account menu;
-  mobile uses a modal navigation drawer. There is one Core
-  entry, no session/chat catalog or permanent Actor sidebar. Actor references
-  open a conversation dialog. Contacts is a separate observation page for account Actors,
-  with name and visible-bubble search; it exposes no Actor configuration or input.
+- A session is one session Core plus the worker Actors it creates. Session Cores
+  have the fixed IM presentation; workers have the work presentation, including
+  when opened in the main window. Reuse data/control hooks, not a
+  container-dependent rendering mode. A narrow app navigation rail contains New
+  session, Sessions, Apps, the native shared Browser workspace, device-local
+  Virtual Displays on macOS/Android, and the account menu; mobile uses a modal
+  navigation drawer. The session list shows active and archived sessions of every
+  reachable account device. There is no Contacts page or account-wide Actor
+  catalog. Worker references open a conversation dialog over their session.
   Settings use full-page categories.
 - Virtual Displays is an Owner-only observation of existing device outputs, with
   transient image bytes rather than Actor resources. Viewing never creates or
   reconfigures screens, reconnects privileged transports, requests permissions or
   grants input control. Stop refreshing while the view is closed or backgrounded.
-- Only Core accepts Owner conversation input. Other Actor pages are observation
+- Only session Cores accept Owner conversation input. Worker pages are observation
   views; they expose no composer or direct Owner message/attachment endpoints.
-  Actor-to-Actor messages and delegation remain available.
-- Core uses a rounded multiline composer with attachments, a model selector
+  Actor-to-Actor messages and delegation remain available within a session.
+- Session Cores use a rounded multiline composer with attachments, a model selector
   and send/cancel controls. Preserve drafts when a send or upload fails.
 - Derive local message/activity views from semantic events. Fetch heavy details
   on expansion and reconnect streams from the last consumed event cursor.
@@ -47,15 +48,16 @@ client are connected.
 - Enforce account ownership, authenticated remote authority and sandbox access at
   every operation. Restrictive process isolation must fail
   closed when the platform cannot enforce it.
-  The explicitly approved ComputerUse desktop capability is an exception to the
-  device filesystem sandbox: target GUI apps retain this Windows user's file
-  access. Keep this exception inside ComputerUse; MCP has the separate trusted
-  server boundary below, and sandboxed Apps retain their sandbox.
+  The explicitly approved macOS ComputerUse desktop capability is an exception to
+  the device filesystem sandbox: target GUI apps retain the OS owner's access.
+  Keep this exception inside ComputerUse; MCP has the separate trusted server
+  boundary below, and sandboxed Apps retain their sandbox.
   Reject read-only remote authority and exclude Daat Locus's own processes/windows.
 - Do not restore deleted modules merely to make the old product run or compile.
-- Do not recreate the old Session, RuntimeTool, Dashboard, Sleep, or Workflow
-  architecture through aliases, adapters, compatibility bridges, or renamed
-  Apps. Git history preserves the former implementation.
+- Sessions are session Core Actors, not a separate entity. Do not recreate the old
+  Session module, RuntimeTool, Dashboard, Sleep, or Workflow architecture through
+  aliases, adapters, compatibility bridges, or renamed Apps. Git history preserves
+  the former implementation.
 - SCOPE/LSP and Coding wrappers are removed. Files/Skills are ordinary scoped App
   operations without file-version hash arguments or observations. Do not restore
   the engine or retain its build, hooks, dependency or documentation requirements.
@@ -82,20 +84,22 @@ client are connected.
   effect. Cancel MCP requests by their protocol request ID and retain uncertain outcomes.
   Apps declare no action review requirements or permission fingerprints. Refresh only at settled tool-group
   boundaries or the next input, preserving Actor identity/history and unchanged Apps.
-  Core composes the portable Actors, AdminActors and SuperSkills Apps. Only Core receives
-  AdminActors and SuperSkills; Actors exposes the same tools and schemas for every Actor, including
-  device discovery and bounded account conversation reads.
+  Session Cores compose the portable Actors, AdminActors and SuperSkills Apps. Only session
+  Cores receive AdminActors and SuperSkills; Actors exposes the same tools and schemas for every
+  Actor, including device discovery and bounded conversation reads within its session.
   Other Actors receive every
   device-provided App; there are no Actor App or tool capability allowlists.
   Do not require a common `get_state` tool or a separate App workspace UI.
-- Core is the only preset Actor and the default entry. Every other Actor is
-  created and named by its creating Actor; never preset a device executor.
-  Owner can directly access any Actor
-  through its stable conversation link. Creation/ownership is an internal
-  permission relationship, not a user-visible access level.
+- There is no preset Actor. Owner creates sessions; each new session creates its
+  session Core on the device that hosts the session. Every worker is created and
+  named by an Actor of its session and belongs to exactly that session; never preset
+  a device executor. Workers cannot discover, message or delegate to another
+  session's Actors. Owner can directly access any Actor through its stable
+  conversation link. Creation/ownership is an internal permission relationship,
+  not a user-visible access level.
 - Ownership determines hierarchy; delegation does not change ownership or
   access. Results remain associated with the originating request.
-- The account Core directly exposes the portable Actors, AdminActors and SuperSkills Apps.
+- Each session Core directly exposes the portable Actors, AdminActors and SuperSkills Apps.
   SuperSkills provides bounded discovery, search and Skill-relative document reads on
   available account devices, including coordination Skills. Skill files stay device-local.
   Other Actors retain local Skills discovery and Files access. Hosted Actors
@@ -110,8 +114,8 @@ client are connected.
   instructions or filesystem roots. Assigned roles and task-specific instructions are
   adjustable working context, not permanent mandates. Non-Core Actors receive
   `worker.md` guidance to adapt roles and explicitly reply to role conflicts.
-  Owner model selection stays a conversation preference. Core may adjust hosted
-  Actor models through AdminActors, never its own. Changes preserve live App
+  Owner model selection stays a per-session conversation preference. A session Core
+  may adjust its workers' models through AdminActors, never its own. Changes preserve live App
   resources and apply before the next inference at a settled tool-group boundary. There is no account or Actor
   Full access / Ask / Auto selector. Actor creation happens through the Actors App,
   without permission inheritance, and may send the new Actor's first task in the
@@ -123,21 +127,24 @@ client are connected.
   use the unified sandbox authorization flow. The group is never Actor configuration
   or an Actor-specific permission set. Persist new Core grants with Actor creation;
   retain input authority, remote restrictions and canonical path bindings.
-- All Actors retain identity, configuration, context, and history outside an
-  explicit Owner account-wide work reset. This settings-only maintenance operation
-  stops execution, clears Actors, history, resources and grants across devices,
-  and recreates the initial Core; it preserves credentials, models, device trust
-  and workspace files. Signed reset generations fence old business traffic before
-  reconnecting replicas synchronize. Never expose reset to models or Apps, or add
-  individual Actor deletion in the client, HTTP API or native protocol.
+- All Actors retain identity, configuration, context, and history until their
+  session is deleted or an explicit Owner account-wide work reset. Reset is a
+  settings-only maintenance operation: it stops execution and clears sessions,
+  history, resources and grants on every reachable device, and creates no session;
+  it preserves credentials, models, device trust and workspace files. Signed reset
+  generations fence old business traffic from devices that reconnect later.
+  Never expose reset, session archival or deletion to models or Apps.
   Completion, idleness, restart or worker shutdown must not recycle an Actor.
-  Core may archive/unarchive hosted Actors only on an explicit Owner request,
-  without review. Archival no longer requires an idle Actor or an empty inbox:
-  queued inputs are discarded on archival and unfinished delegated work does not
-  block it; running work is left to finish. Persist the state and reject new
-  messages on every local/remote path.
-  Preserve identity, configuration, context, history, resources and grants.
-  Unarchive restores message admission without replay; Core cannot be archived.
+- Owner archives, unarchives and deletes whole sessions. Archival stops every
+  execution in the session, awaits cleanup and rejects new messages on every
+  local/remote path while preserving everything. Unarchive restores admission
+  without replay. Only an archived session can be deleted; deletion removes its
+  Actors, history, resources and events permanently. Individual Actors have no
+  deletion operation.
+  A session Core may archive/unarchive its workers only on an explicit Owner
+  request, without review. Worker archival discards queued inputs and does not
+  wait for delegated work; running work is left to finish. A session Core cannot
+  archive itself.
 - Project, investigation and general Actors use the same core and device Apps.
   Every Actor on a device uses the account's shared sandbox scopes. Workspace is
   an execution directory, never a permission boundary. Files and Terminal
@@ -152,18 +159,19 @@ client are connected.
   Remove device-direct LAN, SSH, WebRTC, ICE/STUN and hole-punching paths.
   The relay uses one portable WSS protocol on Cloudflare Workers/DO or an ordinary
   public server; it is transport infrastructure, not an execution authority.
-- Keep one shared WebUI for native and browser clients. Core shows explicit user deliveries,
-  decisions and outcomes; it excludes intermediate model
-  text and tool pipelines. Each request Core delegates appears there as a compact
+- Keep one shared WebUI for native and browser clients. A session Core shows explicit
+  user deliveries, decisions and outcomes; it excludes intermediate model
+  text and tool pipelines. Each request it delegates appears there as a compact
   task card with the recipient request's live status that opens the Actor
-  conversation. While hosted Actors work, a compact strip above the Core composer
-  and a count on Contacts open them; neither takes space when no Actor works.
+  conversation. While a session's workers run, a compact strip above its composer
+  and a count on its session list entry open them; neither takes space when no
+  worker runs.
   Other Actors interleave message bubbles, compact
   collapsible groups of consecutive tools and independent outcomes in chronological
   order. There is no elapsed-time bar or outer per-input activity disclosure.
   Activity lists flow in the conversation, without a nested scrolling box
   or fade mask. Actor popups never change this
-  identity-based presentation. Keep no session list, Actor sidebar or multi-page Dashboard.
+  identity-based presentation. Keep no Actor sidebar or multi-page Dashboard.
   Show outcomes and failures in their conversation; keep no separate new-update
   notification widget. Private provider diagnostics are not conversation prose.
 - Keep Skills as discoverable instruction resources accessed through Apps. Keep
@@ -176,35 +184,26 @@ profile-local daemon management are infrastructure, not separate business system
 
 ## Execution And Approval
 
-The account's core Actor is shared across devices. Devices share its identity,
-inbox, model context and conversation,
-provide App instances, and temporarily host its worker. Keep healthy affinity;
-automatically hand off in stable order to a synchronized eligible device on loss.
-Purely local accounts run the same Actor core without cross-device transport,
-consensus, replication or partition-recovery branches. Preserve local crash
-recovery, durable inputs and uncertain-effect protection. Interconnected accounts
-keep execution coordination on account devices over authenticated, end-to-end
-encrypted logical channels carried exclusively by the public relay. Worker/DO or
-an ordinary relay server must not own execution leases, fencing epochs or business commits. Device
-OpenRaft metadata uses persistent votes and joint membership, with authenticated
-native RPCs. New devices remain learners rather than permanent voting dependencies.
-Normal shutdown synchronizes and transfers authority through the existing quorum.
-Loss cannot invent a singleton quorum. A previously synchronized eligible device
-without reachable account authority automatically uses an explicit local recovery
-branch, retaining inputs and uncertain effects. Reconnection freezes execution,
-selects one valid inference context and transparently merges conversation messages
-and observations before committing a shared head. Private archives preserve the
-original branches; no manual history recovery UI is required. Never replay started
-work from a losing branch.
-A fresh single-device account runs locally. Availability during partition takes
-precedence over a global single-writer guarantee; local branches are not Raft commits.
-Ordinary Actors remain hosted. Never approximate the core
-by merging independent roots. Resume inference, never replay uncertain App effects.
-Every effect still requires device-side epoch, authenticated authority and sandbox checks.
-Sandbox expansion uses the unified review/application path.
+Every session and every Actor stays on the device that hosts it. Nothing replicates
+Actor identity, inbox, model context or conversation across devices; there is no
+execution affinity, handoff, consensus, partition-recovery branch or history merge.
+Other account devices use a session or Actor through authenticated remote invocation
+while its host device is reachable, and see it unavailable otherwise. A session
+Core may create workers on another reachable account device; they still belong to
+the session, and session archival/deletion reaches them when that device is next
+reachable. Interconnected accounts carry remote invocation over authenticated,
+end-to-end encrypted logical channels carried exclusively by the public relay.
+Worker/DO or an ordinary relay server must not own business state or commits.
+Account metadata (configuration, credentials, device trust and reset generations)
+synchronizes between devices without Actor replication. Preserve local crash
+recovery, durable inputs and uncertain-effect protection. Resume inference, never
+replay uncertain App effects. Every effect still requires device-side
+authenticated authority and sandbox checks. Sandbox expansion uses the unified
+review/application path.
 
-- Each Actor has one serial inference/tool execution stream; Actors advance concurrently.
-  Core uses AdminActors `stop` to stop a hosted Actor's whole current execution:
+- Each Actor has one serial inference/tool execution stream; Actors and sessions
+  advance concurrently. A session Core uses AdminActors `stop` to stop one of its
+  workers' whole current execution:
   atomically cancel every pending/running input and
   await worker/App cleanup. Keep identity, configuration, history and completed
   effects; later messages may start new work. Ordinary request `cancel` affects
@@ -228,7 +227,7 @@ Sandbox expansion uses the unified review/application path.
   retain recipient captions with a small recipient avatar. Creation
   and status queries use ordinary tool rows. Core hides Actor communications and
   tool rows; its delegations appear only as task cards.
-- Core is a router with coordination tools only; it never executes device, web or
+- A session Core is a router with coordination tools only; it never executes device, web or
   code work itself. Its prompt states that structure, and it delegates such work
   without asking first, forwarding the user's original request and attachments
   with routing facts only; Actors own plans and technical choices. Core handles
@@ -246,12 +245,13 @@ Sandbox expansion uses the unified review/application path.
 - Record interrupted executions. Do not automatically replay App effects after
   restart, cancellation, configuration changes or resource shutdown.
 - Auto uses an independent model request without worker history or execution
-  tools on the current account Core worker, including for operations hosted on
-  another device. Review never changes Core affinity or uses its serial inbox.
+  tools on the device that executes the operation. Review never uses a session
+  Core's serial inbox.
   Its only decisions are approve/deny. Errors, timeouts and invalid
   responses deny the operation without blocking for human approval. After a denial,
-  the originating Actor may explicitly appeal its immutable approval ID to Core.
-  Core judges authorization from the account conversation and asks the Owner
+  the originating Actor may explicitly appeal its immutable approval ID to its
+  session Core ("Core" below). Core judges authorization from its session
+  conversation and asks the Owner
   when it is missing or unclear. It may resolve the appeal on any later active
   input, without a required reply format, delivery tool or message adjacency.
   Runtime trusts the current Core's decision, records its originating input and
@@ -343,9 +343,10 @@ Sandbox expansion uses the unified review/application path.
 - Re-check authorization for every live-stream emission and heartbeat, including
   expired/revoked account sessions. Register wakes before queries and
   respect consumer backpressure. No repeated full-runtime snapshots.
-- Owner accesses any Actor; conversation model preferences are user-editable. Core is the default entry; no Actor has a deletion
-  control. Conversation URLs locate an Actor and never grant access.
-  Owner decisions use Core conversation consent. No guest share authorization exists.
+- Owner accesses any Actor; session model preferences are user-editable. The client
+  opens a new or recent session; only archived sessions have a deletion control.
+  Conversation URLs locate an Actor and never grant access.
+  Owner decisions use session Core conversation consent. No guest share authorization exists.
 - Construct source/reply/authority metadata on the server. Accept only opaque
   attachment IDs; a client path or forged source cannot grant access.
 - Cookie writes require a trusted Origin and the request header; don't trust
@@ -585,4 +586,3 @@ schemas; do not silently repair them through provider-specific normalization.
   Keep architecture documents, task journals, screenshot handoff records,
   progress checklists and release-log Markdown out of the repository. Publish
   release notes on GitHub Releases. The repository needs no Git submodules.
-

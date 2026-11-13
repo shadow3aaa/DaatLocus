@@ -419,10 +419,27 @@ fn call(name: &str, arguments: Value) -> AgentToolCall {
     }
 }
 async fn actor_system(path: &std::path::Path) -> crate::actors::ActorSystem {
+    let mut config = crate::config::Config::default();
+    config.main_model = "fixture".into();
+    config.models.insert(
+        "fixture".into(),
+        crate::config::ModelConfig {
+            provider: "fixture".into(),
+            model_id: "fixture".into(),
+            ..Default::default()
+        },
+    );
+    config.providers.insert(
+        "fixture".into(),
+        crate::config::ProviderConfig::OpenaiCompatible {
+            base_url: "https://example.invalid".into(),
+            api_key: "unused-test-key".into(),
+        },
+    );
     crate::actors::ActorSystem::open_account_gated(
         path.join("state"),
         path.join("workspace"),
-        crate::config::Config::default(),
+        config,
     )
     .await
     .unwrap()
@@ -747,8 +764,15 @@ async fn stdio_uses_host_access_and_preserves_administrator_authority_and_proces
     }
     let directory = tempfile::tempdir().unwrap();
     let system = actor_system(directory.path()).await;
-    let mut context = system.owner_app_context().unwrap();
-    context.actor_call.as_mut().unwrap().actor_id = "test-actor".into();
+    let session = system.create_session(None, None, None).await.unwrap();
+    let input = system
+        .send_user(&session.id, "Install the MCP fixture".into(), vec![], None)
+        .unwrap();
+    system.store().claim_next(&session.id).unwrap().unwrap();
+    let mut context = system
+        .execution_context(&system.actor(&session.id).unwrap(), &input)
+        .unwrap();
+    context.actor_call.as_mut().unwrap().actor_id = session.id.clone();
     let workspace = system.device_workspace();
     std::fs::create_dir_all(workspace).unwrap();
     let source_file = workspace.join("fixture.rs");

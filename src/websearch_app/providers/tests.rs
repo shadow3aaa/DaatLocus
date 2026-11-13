@@ -285,3 +285,65 @@ async fn transport_rejects_nonpublic_targets_before_sending_credentials() {
         assert!(send(request).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn native_probe_only_falls_back_on_confirmed_unsupported_capabilities() {
+    for (status, body, unsupported) in [
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"message":"Unsupported tool type: web_search; private-key"}}),
+            true,
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"message":"Tools are not supported by this gateway"}}),
+            true,
+        ),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"error":{"message":"Not Found"}}),
+            true,
+        ),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"error":{"code":"model_not_found","message":"Model missing"}}),
+            false,
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"message":"Query too long"}}),
+            false,
+        ),
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({"error":{"message":"Bad API key"}}),
+            false,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error":{"message":"Rate limited"}}),
+            false,
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/search", listener.local_addr().unwrap());
+        let route = axum::Router::new().route(
+            "/search",
+            axum::routing::get(move || async move { (status, axum::Json(body)) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, route).await.unwrap();
+        });
+        let client = crate::http_client::builder().no_proxy().build().unwrap();
+        let response = client.get(endpoint).send().await.unwrap();
+        let error = read_response_mode(response, true).await.unwrap_err();
+        assert_eq!(
+            native_search_unsupported(&error),
+            unsupported,
+            "HTTP {status}"
+        );
+        assert!(!error.to_string().contains("private-key"));
+        server.abort();
+        let _ = server.await;
+    }
+}
