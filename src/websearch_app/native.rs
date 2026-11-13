@@ -251,17 +251,18 @@ fn openai_response(body: Value) -> Result<NativeResponse> {
     let mut answer = String::new();
     let mut citations = Vec::new();
     for item in output {
-        if item["type"] == "web_search_call" && item["status"] == "completed" {
-            if let Some(sources) = item["action"]["sources"].as_array() {
-                for source in sources {
-                    if let Some(url) = source["url"].as_str() {
-                        results.push(SearchResult {
-                            url: url.to_owned(),
-                            title: source["title"].as_str().unwrap_or_default().to_owned(),
-                            content: String::new(),
-                            published_at: None,
-                        });
-                    }
+        if item["type"] == "web_search_call"
+            && item["status"] == "completed"
+            && let Some(sources) = item["action"]["sources"].as_array()
+        {
+            for source in sources {
+                if let Some(url) = source["url"].as_str() {
+                    results.push(SearchResult {
+                        url: url.to_owned(),
+                        title: source["title"].as_str().unwrap_or_default().to_owned(),
+                        content: String::new(),
+                        published_at: None,
+                    });
                 }
             }
         }

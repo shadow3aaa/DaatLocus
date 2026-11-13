@@ -165,13 +165,12 @@ impl PeerChannel {
         authorize: impl Fn(&Envelope, &SendScope) -> Result<()> + Send + Sync + 'static,
     ) -> Self {
         let (reader, writer) = tokio::io::split(stream);
-        let channel = Self::new(
+        Self::new(
             peer,
             Box::new(StreamReader(reader, format)),
             Box::new(StreamWriter(writer, format)),
             authorize,
-        );
-        channel
+        )
     }
     fn new(
         peer: VerifiedPeer,
